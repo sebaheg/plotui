@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "plotui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Interactive 2D/3D plots in the terminal — Plotly-style, for Textual, powered by a Rust core and the Kitty graphics protocol."
 readme = "README.md"
 requires-python = ">=3.9"

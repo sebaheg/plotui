@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""End-to-end Textual example: an interactive 3D graph with a click-to-inspect
-sidebar.
+"""End-to-end Textual example: an interactive 3D graph with hover highlighting
+and a click-to-inspect sidebar.
 
     python examples/textual_graph.py
 
 - Drag to rotate, scroll to zoom, `r` to reset.
-- Click a node: a sidebar slides out on the right with that node's details.
+- Hover a node or an edge: it lights up white — that means it's clickable.
+- Click it: a sidebar slides in from the right with its details.
 - Click empty space or press `escape` to close it.
 
-Textual owns the loop and input; `PlotWidget` forwards events to the Rust core,
-renders the frame, and posts a `NodePicked` message on click. The node metadata
-(labels, neighbours) lives here in Python — the Rust core only returns the index
-of the node that was hit, keeping the engine purely numeric.
+Textual owns the loop and input; `PlotWidget` forwards events to the Rust core.
+Hover/click picking is opt-in via ``PlotWidget(..., pickable=True)`` — the
+widget then highlights whatever is under the cursor and posts
+``ElementHovered`` / ``ElementPicked`` messages carrying ``("node", i)`` or
+``("edge", i)``. The metadata (labels, neighbours) lives here in Python — the
+Rust core only returns indices, keeping the engine purely numeric.
 """
 from __future__ import annotations
 
@@ -80,9 +83,9 @@ class GraphApp(App):
         background: $panel;
         padding: 0 1;
     }
+    /* Width is animated inline by _open_sidebar/_close_sidebar (the slide);
+       the class only carries the visual accents. */
     #sidebar.open {
-        width: 40;
-        display: block;
         border-left: thick $accent;
     }
     #sb-title { color: $accent; text-style: bold; padding: 1 0 0 0; }
@@ -98,6 +101,8 @@ class GraphApp(App):
     def __init__(self) -> None:
         super().__init__()
         pts, edges, colors, self.meta = build_graph()
+        self.pts = pts
+        self.edges = edges
         self.plot = Plot()
         self.plot.add_graph3d(
             [p[0] for p in pts],
@@ -111,7 +116,7 @@ class GraphApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="body"):
-            yield PlotWidget(self.plot, id="plot")
+            yield PlotWidget(self.plot, id="plot", pickable=True)
             with Vertical(id="sidebar"):
                 yield Static("", id="sb-title")
                 yield Static("", id="sb-body")
@@ -121,12 +126,31 @@ class GraphApp(App):
     def on_mount(self) -> None:
         self.query_one("#plot", PlotWidget).focus()
 
-    @on(PlotWidget.NodePicked)
-    def _node_picked(self, message: PlotWidget.NodePicked) -> None:
-        idx = message.index
-        if idx is None or idx >= len(self.meta):
+    @on(PlotWidget.ElementHovered)
+    def _element_hovered(self, message: PlotWidget.ElementHovered) -> None:
+        # The widget already lights the element up white; mirror it in the
+        # header so the affordance is spelled out too.
+        el = message.element
+        if el is None:
+            self.sub_title = ""
+        elif el[0] == "node":
+            self.sub_title = f"{self.meta[el[1]]['label']} — click to inspect"
+        else:
+            a, b = self.edges[el[1]]
+            label = f"{self.meta[a]['label']}—{self.meta[b]['label']}"
+            self.sub_title = f"edge {label} — click to inspect"
+
+    @on(PlotWidget.ElementPicked)
+    def _element_picked(self, message: PlotWidget.ElementPicked) -> None:
+        el = message.element
+        if el is None:
             self._close_sidebar()
-            return
+        elif el[0] == "node":
+            self._show_node(el[1])
+        else:
+            self._show_edge(el[1])
+
+    def _show_node(self, idx: int) -> None:
         m = self.meta[idx]
         px, py, pz = m["pos"]
         self.query_one("#sb-title", Static).update(m["label"])
@@ -137,10 +161,38 @@ class GraphApp(App):
             f"neighbours ({len(m['neighbors'])}):\n"
             + (", ".join(m["neighbors"]) or "—")
         )
-        self.query_one("#sidebar").add_class("open")
+        self._open_sidebar()
+
+    def _show_edge(self, idx: int) -> None:
+        a, b = self.edges[idx]
+        ma, mb = self.meta[a], self.meta[b]
+        length = sum((self.pts[a][k] - self.pts[b][k]) ** 2 for k in range(3)) ** 0.5
+        self.query_one("#sb-title", Static).update(f"{ma['label']} — {mb['label']}")
+        self.query_one("#sb-body", Static).update(
+            f"edge index : {idx}\n"
+            f"endpoints  : {ma['label']} (deg {ma['degree']}), "
+            f"{mb['label']} (deg {mb['degree']})\n"
+            f"length     : {length:.3f}"
+        )
+        self._open_sidebar()
+
+    def _open_sidebar(self) -> None:
+        sidebar = self.query_one("#sidebar")
+        sidebar.add_class("open")
+        sidebar.styles.display = "block"
+        # Slide in from the right edge.
+        sidebar.styles.animate("width", value=40, duration=0.2, easing="out_cubic")
 
     def _close_sidebar(self) -> None:
-        self.query_one("#sidebar").remove_class("open")
+        sidebar = self.query_one("#sidebar")
+        sidebar.remove_class("open")
+
+        def hide() -> None:
+            sidebar.styles.display = "none"
+
+        sidebar.styles.animate(
+            "width", value=0, duration=0.15, easing="in_cubic", on_complete=hide
+        )
         self.plot.set_selected(None)
         self.query_one("#plot", PlotWidget).invalidate()
 

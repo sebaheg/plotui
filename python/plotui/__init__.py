@@ -8,7 +8,8 @@ Quick start::
 
     from plotui import Plot
     plot = Plot()
-    plot.add_scatter3d(xs, ys, zs, color=(230, 60, 120))
+    plot.add_line(xs, ys, name="forecast")     # 2D: axes/ticks/legend appear
+    plot.add_scatter3d(xs, ys, zs)             # any 3D trace -> orbit camera
     # In a raw loop: escape = plot.render_kitty(cols, rows, cell_w, cell_h)
     # In Textual:   use plotui.textual.PlotWidget(plot)
 """
@@ -16,4 +17,4 @@ Quick start::
 from ._plotui import Plot
 
 __all__ = ["Plot"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

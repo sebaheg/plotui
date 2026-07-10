@@ -42,8 +42,24 @@ pub struct KittyPlaceholder {
     pub rows: Vec<String>,
 }
 
-/// Encode `fb` as a Kitty image + placeholder cells for a `cols`×`rows` region.
-pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceholder {
+/// A Kitty image placed via per-cell Unicode placeholders. Unlike
+/// [`KittyPlaceholder`] — whose rows only address their first cell and rely on
+/// contiguity for the rest — every cell here carries its own row/column
+/// diacritics, so a frontend can splice foreign text into a row (label
+/// overlays) without breaking the addressing of the cells after the gap.
+pub struct KittyPlaceholderCells {
+    /// The image-upload escape; identical contract to [`KittyPlaceholder`].
+    pub transmit: String,
+    /// Foreground color encoding the image id; apply to every placeholder cell.
+    pub id_rgb: (u8, u8, u8),
+    /// `cells[y][x]` is the self-addressed placeholder string for cell (y, x).
+    pub cells: Vec<Vec<String>>,
+}
+
+/// The virtual-placement upload escape shared by both placeholder encoders:
+/// U=1 (shown only via placeholders), o=z zlib, c/r scale the source image to
+/// the cell region. Returns the escape and the id split for the placeholders.
+fn placeholder_transmit(fb: &Framebuffer, cols: u16, rows: u16) -> (String, (u8, u8, u8), u8) {
     let rgba = fb.rgba();
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
     let _ = enc.write_all(&rgba);
@@ -51,12 +67,10 @@ pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceho
     let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
     let (w, h) = (fb.w, fb.h);
 
-    // Image id is carried by the placeholder foreground color (low 24 bits) plus
-    // one "extra" high-byte diacritic.
+    // Image id is carried by the placeholder foreground color (low 24 bits)
+    // plus one "extra" high-byte diacritic.
     let [extra, id_r, id_g, id_b] = IMAGE_ID.to_be_bytes();
 
-    // Upload escape: U=1 = virtual placement (shown only via placeholders),
-    // o=z zlib, c/r scale the source image to the cell region.
     let mut transmit = String::with_capacity(b64.len() + 128);
     const CHUNK: usize = 4096;
     let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK).collect();
@@ -74,6 +88,12 @@ pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceho
         transmit.push_str(std::str::from_utf8(chunk).unwrap_or(""));
         transmit.push_str("\x1b\\");
     }
+    (transmit, (id_r, id_g, id_b), extra)
+}
+
+/// Encode `fb` as a Kitty image + placeholder cells for a `cols`×`rows` region.
+pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceholder {
+    let (transmit, id_rgb, extra) = placeholder_transmit(fb, cols, rows);
 
     // Placeholder rows. The first cell of each row carries (row, col=0, extra);
     // the rest inherit position by contiguity.
@@ -94,13 +114,57 @@ pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceho
         out_rows.push(s);
     }
 
-    KittyPlaceholder { transmit, id_rgb: (id_r, id_g, id_b), rows: out_rows }
+    KittyPlaceholder { transmit, id_rgb, rows: out_rows }
+}
+
+/// Encode `fb` as a Kitty image + a grid of individually addressed placeholder
+/// cells — the splice-safe variant for frontends that overlay text.
+pub fn kitty_placeholder_cells(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceholderCells {
+    let (transmit, id_rgb, extra) = placeholder_transmit(fb, cols, rows);
+
+    // Every cell is fully addressed: row diacritic, column diacritic, and —
+    // only when the image id needs a fourth byte — the "extra" diacritic.
+    // (Omitting a trailing zero diacritic is per the Kitty spec.)
+    let dextra = (extra != 0).then(|| DIACRITICS[extra as usize % DIACRITICS.len()]);
+    let mut cells = Vec::with_capacity(rows as usize);
+    for y in 0..rows as usize {
+        let drow = DIACRITICS[y % DIACRITICS.len()];
+        let mut row = Vec::with_capacity(cols as usize);
+        for x in 0..cols as usize {
+            let mut s = String::with_capacity(4 * 4);
+            s.push(PLACEHOLDER);
+            s.push(drow);
+            s.push(DIACRITICS[x % DIACRITICS.len()]);
+            if let Some(d) = dextra {
+                s.push(d);
+            }
+            row.push(s);
+        }
+        cells.push(row);
+    }
+
+    KittyPlaceholderCells { transmit, id_rgb, cells }
 }
 
 /// Encode a framebuffer as a Kitty graphics escape that draws the image at the
 /// current cursor position, scaled to span `cols`×`rows` cells. Cursor is saved
 /// and restored, so the caller's cursor position is preserved.
 pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
+    kitty_with_framing(fb, cols, rows, false)
+}
+
+/// Like [`kitty`], but repeats `q=2,i=<id>` on every continuation chunk.
+///
+/// The Kitty spec says continuation chunks carry only `m` (and `q`) — and
+/// that is exactly what iTerm2 fails to parse: it loses the association and
+/// silently drops the whole image (empirically: spec framing → nothing drawn,
+/// id-on-every-chunk → renders). Use this for terminals in the "direct" tier
+/// (iTerm2/WezTerm/Konsole); keep [`kitty`] for Kitty/Ghostty.
+pub fn kitty_compat(fb: &Framebuffer, cols: u16, rows: u16) -> String {
+    kitty_with_framing(fb, cols, rows, true)
+}
+
+fn kitty_with_framing(fb: &Framebuffer, cols: u16, rows: u16, id_every_chunk: bool) -> String {
     let rgba = fb.rgba();
 
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
@@ -118,6 +182,11 @@ pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
     let mut out = String::with_capacity(b64.len() + 256);
     // Save cursor so placement doesn't move the caller's cursor.
     out.push_str("\x1b[s");
+    // Every a=T creates a NEW placement — without this delete, each redraw
+    // stacks another copy on screen (and they outlive the app). Deleting our
+    // id first makes a frame REPLACE the previous one; inside a synchronized
+    // update the swap is invisible.
+    let _ = write!(out, "\x1b_Ga=d,d=i,i={IMAGE_ID},q=2\x1b\\");
 
     const CHUNK: usize = 4096;
     let bytes = b64.as_bytes();
@@ -128,11 +197,12 @@ pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
         if i == 0 {
             // a=T transmit+display, f=32 RGBA, o=z zlib, s/v source px size,
             // c/r target cell span (scales the image to fill the region).
-            // q=2 suppresses responses. Reusing IMAGE_ID replaces the prior image.
-            let _ = write!(
-                out,
-                "q=2,i={IMAGE_ID},a=T,f=32,o=z,s={w},v={h},c={cols},r={rows},"
-            );
+            // q=2 suppresses responses. The fixed image id (freshly deleted
+            // above) plus fixed placement id p=1 keep placements from ever
+            // accumulating, whichever mechanism the terminal honors.
+            let _ = write!(out, "q=2,i={IMAGE_ID},p=1,a=T,f=32,o=z,s={w},v={h},c={cols},r={rows},");
+        } else if id_every_chunk {
+            let _ = write!(out, "q=2,i={IMAGE_ID},");
         }
         let more = if i + 1 < n { 1 } else { 0 };
         let _ = write!(out, "m={more};");
