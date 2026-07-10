@@ -4,7 +4,7 @@
     python examples/textual_demo.py
 
 Textual owns the loop and input; the PlotWidget forwards events to the plot and
-renders through the half-block path. Drag to rotate, scroll to zoom, r to reset.
+renders full-resolution Kitty graphics. Drag to rotate, scroll to zoom, r to reset.
 """
 import math
 

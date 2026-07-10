@@ -21,7 +21,7 @@ camera, and asks for a frame.
 ```
 crates/
   plotui-core/      pure engine: data model, 3D camera, rasterizer → RGBA
-  plotui-protocol/  RGBA → terminal bytes (Kitty graphics; half-block fallback)
+  plotui-protocol/  RGBA → terminal bytes (Kitty graphics protocol)
   plotui-py/        PyO3 bindings → the `plotui._plotui` native module
 python/plotui/      the Python package + Textual `PlotWidget`
 examples/           raw_demo.py (Kitty images), textual_demo.py
@@ -52,11 +52,10 @@ python examples/textual_graph.py   # interactive graph: hover + click-to-inspect
 
 The Textual widget picks its render path per terminal: Unicode-placeholder
 Kitty graphics in Kitty/Ghostty, direct Kitty placement in iTerm2/WezTerm/
-Konsole (they speak the protocol but not placeholders). Terminals without
-Kitty graphics get a notice naming supported terminals — never a degraded
-plot. Override with `PLOTUI_RENDER=placeholder|direct|halfblock` or
-`PlotWidget(..., render_mode=...)` (`halfblock` is the low-fi text renderer,
-available only by explicit opt-in).
+Konsole (they speak the protocol but not placeholders). plotui only draws
+real pixels — terminals without Kitty graphics get a notice naming supported
+terminals, never a degraded plot. Override with
+`PLOTUI_RENDER=placeholder|direct` or `PlotWidget(..., render_mode=...)`.
 
 ## Python API
 
@@ -82,7 +81,7 @@ plot.reset()
 
 # Render (the frontend places the bytes):
 escape = plot.render_kitty(cols, rows, cell_w, cell_h)   # Kitty pixel image
-lines  = plot.render_halfblock(cols, rows)               # universal text fallback
+pixels = plot.render_rgba(px_w, px_h)                    # raw RGBA8 bytes
 ```
 
 Graphs take per-element styling, and the camera/projection state is fully
@@ -129,8 +128,8 @@ dispatches those to every class in the MRO, so both would run).
       click posts `ElementPicked`)
 - [ ] Hover / pick for 2D traces; spatial index for large graphs
 - [ ] numpy zero-copy input
-- [x] Graceful render-path auto-detection (placeholder / direct Kitty /
-      half-block, with `PLOTUI_RENDER` override)
+- [x] Graceful render-path auto-detection (placeholder / direct Kitty, with a
+      supported-terminals notice elsewhere and a `PLOTUI_RENDER` override)
 - [ ] Sixel + iTerm2 OSC 1337 encoders for terminals without Kitty graphics
 - [ ] Prebuilt wheels (maturin + cibuildwheel)
 - [ ] Bubble Tea (cgo) and Ratatui (native) frontends

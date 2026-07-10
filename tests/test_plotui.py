@@ -1,10 +1,29 @@
-"""End-to-end tests through the Python API (the wheel's public surface)."""
+"""End-to-end tests through the Python API (the wheel's public surface).
+
+Pixel-level assertions go through ``render_rgba`` — raw RGBA8 out of the
+engine, no escape sequences to parse.
+"""
 
 import math
 
 import pytest
 
 from plotui import Plot
+
+W, H = 120, 80  # default framebuffer size for pixel assertions
+
+
+def pixels(data: bytes):
+    return (data[i : i + 4] for i in range(0, len(data), 4))
+
+
+def has_color(plot: Plot, color: tuple[int, int, int], w: int = W, h: int = H) -> bool:
+    target = bytes(color) + b"\xff"
+    return any(px == target for px in pixels(plot.render_rgba(w, h)))
+
+
+def drawn_count(plot: Plot, w: int = W, h: int = H) -> int:
+    return sum(1 for px in pixels(plot.render_rgba(w, h)) if px[3] == 255)
 
 
 def demo_2d() -> Plot:
@@ -28,11 +47,13 @@ def test_import_and_version():
     assert plotui.Plot is Plot
 
 
-def test_halfblock_shape_2d_and_3d():
+def test_render_rgba_shape_2d_and_3d():
     for plot in (demo_2d(), demo_3d()):
-        out = plot.render_halfblock(80, 24)
-        assert isinstance(out, str)
-        assert len(out.split("\n")) == 24
+        data = plot.render_rgba(W, H)
+        assert isinstance(data, bytes)
+        assert len(data) == W * H * 4
+        assert any(px[3] == 255 for px in pixels(data)), "something is drawn"
+        assert any(px[3] == 0 for px in pixels(data)), "background stays transparent"
 
 
 def test_kitty_escape_structure():
@@ -52,27 +73,25 @@ def test_kitty_placeholder_structure():
 
 def test_2d_render_differs_from_camera_moves():
     plot = demo_2d()
-    before = plot.render_halfblock(80, 24)
+    before = plot.render_rgba(W, H)
     plot.zoom_by(2.0)
-    assert plot.render_halfblock(80, 24) != before
+    assert plot.render_rgba(W, H) != before
     plot.reset()
-    assert plot.render_halfblock(80, 24) == before
+    assert plot.render_rgba(W, H) == before
 
 
 def test_bars_and_explicit_colors():
     plot = Plot()
     plot.add_bar([0.0, 1.0, 2.0], [3.0, 1.0, 2.0], color=(201, 133, 0), name="load")
-    out = plot.render_halfblock(60, 20)
-    assert "201;133;0" in out, "explicit bar color must reach the terminal bytes"
+    assert has_color(plot, (201, 133, 0)), "explicit bar color must reach the pixels"
 
 
 def test_default_palette_assigns_distinct_colors():
     plot = Plot()
     plot.add_line([0.0, 1.0], [0.0, 1.0])
     plot.add_line([0.0, 1.0], [1.0, 0.0])
-    out = plot.render_halfblock(60, 20)
-    assert "57;135;229" in out, "palette slot 1 (blue)"
-    assert "25;158;112" in out, "palette slot 2 (aqua)"
+    assert has_color(plot, (57, 135, 229)), "palette slot 1 (blue)"
+    assert has_color(plot, (25, 158, 112)), "palette slot 2 (aqua)"
 
 
 def test_pick_roundtrip_3d():
@@ -85,9 +104,9 @@ def test_pick_roundtrip_3d():
     )
     # Some node must be pickable somewhere on screen: scan a coarse grid.
     hits = {
-        plot.pick(80, 24, float(c), float(r), radius=3.0)
-        for c in range(0, 80, 4)
-        for r in range(0, 24, 2)
+        plot.pick_px(160, 96, float(x), float(y), 6.0)
+        for x in range(0, 160, 4)
+        for y in range(0, 96, 4)
     }
     assert hits - {None}, "at least one node is pickable on screen"
     plot.set_selected(0)
@@ -98,18 +117,17 @@ def test_mismatched_lengths_are_truncated_not_fatal():
     plot = Plot()
     plot.add_line([0.0, 1.0, 2.0], [0.0, 1.0])  # extra x is dropped
     plot.add_scatter([], [])  # empty series is legal
-    assert plot.render_halfblock(40, 12)
+    assert len(plot.render_rgba(40, 24)) == 40 * 24 * 4
 
 
 def test_nan_data_does_not_crash():
     plot = Plot()
     plot.add_line([0.0, 1.0, float("nan"), 3.0], [0.0, float("inf"), 2.0, 3.0])
-    assert plot.render_halfblock(40, 12)
+    assert len(plot.render_rgba(40, 24)) == 40 * 24 * 4
 
 
 def test_kitty_cleanup_is_static():
     assert Plot.kitty_cleanup() == "\x1b_Ga=d,d=i,i=4242\x1b\\"
-
 
 
 def test_pick_element_finds_nodes_and_edges():
@@ -133,40 +151,41 @@ def test_pick_element_finds_nodes_and_edges():
 def test_hover_lights_up_white_and_reports_changes():
     plot = Plot()
     plot.add_graph3d([0.0, 5.0], [0.0, 5.0], [0.0, 5.0], edges=[(0, 1)])
-    plain = plot.render_halfblock(60, 20)
-    assert "255;255;255" not in plain
+    plain = plot.render_rgba(W, H)
+    assert not has_color(plot, (255, 255, 255))
 
     assert plot.set_hovered(("edge", 0)) is True
     assert plot.set_hovered(("edge", 0)) is False, "unchanged hover reports False"
-    assert "255;255;255" in plot.render_halfblock(60, 20), "hovered edge is white"
+    assert has_color(plot, (255, 255, 255)), "hovered edge is white"
 
     assert plot.set_hovered(("node", 1)) is True
-    assert "255;255;255" in plot.render_halfblock(60, 20), "hovered node is white"
+    assert has_color(plot, (255, 255, 255)), "hovered node is white"
 
     assert plot.set_hovered(None) is True
-    assert plot.render_halfblock(60, 20) == plain
+    assert plot.render_rgba(W, H) == plain
 
 
 def test_set_selected_accepts_legacy_ints_and_element_tuples():
     plot = Plot()
     plot.add_graph3d([0.0, 5.0], [0.0, 5.0], [0.0, 5.0], edges=[(0, 1)])
     plot.set_selected(0)  # legacy: bare int is a node
-    assert "255;255;255" in plot.render_halfblock(60, 20)
+    assert has_color(plot, (255, 255, 255))
     plot.set_selected(("edge", 0))
-    assert "255;255;255" in plot.render_halfblock(60, 20)
+    assert has_color(plot, (255, 255, 255))
     plot.set_selected(None)
-    assert "255;255;255" not in plot.render_halfblock(60, 20)
+    assert not has_color(plot, (255, 255, 255))
     with pytest.raises(ValueError):
         plot.set_selected(("vertex", 0))
+
 
 def test_camera_state_roundtrip_and_clamps():
     plot = demo_3d()
     plot.set_camera_state(2.0, 9.9, 500.0, 3.0, -4.0)
     assert plot.camera_state() == (2.0, 1.55, 50.0, 3.0, -4.0)
-    before = plot.render_halfblock(60, 20)
+    before = plot.render_rgba(W, H)
     other = demo_3d()
     other.set_camera_state(*plot.camera_state())
-    assert other.render_halfblock(60, 20) == before, "restored camera renders identically"
+    assert other.render_rgba(W, H) == before, "restored camera renders identically"
 
 
 def test_project_nodes_agrees_with_pick():
@@ -194,8 +213,7 @@ def test_node_sizes_and_edge_colors():
         node_sizes=[6.0, 1.0],
         edge_colors=[(9, 250, 9)],
     )
-    out = plot.render_halfblock(80, 40)
-    assert "9;250;9" in out, "explicit edge color reaches the terminal bytes"
+    assert has_color(plot, (9, 250, 9), 160, 80), "explicit edge color reaches the pixels"
     uniform = Plot()
     uniform.set_show_box(False)
     uniform.add_graph3d(
@@ -206,9 +224,7 @@ def test_node_sizes_and_edge_colors():
         node_colors=[(255, 255, 255), (255, 255, 255)],
         size=1.0,
     )
-    # Depth fog dims far nodes, so count drawn cells rather than pure white.
-    lit = lambda s: s.count("38;2;")  # noqa: E731
-    assert lit(out) > lit(uniform.render_halfblock(80, 40)), "node_sizes grows a node"
+    assert drawn_count(plot, 160, 80) > drawn_count(uniform, 160, 80), "node_sizes grows a node"
 
 
 def test_kitty_placeholder_cells_structure():

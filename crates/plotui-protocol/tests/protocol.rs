@@ -1,9 +1,7 @@
 //! Encoder tests: escape-sequence structure, not terminal behavior.
 
 use plotui_core::{Plot, PALETTE};
-use plotui_protocol::{
-    halfblock, kitty, kitty_cleanup, kitty_placeholder, kitty_placeholder_cells,
-};
+use plotui_protocol::{kitty, kitty_cleanup, kitty_placeholder, kitty_placeholder_cells};
 
 fn frame(w: usize, h: usize) -> plotui_core::Framebuffer {
     let mut p = Plot::new();
@@ -20,6 +18,7 @@ fn kitty_escape_is_wrapped_and_ids_the_image() {
     assert!(s.contains("i=4242"), "fixed image id for atomic replace");
     assert!(s.contains("s=80,v=40"), "source pixel size");
     assert!(s.contains("c=20,r=10"), "target cell region");
+    assert!(s.contains("z=-1"), "image sits below text so label overlays show");
 }
 
 #[test]
@@ -87,25 +86,6 @@ fn placeholder_cells_are_individually_addressed() {
     let mut row_marks: Vec<char> = p.cells.iter().map(|r| r[0].chars().nth(1).unwrap()).collect();
     row_marks.dedup();
     assert_eq!(row_marks.len(), 10);
-}
-
-#[test]
-fn halfblock_yields_one_line_per_cell_row() {
-    let out = halfblock(&frame(40, 40)); // 40px tall → 20 text rows
-    assert_eq!(out.lines().count(), 20);
-    assert!(out.contains("\u{2580}") || out.contains("\u{2584}"), "some pixels rendered");
-    for line in out.lines() {
-        assert!(line.ends_with("\x1b[0m"), "attributes reset per line");
-    }
-}
-
-#[test]
-fn halfblock_of_an_empty_plot_is_blank_but_shaped() {
-    let mut p = Plot::new();
-    p.show_box = false; // otherwise the 3D orientation box still draws
-    let out = halfblock(&p.render(10, 10));
-    assert_eq!(out.lines().count(), 5);
-    assert!(!out.contains('\u{2580}'));
 }
 
 #[test]

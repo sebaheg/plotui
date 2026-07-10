@@ -13,10 +13,8 @@ Rendering picks the best path for the terminal (see `detect_render_mode`):
   graphics protocol but not Unicode placeholders, so the image is drawn
   directly at the widget's origin instead — still full resolution.
 
-Terminals without Kitty graphics support get a message naming supported
-terminals rather than a degraded plot. The low-fi `▀` half-block renderer
-still exists, but only when explicitly requested (``PLOTUI_RENDER=halfblock``
-or ``render_mode="halfblock"``) — it is never auto-selected.
+plotui only draws real pixels: terminals without Kitty graphics support get
+a message naming supported terminals rather than a degraded plot.
 
 Set the ``PLOTUI_RENDER`` environment variable (or the widget's
 ``render_mode`` parameter) to override detection.
@@ -30,7 +28,6 @@ from rich.cells import cell_len
 from rich.color import Color
 from rich.segment import Segment
 from rich.style import Style
-from rich.text import Text
 from textual import events
 from textual.message import Message
 from textual.strip import Strip
@@ -48,7 +45,7 @@ _CELL_W, _CELL_H = 12, 24
 OverlaySpan = tuple[int, int, str, Style | None]
 
 
-RENDER_MODES = ("placeholder", "direct", "halfblock")
+RENDER_MODES = ("placeholder", "direct")
 
 # What the widget shows instead of a degraded plot when the terminal has no
 # Kitty graphics support (centered in the plot area).
@@ -56,7 +53,7 @@ _UNSUPPORTED_MESSAGE: tuple[tuple[str, Style | None], ...] = (
     ("Plotting requires a terminal that supports the Kitty graphics protocol.", Style(bold=True)),
     ("", None),
     ("Supported terminals include Kitty, Ghostty, iTerm2 (3.5+), and WezTerm.", None),
-    ("To force low-fi text rendering instead, set PLOTUI_RENDER=halfblock.", Style(dim=True)),
+    ("If yours does support it, force a path with PLOTUI_RENDER=placeholder|direct.", Style(dim=True)),
 )
 
 
@@ -79,8 +76,7 @@ def detect_render_mode(env: dict[str, str] | None = None) -> str:
     - ``"unsupported"``: no Kitty graphics — the widget shows a message
       naming supported terminals instead of degrading the plot.
 
-    ``PLOTUI_RENDER`` overrides detection with ``placeholder``, ``direct``,
-    or ``halfblock`` — the low-fi text renderer is only ever used when forced
+    ``PLOTUI_RENDER`` overrides detection with ``placeholder`` or ``direct``
     ("kitty" is accepted as an alias for "placeholder").
     """
     env = os.environ if env is None else env
@@ -164,7 +160,6 @@ class PlotWidget(Widget, can_focus=True):
         *,
         auto_rotate: bool = False,
         cell_px: tuple[int, int] = (_CELL_W, _CELL_H),
-        force_halfblock: bool = False,
         pickable: bool = False,
         render_mode: str = "auto",
         **kwargs,
@@ -175,8 +170,8 @@ class PlotWidget(Widget, can_focus=True):
         default so plots without click semantics pay no per-mouse-move cost.
 
         ``render_mode`` is ``"auto"`` (detect, honoring ``PLOTUI_RENDER``) or
-        one of ``"placeholder"`` / ``"direct"`` / ``"halfblock"`` to force a
-        path — see :func:`detect_render_mode`.
+        ``"placeholder"`` / ``"direct"`` to force a path — see
+        :func:`detect_render_mode`.
         """
         super().__init__(**kwargs)
         self._plot = plot
@@ -191,8 +186,6 @@ class PlotWidget(Widget, can_focus=True):
             if render_mode not in (*RENDER_MODES, "unsupported"):
                 raise ValueError(f"render_mode must be 'auto' or one of {RENDER_MODES}")
             self._mode = render_mode
-        elif force_halfblock:
-            self._mode = "halfblock"
         else:
             self._mode = detect_render_mode()
         # Frame cache, keyed on (w, h, version, mode) so we rasterize once per
@@ -202,7 +195,6 @@ class PlotWidget(Widget, can_focus=True):
         self._transmit = ""
         self._cells: list[list[str]] | None = None
         self._style: Style | None = None
-        self._strips: list[Strip] | None = None
         # Text overlay, row -> non-overlapping spans sorted by column. Kept
         # outside the frame cache: changing it never re-rasterizes the image.
         self._overlay: dict[int, list[tuple[int, str, Style | None]]] = {}
@@ -327,13 +319,6 @@ class PlotWidget(Widget, can_focus=True):
             self._transmit = self._plot.render_kitty(
                 w, h, self._cell_w, self._cell_h, compat_chunks=True
             )
-        else:
-            ansi = self._plot.render_halfblock(w, h)
-            console = self.app.console
-            self._strips = [
-                Strip(list(Text.from_ansi(line).render(console, end="")))
-                for line in ansi.split("\n")
-            ]
 
     def _kitty_row_segments(self, y: int, w: int) -> list[Segment]:
         """One row of placeholder cells with overlay spans spliced in. Every
@@ -358,7 +343,7 @@ class PlotWidget(Widget, can_focus=True):
         return segments
 
     def _spliced_strip(self, strip: Strip, y: int, w: int) -> Strip:
-        """The half-block strip for row `y` with overlay spans spliced in."""
+        """A row strip with overlay spans spliced in (direct-mode rows)."""
         spans = self._overlay.get(y)
         if not spans:
             return strip
@@ -414,24 +399,20 @@ class PlotWidget(Widget, can_focus=True):
             return Strip(
                 [*segments, *self._spliced_strip(Strip([Segment(" " * max(0, w))], w), y, w)], w
             )
-        if self._strips is not None and y < len(self._strips):
-            return self._spliced_strip(self._strips[y], y, w)
         return Strip([Segment(" " * max(0, w))], w)
 
     # ---- interaction ----
     def _pixel_geometry(self, x: int, y: int) -> tuple[int, int, float, float, float]:
-        """Map a cell coordinate into the framebuffer's pixel space for the
-        active render mode: `(px_w, px_h, px, py, node_radius)`."""
+        """Map a cell coordinate into the framebuffer's pixel space:
+        `(px_w, px_h, px, py, node_radius)`."""
         w, h = self.size.width, self.size.height
-        if self._mode in ("placeholder", "direct"):
-            return (
-                w * self._cell_w,
-                h * self._cell_h,
-                x * self._cell_w + self._cell_w / 2,
-                y * self._cell_h + self._cell_h / 2,
-                float(self._cell_h),
-            )
-        return (w, h * 2, x + 0.5, y * 2 + 1.0, 5.0)
+        return (
+            w * self._cell_w,
+            h * self._cell_h,
+            x * self._cell_w + self._cell_w / 2,
+            y * self._cell_h + self._cell_h / 2,
+            float(self._cell_h),
+        )
 
     def _pick_at(self, x: int, y: int) -> tuple[str, int] | None:
         px_w, px_h, px, py, radius = self._pixel_geometry(x, y)

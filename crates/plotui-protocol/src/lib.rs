@@ -3,11 +3,10 @@
 //! Pure: framebuffer + region size in → an escape-sequence `String` out. It
 //! never writes to a terminal; the frontend decides where/when to emit it.
 //!
-//! Two encoders:
-//! - [`kitty`]: the Kitty graphics protocol (also spoken by Ghostty/WezTerm).
-//!   zlib-compressed RGBA, so it stays small enough for SSH.
-//! - [`halfblock`]: a universal fallback using the `▀` half-block glyph — works
-//!   in any truecolor terminal, no image protocol required.
+//! All encoders speak the Kitty graphics protocol (also spoken by Ghostty,
+//! iTerm2, and WezTerm): zlib-compressed RGBA, so it stays small over SSH.
+//! plotui only draws real pixels — there is deliberately no low-fi text
+//! fallback; hosts show a "supported terminals" notice instead.
 //!
 //! NOTE: this first version uses Kitty's *direct* placement (image drawn at the
 //! cursor, sized to `cols`×`rows`). The flicker-free path for tight TUI
@@ -200,7 +199,14 @@ fn kitty_with_framing(fb: &Framebuffer, cols: u16, rows: u16, id_every_chunk: bo
             // q=2 suppresses responses. The fixed image id (freshly deleted
             // above) plus fixed placement id p=1 keep placements from ever
             // accumulating, whichever mechanism the terminal honors.
-            let _ = write!(out, "q=2,i={IMAGE_ID},p=1,a=T,f=32,o=z,s={w},v={h},c={cols},r={rows},");
+            // z=-1 draws the image below text glyphs (but above colored
+            // backgrounds, per the Kitty spec), so hosts can print labels
+            // over the plot — the direct-tier stand-in for the placeholder
+            // path's text splicing.
+            let _ = write!(
+                out,
+                "q=2,i={IMAGE_ID},p=1,a=T,f=32,o=z,z=-1,s={w},v={h},c={cols},r={rows},"
+            );
         } else if id_every_chunk {
             let _ = write!(out, "q=2,i={IMAGE_ID},");
         }
@@ -217,57 +223,4 @@ fn kitty_with_framing(fb: &Framebuffer, cols: u16, rows: u16, id_every_chunk: bo
 /// Escape sequence that deletes plotui's image from the terminal. Emit on exit.
 pub fn kitty_cleanup() -> String {
     format!("\x1b_Ga=d,d=i,i={IMAGE_ID}\x1b\\")
-}
-
-/// Universal fallback: render into `▀` half-block cells (top pixel = fg, bottom
-/// pixel = bg), two vertical pixels per character row. Returns `rows` lines.
-///
-/// The frontend should size the framebuffer to `cols*1 × rows*2` pixels for a
-/// 1:2 cell so this maps cleanly.
-pub fn halfblock(fb: &Framebuffer) -> String {
-    let rgba = fb.rgba();
-    let w = fb.w;
-    let h = fb.h;
-    let px = |x: usize, y: usize| -> Option<[u8; 3]> {
-        if x >= w || y >= h {
-            return None;
-        }
-        let i = (y * w + x) * 4;
-        if rgba[i + 3] == 0 {
-            None
-        } else {
-            Some([rgba[i], rgba[i + 1], rgba[i + 2]])
-        }
-    };
-    let mut out = String::new();
-    let rows = h / 2;
-    for cy in 0..rows {
-        for x in 0..w {
-            let top = px(x, cy * 2);
-            let bot = px(x, cy * 2 + 1);
-            match (top, bot) {
-                (None, None) => {
-                    let _ = write!(out, "\x1b[0m ");
-                }
-                (Some(t), None) => {
-                    let _ = write!(out, "\x1b[38;2;{};{};{}m\u{2580}", t[0], t[1], t[2]);
-                }
-                (None, Some(b)) => {
-                    let _ = write!(out, "\x1b[38;2;{};{};{}m\u{2584}", b[0], b[1], b[2]);
-                }
-                (Some(t), Some(b)) => {
-                    let _ = write!(
-                        out,
-                        "\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m\u{2580}",
-                        t[0], t[1], t[2], b[0], b[1], b[2]
-                    );
-                }
-            }
-        }
-        out.push_str("\x1b[0m");
-        if cy + 1 < rows {
-            out.push('\n');
-        }
-    }
-    out
 }

@@ -1,7 +1,8 @@
 """Headless Textual tests for PlotWidget's opt-in hover/click picking.
 
-Runs the real widget in Textual's test harness (half-block mode, since there
-is no Kitty terminal in CI) and drives it with a mouse pilot.
+Runs the real widget in Textual's test harness (placeholder mode — the
+escapes are inspected as strings, no real terminal needed) and drives it
+with a mouse pilot. Pixel checks go through Plot.render_rgba.
 """
 
 from __future__ import annotations
@@ -12,6 +13,12 @@ from textual.app import App, ComposeResult
 
 from plotui import Plot
 from plotui.textual import PlotWidget
+
+
+def _has_white(plot: Plot, w: int = 200, h: int = 150) -> bool:
+    data = plot.render_rgba(w, h)
+    white = b"\xff\xff\xff\xff"
+    return any(data[i : i + 4] == white for i in range(0, len(data), 4))
 
 
 class _Harness(App):
@@ -30,9 +37,8 @@ class _Harness(App):
         self.picks: list[tuple[str, int] | None] = []
 
     def compose(self) -> ComposeResult:
-        # Pin the mode: detection reads the developer's real terminal env,
-        # but these tests assert against half-block geometry.
-        yield PlotWidget(self.plot, id="plot", pickable=True, render_mode="halfblock")
+        # Pin the mode: detection reads the developer's real terminal env.
+        yield PlotWidget(self.plot, id="plot", pickable=True, render_mode="placeholder")
 
     def on_plot_widget_element_hovered(self, msg: PlotWidget.ElementHovered) -> None:
         self.hovers.append(msg.element)
@@ -42,12 +48,13 @@ class _Harness(App):
 
 
 def _cell_over(plot: Plot, widget: PlotWidget, kind: str) -> tuple[int, int]:
-    """Find a cell whose center sits over an element of `kind` (half-block
-    geometry: 1px per column, 2px per row) — same mapping the widget uses."""
+    """Find a cell whose center sits over an element of `kind`, using the
+    widget's own cell-to-pixel mapping."""
     w, h = widget.size.width, widget.size.height
     for y in range(h):
         for x in range(w):
-            el = plot.pick_element_px(w, h * 2, x + 0.5, y * 2 + 1.0, 5.0)
+            px_w, px_h, px, py, radius = widget._pixel_geometry(x, y)
+            el = plot.pick_element_px(px_w, px_h, px, py, radius)
             if el is not None and el[0] == kind:
                 return x, y
     raise AssertionError(f"no {kind} visible in a {w}x{h} widget")
@@ -62,7 +69,7 @@ async def _drive() -> None:
         nx, ny = _cell_over(app.plot, widget, "node")
         await pilot.hover("#plot", offset=(nx, ny))
         assert app.hovers and app.hovers[-1][0] == "node"
-        assert "255;255;255" in app.plot.render_halfblock(80, 24)
+        assert _has_white(app.plot), "hovered node lights up white"
 
         # Click it: ElementPicked carries the same node, selection persists.
         await pilot.click("#plot", offset=(nx, ny))
@@ -80,36 +87,6 @@ async def _drive() -> None:
 
 def test_hover_and_click_pipeline() -> None:
     asyncio.run(_drive())
-
-
-def test_overlay_splices_text_into_halfblock_strips() -> None:
-    async def drive() -> None:
-        class Overlaid(App):
-            def __init__(self) -> None:
-                super().__init__()
-                self.plot = Plot()
-                self.plot.add_graph3d([0.0, 5.0], [0.0, 5.0], [0.0, 5.0], edges=[(0, 1)])
-
-            def compose(self) -> ComposeResult:
-                yield PlotWidget(self.plot, id="plot", force_halfblock=True)
-
-        app = Overlaid()
-        async with app.run_test(size=(60, 20)) as pilot:
-            widget = app.query_one("#plot", PlotWidget)
-            widget.set_overlay([(4, 7, "hello", None), (4, 3, "x", None), (99, 0, "off", None)])
-            await pilot.pause()
-            strip = widget.render_line(4)
-            text = strip.text
-            assert len(text) == 60, "strip width unchanged by splicing"
-            assert text[7:12] == "hello"
-            assert text[3] == "x"
-            plain = widget.render_line(5).text
-            assert "hello" not in plain
-            # Clearing the overlay restores the full plot row.
-            widget.set_overlay([])
-            assert "hello" not in widget.render_line(4).text
-
-    asyncio.run(drive())
 
 
 def test_overlay_splices_text_into_kitty_placeholder_cells() -> None:
@@ -169,7 +146,7 @@ def test_not_pickable_stays_silent() -> None:
 
             def compose(self) -> ComposeResult:
                 # pickable defaults off; mode pinned for env-independence
-                yield PlotWidget(self.plot, id="plot", render_mode="halfblock")
+                yield PlotWidget(self.plot, id="plot", render_mode="placeholder")
 
             def on_plot_widget_element_hovered(self, msg) -> None:
                 self.hovers.append(msg.element)
@@ -178,7 +155,7 @@ def test_not_pickable_stays_silent() -> None:
         async with app.run_test(size=(60, 20)) as pilot:
             await pilot.hover("#plot", offset=(30, 10))
             assert app.hovers == [], "no hover messages when pickable is off"
-            assert "255;255;255" not in app.plot.render_halfblock(60, 20)
+            assert not _has_white(app.plot)
 
     asyncio.run(drive())
 
@@ -198,15 +175,17 @@ def test_render_mode_detection() -> None:
     assert detect_render_mode(ghostty) == "placeholder"
     assert detect_render_mode(iterm_new) == "direct", "iTerm2 >= 3.5 speaks Kitty graphics"
     assert detect_render_mode(iterm_lc) == "direct"
-    # No silent degradation: unknown/old terminals get the notice, never
-    # the low-fi half-block renderer (that is opt-in only).
+    # No degradation: unknown/old terminals get the notice — plotui only
+    # draws real pixels.
     assert detect_render_mode(iterm_old) == "unsupported", "old iTerm2 lacks the protocol"
     assert detect_render_mode(plain) == "unsupported"
     assert detect_render_mode(wezterm) == "direct"
-    # Explicit override beats every terminal signal.
+    # Explicit override beats every terminal signal; removed/unknown values
+    # (like the retired "halfblock") are ignored and detection proceeds.
     assert detect_render_mode({**plain, "PLOTUI_RENDER": "direct"}) == "direct"
-    assert detect_render_mode({**kitty, "PLOTUI_RENDER": "halfblock"}) == "halfblock"
     assert detect_render_mode({**plain, "PLOTUI_RENDER": "kitty"}) == "placeholder"
+    assert detect_render_mode({**kitty, "PLOTUI_RENDER": "halfblock"}) == "placeholder"
+    assert detect_render_mode({**plain, "PLOTUI_RENDER": "halfblock"}) == "unsupported"
 
 
 def test_unsupported_terminal_shows_a_notice_and_stays_inert() -> None:
@@ -233,8 +212,8 @@ def test_unsupported_terminal_shows_a_notice_and_stays_inert() -> None:
             whole = "\n".join(widget.render_line(y).text for y in range(24))
             assert "Kitty graphics protocol" in whole, "the notice names the requirement"
             assert "iTerm2" in whole and "Ghostty" in whole, "it suggests terminals"
-            assert "PLOTUI_RENDER=halfblock" in whole, "it names the escape hatch"
-            assert "\x1b_G" not in whole and "▀" not in whole, "no pixels, no halfblocks"
+            assert "PLOTUI_RENDER" in whole, "it names the override knob"
+            assert "\x1b_G" not in whole, "no graphics escapes on an unsupported terminal"
 
             # Interaction is inert: no hover/pick messages, no crash.
             await pilot.hover("#plot", offset=(45, 12))

@@ -157,18 +157,6 @@ impl Plot {
         self.inner.add_bar2d(xs, heights, c, name);
     }
 
-    /// Given a click at cell `(col, row)` in a `cols`×`rows` half-block widget,
-    /// return the flat index of the nearest node within `radius` cells, or None.
-    #[pyo3(signature = (cols, rows, col, row, radius=2.5))]
-    fn pick(&self, cols: u16, rows: u16, col: f32, row: f32, radius: f32) -> Option<usize> {
-        // Half-block space: 1 px per column, 2 px per row.
-        let px_w = cols as usize;
-        let px_h = rows as usize * 2;
-        let px = col + 0.5;
-        let py = row * 2.0 + 1.0;
-        self.inner.pick(px_w, px_h, px, py, radius * 2.0)
-    }
-
     /// Select an element: a bare node index, a `("node"|"edge", index)` tuple,
     /// or `None` to clear. The selected element gets the ring/glow treatment.
     #[pyo3(signature = (element=None))]
@@ -272,12 +260,17 @@ impl Plot {
         })
     }
 
-    /// Render as `rows` lines of half-block text (universal fallback).
-    fn render_halfblock(&self, py: Python<'_>, cols: u16, rows: u16) -> String {
-        py.allow_threads(|| {
-            let fb = self.inner.render(cols as usize, rows as usize * 2);
-            plotui_protocol::halfblock(&fb)
-        })
+    /// Render one frame and return the raw RGBA8 pixels (`px_w * px_h * 4`
+    /// bytes, row-major; undrawn pixels have alpha 0). The escape-free way to
+    /// inspect exactly what would be drawn — for tests, snapshots, or export.
+    fn render_rgba<'py>(
+        &self,
+        py: Python<'py>,
+        px_w: usize,
+        px_h: usize,
+    ) -> pyo3::Bound<'py, pyo3::types::PyBytes> {
+        let rgba = py.allow_threads(|| self.inner.render(px_w, px_h).rgba());
+        pyo3::types::PyBytes::new(py, &rgba)
     }
 
     /// Render a full-resolution Kitty image placed via Unicode placeholders for
