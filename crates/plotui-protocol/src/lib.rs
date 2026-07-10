@@ -21,7 +21,81 @@ use plotui_core::Framebuffer;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
+mod diacritics;
+use diacritics::DIACRITICS;
+
 const IMAGE_ID: u32 = 4242;
+const PLACEHOLDER: char = '\u{10EEEE}';
+
+/// A Kitty image placed via Unicode placeholders, ready to composite inside a
+/// bounded TUI widget (the flicker-free, compositor-friendly path).
+pub struct KittyPlaceholder {
+    /// The image-upload escape. Zero visible width; emit it once per frame
+    /// (e.g. at the start of the first placeholder row). Reusing a fixed image
+    /// id means the terminal atomically replaces the previous frame.
+    pub transmit: String,
+    /// Foreground color that encodes the image id — apply it to the
+    /// placeholder cells so the terminal knows which image they show.
+    pub id_rgb: (u8, u8, u8),
+    /// One string of placeholder characters per row (each already carries the
+    /// row/column diacritics). There are `rows` of them, each `cols` cells wide.
+    pub rows: Vec<String>,
+}
+
+/// Encode `fb` as a Kitty image + placeholder cells for a `cols`×`rows` region.
+pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceholder {
+    let rgba = fb.rgba();
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+    let _ = enc.write_all(&rgba);
+    let compressed = enc.finish().unwrap_or_default();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
+    let (w, h) = (fb.w, fb.h);
+
+    // Image id is carried by the placeholder foreground color (low 24 bits) plus
+    // one "extra" high-byte diacritic.
+    let [extra, id_r, id_g, id_b] = IMAGE_ID.to_be_bytes();
+
+    // Upload escape: U=1 = virtual placement (shown only via placeholders),
+    // o=z zlib, c/r scale the source image to the cell region.
+    let mut transmit = String::with_capacity(b64.len() + 128);
+    const CHUNK: usize = 4096;
+    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK).collect();
+    let n = chunks.len().max(1);
+    for (i, chunk) in chunks.iter().enumerate() {
+        transmit.push_str("\x1b_G");
+        if i == 0 {
+            let _ = write!(
+                transmit,
+                "q=2,i={IMAGE_ID},a=T,U=1,f=32,o=z,t=d,s={w},v={h},c={cols},r={rows},"
+            );
+        }
+        let more = if i + 1 < n { 1 } else { 0 };
+        let _ = write!(transmit, "m={more};");
+        transmit.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+        transmit.push_str("\x1b\\");
+    }
+
+    // Placeholder rows. The first cell of each row carries (row, col=0, extra);
+    // the rest inherit position by contiguity.
+    let dcol0 = DIACRITICS[0];
+    let dextra = DIACRITICS[extra as usize % DIACRITICS.len()];
+    let ncols = cols as usize;
+    let mut out_rows = Vec::with_capacity(rows as usize);
+    for y in 0..rows as usize {
+        let drow = DIACRITICS[y % DIACRITICS.len()];
+        let mut s = String::with_capacity(ncols * 4 + 4);
+        s.push(PLACEHOLDER);
+        s.push(drow);
+        s.push(dcol0);
+        s.push(dextra);
+        for _ in 1..ncols {
+            s.push(PLACEHOLDER);
+        }
+        out_rows.push(s);
+    }
+
+    KittyPlaceholder { transmit, id_rgb: (id_r, id_g, id_b), rows: out_rows }
+}
 
 /// Encode a framebuffer as a Kitty graphics escape that draws the image at the
 /// current cursor position, scaled to span `cols`×`rows` cells. Cursor is saved

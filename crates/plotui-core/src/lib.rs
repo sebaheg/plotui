@@ -47,7 +47,7 @@ impl Framebuffer {
         }
     }
 
-    /// Filled disc — the mark used for scatter points.
+    /// Filled disc — the mark used for scatter/graph nodes.
     pub fn disc(&mut self, cx: f32, cy: f32, z: f32, r: f32, c: Rgb) {
         let r = r.max(0.5);
         let (x0, x1) = ((cx - r).floor() as i32, (cx + r).ceil() as i32);
@@ -64,7 +64,7 @@ impl Framebuffer {
         }
     }
 
-    /// Depth-interpolated line — used for axis boxes and line traces.
+    /// Depth-interpolated line — used for axis boxes and graph edges.
     pub fn line(&mut self, a: [f32; 3], b: [f32; 3], c: Rgb) {
         let (x0, y0) = (a[0], a[1]);
         let (x1, y1) = (b[0], b[1]);
@@ -138,21 +138,61 @@ impl Camera {
     }
 }
 
-/// A single plotted series.
-pub enum Trace {
-    Scatter3d { pts: Vec<[f32; 3]>, color: Rgb, size: f32 },
+/// Projects data points to screen space. Built once per frame (or per pick) so
+/// [`Plot::render`] and [`Plot::pick`] share identical geometry.
+struct Projector {
+    center: [f32; 3],
+    inv_extent: f32,
+    scale: f64,
+    cx: f64,
+    cy: f64,
+    cam: Camera,
 }
 
-/// The full plot: traces plus the camera. Frontends hold one of these.
+impl Projector {
+    #[inline]
+    fn project(&self, p: [f32; 3]) -> [f32; 3] {
+        let n = [
+            (p[0] - self.center[0]) * self.inv_extent,
+            (p[1] - self.center[1]) * self.inv_extent,
+            (p[2] - self.center[2]) * self.inv_extent,
+        ];
+        let (vx, vy, vz) = self.cam.view(n);
+        [
+            (self.cx + vx * self.scale) as f32,
+            (self.cy - vy * self.scale) as f32, // flip: +y is up on screen
+            vz as f32,
+        ]
+    }
+}
+
+/// A single plotted series.
+pub enum Trace {
+    Scatter3d {
+        pts: Vec<[f32; 3]>,
+        color: Rgb,
+        size: f32,
+    },
+    Graph3d {
+        nodes: Vec<[f32; 3]>,
+        node_colors: Vec<Rgb>,
+        edges: Vec<(u32, u32)>,
+        size: f32,
+    },
+}
+
+/// The full plot: traces, camera, and an optional highlighted node.
 pub struct Plot {
     pub traces: Vec<Trace>,
     pub camera: Camera,
     pub show_box: bool,
+    /// Flat node index (across all traces, in insertion order) to highlight.
+    pub selected: Option<usize>,
 }
 
 impl Default for Plot {
     fn default() -> Self {
-        Self { traces: Vec::new(), camera: Camera::default(), show_box: true }
+        Self { traces: Vec::new(), camera: Camera::default(), show_box: true, selected: None }
     }
 }
 
@@ -165,17 +205,37 @@ impl Plot {
         self.traces.push(Trace::Scatter3d { pts, color, size });
     }
 
+    pub fn add_graph3d(
+        &mut self,
+        nodes: Vec<[f32; 3]>,
+        node_colors: Vec<Rgb>,
+        edges: Vec<(u32, u32)>,
+        size: f32,
+    ) {
+        self.traces.push(Trace::Graph3d { nodes, node_colors, edges, size });
+    }
+
+    /// All node points across every trace, in insertion order. The index into
+    /// this list is the "flat node index" used by [`Self::pick`] and `selected`.
+    fn node_points(&self) -> Vec<[f32; 3]> {
+        let mut v = Vec::new();
+        for t in &self.traces {
+            match t {
+                Trace::Scatter3d { pts, .. } => v.extend_from_slice(pts),
+                Trace::Graph3d { nodes, .. } => v.extend_from_slice(nodes),
+            }
+        }
+        v
+    }
+
     /// Axis-aligned bounding box of all data (min, max).
     fn bounds(&self) -> ([f32; 3], [f32; 3]) {
         let mut lo = [f32::INFINITY; 3];
         let mut hi = [f32::NEG_INFINITY; 3];
-        for t in &self.traces {
-            let Trace::Scatter3d { pts, .. } = t;
-            for p in pts {
-                for k in 0..3 {
-                    lo[k] = lo[k].min(p[k]);
-                    hi[k] = hi[k].max(p[k]);
-                }
+        for p in self.node_points() {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
             }
         }
         if !lo[0].is_finite() {
@@ -185,9 +245,7 @@ impl Plot {
         (lo, hi)
     }
 
-    /// Render one frame into an RGBA framebuffer of the given pixel size.
-    pub fn render(&self, px_w: usize, px_h: usize) -> Framebuffer {
-        let mut fb = Framebuffer::new(px_w, px_h);
+    fn projector(&self, px_w: usize, px_h: usize) -> (Projector, [f32; 3], [f32; 3]) {
         let (lo, hi) = self.bounds();
         let center = [
             (lo[0] + hi[0]) * 0.5,
@@ -201,40 +259,46 @@ impl Plot {
         if extent <= 0.0 {
             extent = 1.0;
         }
-
-        let cam = &self.camera;
+        let cam = self.camera;
         let scale = 0.42 * px_w.min(px_h) as f64 * cam.zoom;
         let cx = px_w as f64 * 0.5 + cam.pan_x;
         let cy = px_h as f64 * 0.5 + cam.pan_y;
+        (Projector { center, inv_extent: 1.0 / extent, scale, cx, cy, cam }, lo, hi)
+    }
 
-        // Normalize a data point into [-1, 1]^3, then project to screen.
-        let project = |p: [f32; 3]| -> [f32; 3] {
-            let n = [
-                (p[0] - center[0]) / extent,
-                (p[1] - center[1]) / extent,
-                (p[2] - center[2]) / extent,
-            ];
-            let (vx, vy, vz) = cam.view(n);
-            [
-                (cx + vx * scale) as f32,
-                (cy - vy * scale) as f32, // flip: +y is up on screen
-                vz as f32,
-            ]
-        };
+    /// Return the flat node index nearest to screen pixel `(px, py)` within
+    /// `radius` pixels, or `None`. Uses the exact projection `render` uses.
+    pub fn pick(&self, px_w: usize, px_h: usize, px: f32, py: f32, radius: f32) -> Option<usize> {
+        let (pr, _, _) = self.projector(px_w, px_h);
+        let mut best: Option<usize> = None;
+        let mut best_d2 = radius * radius;
+        for (i, p) in self.node_points().iter().enumerate() {
+            let s = pr.project(*p);
+            let dx = s[0] - px;
+            let dy = s[1] - py;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= best_d2 {
+                best = Some(i);
+                best_d2 = d2;
+            }
+        }
+        best
+    }
+
+    /// Render one frame into an RGBA framebuffer of the given pixel size.
+    pub fn render(&self, px_w: usize, px_h: usize) -> Framebuffer {
+        let mut fb = Framebuffer::new(px_w, px_h);
+        let (pr, lo, hi) = self.projector(px_w, px_h);
 
         // Depth range for fog.
         let (mut zmin, mut zmax) = (f32::INFINITY, f32::NEG_INFINITY);
-        for t in &self.traces {
-            let Trace::Scatter3d { pts, .. } = t;
-            for p in pts {
-                let z = project(*p)[2];
-                zmin = zmin.min(z);
-                zmax = zmax.max(z);
-            }
+        for p in self.node_points() {
+            let z = pr.project(p)[2];
+            zmin = zmin.min(z);
+            zmax = zmax.max(z);
         }
         let zspan = (zmax - zmin).max(1e-3);
         let fog = |c: Rgb, z: f32| -> Rgb {
-            // Farther points fade toward the cool background tint.
             let t = ((z - zmin) / zspan).clamp(0.0, 1.0) * 0.55;
             let bg = [26.0, 30.0, 44.0];
             [
@@ -248,7 +312,7 @@ impl Plot {
         if self.show_box {
             let corners: Vec<[f32; 3]> = (0..8)
                 .map(|i| {
-                    project([
+                    pr.project([
                         if i & 1 == 0 { lo[0] } else { hi[0] },
                         if i & 2 == 0 { lo[1] } else { hi[1] },
                         if i & 4 == 0 { lo[2] } else { hi[2] },
@@ -265,16 +329,67 @@ impl Plot {
             }
         }
 
-        // Points.
         let ts = (px_w as f32 / 500.0).clamp(1.0, 3.0);
+        let mut flat = 0usize;
         for t in &self.traces {
-            let Trace::Scatter3d { pts, color, size } = t;
-            for p in pts {
-                let s = project(*p);
-                fb.disc(s[0], s[1], s[2], size * ts, fog(*color, s[2]));
+            match t {
+                Trace::Scatter3d { pts, color, size } => {
+                    for p in pts {
+                        let s = pr.project(*p);
+                        self.draw_node(&mut fb, s, size * ts, fog(*color, s[2]), *color, flat, ts);
+                        flat += 1;
+                    }
+                }
+                Trace::Graph3d { nodes, node_colors, edges, size } => {
+                    // Edges first, so nodes sit on top.
+                    for &(a, b) in edges {
+                        let (a, b) = (a as usize, b as usize);
+                        if a < nodes.len() && b < nodes.len() {
+                            let pa = pr.project(nodes[a]);
+                            let pb = pr.project(nodes[b]);
+                            let ca = node_colors.get(a).copied().unwrap_or([150, 150, 150]);
+                            let cb = node_colors.get(b).copied().unwrap_or([150, 150, 150]);
+                            let ec = [
+                                ((ca[0] as u16 + cb[0] as u16) / 2) as u8 / 2 + 20,
+                                ((ca[1] as u16 + cb[1] as u16) / 2) as u8 / 2 + 20,
+                                ((ca[2] as u16 + cb[2] as u16) / 2) as u8 / 2 + 20,
+                            ];
+                            fb.line(pa, pb, ec);
+                        }
+                    }
+                    for (i, p) in nodes.iter().enumerate() {
+                        let s = pr.project(*p);
+                        let c = node_colors.get(i).copied().unwrap_or([120, 180, 230]);
+                        self.draw_node(&mut fb, s, size * ts, fog(c, s[2]), c, flat, ts);
+                        flat += 1;
+                    }
+                }
             }
         }
         fb
+    }
+
+    /// Draw one node, with a white highlight ring pulled to the front when it
+    /// is the selected node.
+    #[inline]
+    fn draw_node(
+        &self,
+        fb: &mut Framebuffer,
+        s: [f32; 3],
+        radius: f32,
+        fogged: Rgb,
+        base: Rgb,
+        flat_index: usize,
+        ts: f32,
+    ) {
+        if self.selected == Some(flat_index) {
+            // Force to the front so the selection is always visible.
+            let front = -1.0e9;
+            fb.disc(s[0], s[1], front, radius + 2.2 * ts, [255, 255, 255]);
+            fb.disc(s[0], s[1], front, radius + 0.6 * ts, base);
+        } else {
+            fb.disc(s[0], s[1], s[2], radius, fogged);
+        }
     }
 }
 
@@ -293,7 +408,18 @@ mod tests {
         let fb = plot.render(200, 120);
         let rgba = fb.rgba();
         assert_eq!(rgba.len(), 200 * 120 * 4);
-        // At least some pixels drawn (alpha > 0).
         assert!(rgba.chunks(4).any(|px| px[3] > 0));
+    }
+
+    #[test]
+    fn pick_finds_node_at_its_projected_position() {
+        let mut plot = Plot::new();
+        let nodes = vec![[0.0, 0.0, 0.0], [5.0, 5.0, 5.0], [-5.0, -5.0, -5.0]];
+        plot.add_graph3d(nodes.clone(), vec![[200, 100, 100]; 3], vec![(0, 1), (1, 2)], 3.0);
+        // Project node 1 and click exactly there — pick must return index 1.
+        let (pr, _, _) = plot.projector(300, 200);
+        let s = pr.project(nodes[1]);
+        let hit = plot.pick(300, 200, s[0], s[1], 4.0);
+        assert_eq!(hit, Some(1));
     }
 }
