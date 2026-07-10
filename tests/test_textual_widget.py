@@ -369,3 +369,51 @@ def test_small_plot_never_reduces_resolution() -> None:
             assert widget._active_scale() == 1.0, "small graphs stay full-res while dragging"
 
     asyncio.run(drive())
+
+
+def test_tmux_wrap_only_wraps_inside_tmux(monkeypatch) -> None:
+    from plotui.textual import tmux_wrap
+
+    esc = "\x1b_Gi=4242,a=T;data\x1b\\"
+
+    # Outside tmux: untouched.
+    monkeypatch.delenv("TMUX", raising=False)
+    assert tmux_wrap(esc) == esc
+
+    # Inside tmux: wrapped in the passthrough DCS with every ESC doubled.
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+    wrapped = tmux_wrap(esc)
+    assert wrapped.startswith("\x1bPtmux;")
+    assert wrapped.endswith("\x1b\\")
+    # The inner payload is the original with each ESC (0x1b) doubled.
+    inner = wrapped[len("\x1bPtmux;") : -len("\x1b\\")]
+    assert inner == esc.replace("\x1b", "\x1b\x1b")
+    # Unwrapping (halving the doubled ESCs) recovers the original escape.
+    assert inner.replace("\x1b\x1b", "\x1b") == esc
+
+
+def test_direct_mode_wraps_transmit_for_tmux(monkeypatch) -> None:
+    async def drive() -> None:
+        class Direct(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.plot.add_graph3d([0.0, 5.0], [0.0, 5.0], [0.0, 5.0], edges=[(0, 1)])
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(self.plot, id="plot", render_mode="direct")
+
+        app = Direct()
+        async with app.run_test(size=(40, 12)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            # Re-render the frame with TMUX set, then read line 0.
+            monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
+            widget.invalidate()
+            await pilot.pause()
+            line0 = "".join(seg.text for seg in widget.render_line(0))
+            assert line0.startswith("\x1bPtmux;"), "direct frame is tmux-wrapped"
+            assert "\x1b\x1b_G" in line0, "inner APC has doubled ESCs"
+            # The raw (unwrapped) APC must not appear un-doubled.
+            assert "\x1b_G" not in line0.replace("\x1b\x1b", "")
+
+    asyncio.run(drive())

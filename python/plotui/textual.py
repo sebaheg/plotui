@@ -16,6 +16,11 @@ Rendering picks the best path for the terminal (see `detect_render_mode`):
 plotui only draws real pixels: terminals without Kitty graphics support get
 a message naming supported terminals rather than a degraded plot.
 
+Inside tmux, direct-mode image escapes are wrapped for tmux passthrough (see
+`tmux_wrap`), so the picture reaches the outer terminal — e.g. a browser
+xterm.js with the image addon. This needs ``set -g allow-passthrough on`` and
+``PLOTUI_RENDER=direct`` (xterm.js's Kitty support is direct-placement only).
+
 Set the ``PLOTUI_RENDER`` environment variable (or the widget's
 ``render_mode`` parameter) to override detection.
 """
@@ -45,6 +50,20 @@ _CELL_W, _CELL_H = 12, 24
 # Above this node count, 3D plots drop to half resolution *while interacting*
 # (dragging or auto-rotating) and snap back to full resolution when still.
 _LARGE_NODE_COUNT = 400
+
+
+def tmux_wrap(escape: str) -> str:
+    """Wrap a terminal escape for tmux passthrough when running inside tmux.
+
+    tmux intercepts control sequences it doesn't model (like the Kitty
+    graphics APC), so an image drawn by direct placement never reaches the
+    outer terminal. tmux's passthrough — ``\\ePtmux;<payload>\\e\\`` with every
+    ESC in the payload doubled — hands the raw bytes to the outer terminal.
+    Requires ``set -g allow-passthrough on`` in tmux. A no-op outside tmux
+    (``$TMUX`` unset), so normal terminals are unaffected."""
+    if not os.environ.get("TMUX"):
+        return escape
+    return "\x1bPtmux;" + escape.replace("\x1b", "\x1b\x1b") + "\x1b\\"
 
 
 def detect_cell_px(fallback: tuple[int, int] = (_CELL_W, _CELL_H)) -> tuple[int, int]:
@@ -266,7 +285,7 @@ class PlotWidget(Widget, can_focus=True):
             driver = getattr(self.app, "_driver", None)
             if driver is not None:
                 try:
-                    driver.write(Plot.kitty_cleanup())
+                    driver.write(tmux_wrap(Plot.kitty_cleanup()))
                 except Exception:
                     pass
 
@@ -366,8 +385,12 @@ class PlotWidget(Widget, can_focus=True):
             # frame replace the previous one atomically. compat_chunks: the
             # direct tier exists for terminals (iTerm2) that need the image
             # id repeated on every data chunk to assemble the transmission.
-            self._transmit = self._plot.render_kitty(
-                w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale
+            # tmux_wrap passes the APC through tmux (a no-op outside tmux),
+            # so the image reaches a browser terminal like xterm.js.
+            self._transmit = tmux_wrap(
+                self._plot.render_kitty(
+                    w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale
+                )
             )
 
     def _kitty_row_segments(self, y: int, w: int) -> list[Segment]:
