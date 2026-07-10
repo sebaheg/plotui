@@ -348,3 +348,52 @@ fn edge_flat_index_counts_invalid_edges_too() {
         .collect();
     assert_eq!(edge_hits, vec![1]);
 }
+
+// --- reduced-resolution rendering (render_at) ---
+
+#[test]
+fn render_at_half_matches_full_size() {
+    // A downscaled frame is half the pixels each way — same aspect, drawn.
+    let p = demo_3d();
+    let full = p.render(320, 200);
+    let half = p.render_at(160, 100, 0.5);
+    assert_eq!(half.w, 160);
+    assert_eq!(half.h, 100);
+    assert!(half.rgba().chunks(4).any(|px| px[3] > 0));
+    // The full-res frame is unchanged by the new path (render delegates to it).
+    assert_eq!(hash(&full), hash(&p.render_at(320, 200, 1.0)));
+}
+
+#[test]
+fn pan_scale_keeps_a_panned_view_centered_across_resolutions() {
+    // With a pan applied, the node's *relative* screen position must match
+    // between full-res and half-res-with-pan_scale (that's what stops the
+    // plot from jumping when interaction toggles resolution).
+    let mut p = Plot::new();
+    p.add_scatter3d(vec![[0.0, 0.0, 0.0]], [255, 0, 0], 3.0);
+    p.camera.pan(40.0, -25.0);
+
+    let centroid = |fb: &Framebuffer| -> (f64, f64) {
+        let (mut sx, mut sy, mut n) = (0.0, 0.0, 0.0);
+        for (x, y, _) in drawn_pixels(fb) {
+            sx += x as f64;
+            sy += y as f64;
+            n += 1.0;
+        }
+        (sx / n, sy / n)
+    };
+    let (fx, fy) = centroid(&p.render_at(320, 200, 1.0));
+    let (hx, hy) = centroid(&p.render_at(160, 100, 0.5));
+    // Relative position (fraction of the frame) must match within a pixel.
+    assert!((fx / 320.0 - hx / 160.0).abs() < 0.01, "x drifted: {fx}/320 vs {hx}/160");
+    assert!((fy / 200.0 - hy / 100.0).abs() < 0.01, "y drifted: {fy}/200 vs {hy}/100");
+}
+
+#[test]
+fn node_count_spans_all_traces() {
+    let mut p = Plot::new();
+    assert_eq!(p.node_count(), 0);
+    p.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [1, 2, 3], 1.0);
+    p.add_graph3d(vec![[0.0; 3]; 3], vec![[9, 9, 9]; 3], vec![(0, 1)], 1.0, None, None);
+    assert_eq!(p.node_count(), 5);
+}

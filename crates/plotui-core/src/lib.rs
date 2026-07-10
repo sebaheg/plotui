@@ -477,7 +477,7 @@ impl Plot {
     /// `[x_px, y_px, depth]` per node — the hook for frontends that overlay
     /// text labels or steer the camera toward a node.
     pub fn project_nodes(&self, px_w: usize, px_h: usize) -> Vec<[f32; 3]> {
-        let (pr, _, _) = self.projector(px_w, px_h);
+        let (pr, _, _) = self.projector(px_w, px_h, 1.0);
         self.node_points().iter().map(|p| pr.project(*p)).collect()
     }
 
@@ -518,6 +518,11 @@ impl Plot {
         self.traces.iter().any(Trace::is_3d)
     }
 
+    /// Total pickable nodes across every trace (the flat-index space).
+    pub fn node_count(&self) -> usize {
+        self.node_points().len()
+    }
+
     /// All node points across every trace, in insertion order. The index into
     /// this list is the "flat node index" used by [`Self::pick`] and `selected`.
     fn node_points(&self) -> Vec<[f32; 3]> {
@@ -550,7 +555,16 @@ impl Plot {
         (lo, hi)
     }
 
-    fn projector(&self, px_w: usize, px_h: usize) -> (Projector, [f32; 3], [f32; 3]) {
+    /// Build the projector for a `px_w`×`px_h` framebuffer. `pan_scale` scales
+    /// the (pixel-space) camera pan so a frame rendered at reduced resolution
+    /// keeps the same *relative* layout: the zoom term rides on `px.min()`
+    /// automatically, but pan is absolute pixels, so it must scale with them.
+    fn projector(
+        &self,
+        px_w: usize,
+        px_h: usize,
+        pan_scale: f64,
+    ) -> (Projector, [f32; 3], [f32; 3]) {
         let (lo, hi) = self.bounds();
         let center = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
         let mut extent = 0.0f32;
@@ -562,15 +576,15 @@ impl Plot {
         }
         let cam = self.camera;
         let scale = 0.42 * px_w.min(px_h) as f64 * cam.zoom;
-        let cx = px_w as f64 * 0.5 + cam.pan_x;
-        let cy = px_h as f64 * 0.5 + cam.pan_y;
+        let cx = px_w as f64 * 0.5 + cam.pan_x * pan_scale;
+        let cy = px_h as f64 * 0.5 + cam.pan_y * pan_scale;
         (Projector { center, inv_extent: 1.0 / extent, scale, cx, cy, cam }, lo, hi)
     }
 
     /// Return the flat node index nearest to screen pixel `(px, py)` within
     /// `radius` pixels, or `None`. Uses the exact projection `render` uses.
     pub fn pick(&self, px_w: usize, px_h: usize, px: f32, py: f32, radius: f32) -> Option<usize> {
-        let (pr, _, _) = self.projector(px_w, px_h);
+        let (pr, _, _) = self.projector(px_w, px_h, 1.0);
         let mut best: Option<usize> = None;
         let mut best_d2 = radius * radius;
         for (i, p) in self.node_points().iter().enumerate() {
@@ -596,7 +610,7 @@ impl Plot {
         py: f32,
         radius: f32,
     ) -> Option<usize> {
-        let (pr, _, _) = self.projector(px_w, px_h);
+        let (pr, _, _) = self.projector(px_w, px_h, 1.0);
         let mut best: Option<usize> = None;
         let mut best_d2 = radius * radius;
         let mut flat = 0usize;
@@ -641,16 +655,25 @@ impl Plot {
     /// Plots containing any 3D trace use the orbit-camera path; pure-2D plots
     /// get axes, ticks, tick labels, and a legend for named traces.
     pub fn render(&self, px_w: usize, px_h: usize) -> Framebuffer {
+        self.render_at(px_w, px_h, 1.0)
+    }
+
+    /// Render at a reduced framebuffer size for the same view. `pan_scale`
+    /// should equal the linear resolution ratio (rendered px / full-res px)
+    /// so a downscaled-then-upscaled frame lines up with the full-res one —
+    /// the basis for cheap half-res frames during interaction. Only affects
+    /// the 3D orbit path; 2D plots always render at native resolution.
+    pub fn render_at(&self, px_w: usize, px_h: usize, pan_scale: f64) -> Framebuffer {
         if !self.traces.is_empty() && !self.is_3d() {
             self.render_2d(px_w, px_h)
         } else {
-            self.render_3d(px_w, px_h)
+            self.render_3d(px_w, px_h, pan_scale)
         }
     }
 
-    fn render_3d(&self, px_w: usize, px_h: usize) -> Framebuffer {
+    fn render_3d(&self, px_w: usize, px_h: usize, pan_scale: f64) -> Framebuffer {
         let mut fb = Framebuffer::new(px_w, px_h);
-        let (pr, lo, hi) = self.projector(px_w, px_h);
+        let (pr, lo, hi) = self.projector(px_w, px_h, pan_scale);
 
         // Depth range for fog.
         let (mut zmin, mut zmax) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -1035,7 +1058,7 @@ mod tests {
             None,
         );
         // Project node 1 and click exactly there — pick must return index 1.
-        let (pr, _, _) = plot.projector(300, 200);
+        let (pr, _, _) = plot.projector(300, 200, 1.0);
         let s = pr.project(nodes[1]);
         let hit = plot.pick(300, 200, s[0], s[1], 4.0);
         assert_eq!(hit, Some(1));

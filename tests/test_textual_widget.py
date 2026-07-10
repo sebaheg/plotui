@@ -301,3 +301,71 @@ def test_unmount_deletes_the_image_from_the_terminal() -> None:
     assert any(
         "\x1b_Ga=d,d=i,i=4242" in w for w in writes
     ), "unmount must emit the kitty delete escape"
+
+
+def test_detect_cell_px_uses_terminal_size(monkeypatch) -> None:
+    import struct
+
+    from plotui import textual as tx
+
+    # Fake a terminal reporting 1920x1350 over 80x25 cells (retina iTerm2).
+    fake = struct.pack("HHHH", 25, 80, 1920, 1350)
+
+    class FakeStream:
+        def fileno(self) -> int:
+            return 0
+
+    monkeypatch.setattr(tx.sys, "__stdout__", FakeStream())
+    monkeypatch.setattr("fcntl.ioctl", lambda *a, **k: fake)
+    assert tx.detect_cell_px() == (24, 54)  # 1920//80, 1350//25
+
+    # A terminal that reports no pixel size falls back.
+    monkeypatch.setattr("fcntl.ioctl", lambda *a, **k: struct.pack("HHHH", 25, 80, 0, 0))
+    assert tx.detect_cell_px(fallback=(11, 22)) == (11, 22)
+
+
+def test_interactive_scale_reduces_only_while_dragging_a_large_3d_plot() -> None:
+    async def drive() -> None:
+        class Big(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                n = 500
+                xs = [float(i % 10) for i in range(n)]
+                ys = [float(i // 10) for i in range(n)]
+                zs = [float(i % 7) for i in range(n)]
+                self.plot.add_graph3d(xs, ys, zs, edges=[])
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(
+                    self.plot, id="plot", render_mode="direct", interactive_scale=0.5
+                )
+
+        app = Big()
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            assert widget._large is True
+            assert widget._active_scale() == 1.0, "still plot renders full-res"
+
+            await pilot.mouse_down("#plot", offset=(40, 12))
+            await pilot.hover("#plot", offset=(46, 15))  # move → drag
+            assert widget.dragging is True
+            assert widget._active_scale() == 0.5, "large 3D drag drops to half-res"
+
+            await pilot.mouse_up("#plot", offset=(46, 15))
+            assert widget._active_scale() == 1.0, "full-res restored when the drag ends"
+
+    asyncio.run(drive())
+
+
+def test_small_plot_never_reduces_resolution() -> None:
+    async def drive() -> None:
+        app = _Harness()  # 4-node graph
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            assert widget._large is False
+            await pilot.mouse_down("#plot", offset=(40, 12))
+            await pilot.hover("#plot", offset=(46, 15))
+            assert widget._active_scale() == 1.0, "small graphs stay full-res while dragging"
+
+    asyncio.run(drive())

@@ -23,6 +23,7 @@ Set the ``PLOTUI_RENDER`` environment variable (or the widget's
 from __future__ import annotations
 
 import os
+import sys
 
 from rich.cells import cell_len
 from rich.color import Color
@@ -35,10 +36,39 @@ from textual.widget import Widget
 
 from ._plotui import Plot
 
-# Approximate terminal cell size in pixels for the Kitty image. The terminal
-# scales the source image to the cell grid, so this only sets supersampling —
-# generous values keep it crisp.
+# Fallback cell size in device pixels, used only when the terminal doesn't
+# report its own (see `detect_cell_px`). The image is scaled to the cell grid
+# by the terminal, so a too-small guess renders below native resolution and
+# gets upscaled — soft edges. Detection avoids that.
 _CELL_W, _CELL_H = 12, 24
+
+# Above this node count, 3D plots drop to half resolution *while interacting*
+# (dragging or auto-rotating) and snap back to full resolution when still.
+_LARGE_NODE_COUNT = 400
+
+
+def detect_cell_px(fallback: tuple[int, int] = (_CELL_W, _CELL_H)) -> tuple[int, int]:
+    """The terminal's pixel-per-cell size, queried via the TIOCGWINSZ ioctl
+    (``ws_xpixel``/``ws_ypixel``). Kitty, Ghostty, iTerm2, and WezTerm all
+    report it — and report *device* pixels, so this yields the true retina
+    resolution. Returns `fallback` when the terminal reports no pixel size
+    (or on platforms without termios, e.g. Windows)."""
+    try:
+        import fcntl
+        import struct
+        import termios
+    except ImportError:
+        return fallback
+    for stream in (sys.__stdout__, sys.__stderr__, sys.__stdin__):
+        try:
+            fd = stream.fileno()
+            packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+        except (AttributeError, ValueError, OSError):
+            continue
+        rows, cols, xpix, ypix = struct.unpack("HHHH", packed)
+        if rows and cols and xpix and ypix:
+            return (max(1, xpix // cols), max(1, ypix // rows))
+    return fallback
 
 # An overlay span: (row, col, text, style) — text drawn over the plot in
 # terminal cells (labels, badges). See `PlotWidget.set_overlay`.
@@ -159,9 +189,10 @@ class PlotWidget(Widget, can_focus=True):
         plot: Plot,
         *,
         auto_rotate: bool = False,
-        cell_px: tuple[int, int] = (_CELL_W, _CELL_H),
+        cell_px: tuple[int, int] | None = None,
         pickable: bool = False,
         render_mode: str = "auto",
+        interactive_scale: float = 0.5,
         **kwargs,
     ):
         """``pickable=True`` turns on interactive picking: moving the mouse
@@ -172,6 +203,14 @@ class PlotWidget(Widget, can_focus=True):
         ``render_mode`` is ``"auto"`` (detect, honoring ``PLOTUI_RENDER``) or
         ``"placeholder"`` / ``"direct"`` to force a path — see
         :func:`detect_render_mode`.
+
+        ``cell_px`` sets the device pixels per terminal cell (rendering
+        resolution). Default ``None`` detects the terminal's true cell size so
+        plots render at native resolution — see :func:`detect_cell_px`.
+
+        ``interactive_scale`` is the resolution multiplier used for large 3D
+        plots *while interacting* (dragging or auto-rotating); ``1.0`` disables
+        it. Full resolution is restored the moment interaction stops.
         """
         super().__init__(**kwargs)
         self._plot = plot
@@ -179,8 +218,10 @@ class PlotWidget(Widget, can_focus=True):
         self._moved = False
         self._last_pos = (0, 0)
         self._auto = auto_rotate
-        self._cell_w, self._cell_h = cell_px
+        self._cell_w, self._cell_h = cell_px if cell_px is not None else detect_cell_px()
         self._pickable = pickable
+        self._interactive_scale = min(1.0, max(0.05, interactive_scale))
+        self._large = plot.node_count() >= _LARGE_NODE_COUNT
         self._hovered: tuple[str, int] | None = None
         if render_mode != "auto":
             if render_mode not in (*RENDER_MODES, "unsupported"):
@@ -204,6 +245,14 @@ class PlotWidget(Widget, can_focus=True):
         """True while the user is actively dragging (rotating/panning) — a
         hook for hosts that want to defer expensive work mid-gesture."""
         return self._dragging and self._moved
+
+    def _active_scale(self) -> float:
+        """Resolution multiplier for the next frame: reduced only for large 3D
+        plots while interacting (an active drag, or continuous auto-rotate),
+        else 1.0 — so a still plot is always at full resolution."""
+        if self._interactive_scale >= 1.0 or not self._large or not self._plot.is_3d():
+            return 1.0
+        return self._interactive_scale if (self.dragging or self._auto) else 1.0
 
     def on_mount(self) -> None:
         if self._auto:
@@ -299,13 +348,14 @@ class PlotWidget(Widget, can_focus=True):
         w, h = self.size.width, self.size.height
         if w <= 0 or h <= 0:
             return
-        key = (w, h, self._version, self._mode)
+        scale = self._active_scale()
+        key = (w, h, self._version, self._mode, scale)
         if key == self._key:
             return
         self._key = key
         if self._mode == "placeholder":
             transmit, id_rgb, cells = self._plot.render_kitty_placeholder_cells(
-                w, h, self._cell_w, self._cell_h
+                w, h, self._cell_w, self._cell_h, scale=scale
             )
             self._transmit = transmit
             self._cells = cells
@@ -317,7 +367,7 @@ class PlotWidget(Widget, can_focus=True):
             # direct tier exists for terminals (iTerm2) that need the image
             # id repeated on every data chunk to assemble the transmission.
             self._transmit = self._plot.render_kitty(
-                w, h, self._cell_w, self._cell_h, compat_chunks=True
+                w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale
             )
 
     def _kitty_row_segments(self, y: int, w: int) -> list[Segment]:
@@ -459,10 +509,15 @@ class PlotWidget(Widget, can_focus=True):
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         was_click = self._dragging and not self._moved
+        was_drag = self._dragging and self._moved
         self._dragging = False
         self.release_mouse()
         if was_click:
             self.on_click_at(event)
+        elif was_drag:
+            # The gesture ended: repaint so a half-res interaction frame is
+            # replaced by a crisp full-res one.
+            self.invalidate()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self._mode == "unsupported":

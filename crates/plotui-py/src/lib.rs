@@ -238,7 +238,11 @@ impl Plot {
     /// With `compat_chunks=True`, the image id is repeated on every data
     /// chunk — off-spec, but required by iTerm2, which drops spec-framed
     /// chunked transmissions.
-    #[pyo3(signature = (cols, rows, cell_w, cell_h, compat_chunks=false))]
+    /// `scale` (0 < s ≤ 1) shrinks the rasterized framebuffer while the image
+    /// still fills the same `cols`×`rows` cells — the terminal upscales it.
+    /// Used for cheap half-resolution frames during interaction.
+    #[pyo3(signature = (cols, rows, cell_w, cell_h, compat_chunks=false, scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
     fn render_kitty(
         &self,
         py: Python<'_>,
@@ -247,11 +251,11 @@ impl Plot {
         cell_w: u16,
         cell_h: u16,
         compat_chunks: bool,
+        scale: f64,
     ) -> String {
         py.allow_threads(|| {
-            let pw = cols as usize * cell_w.max(1) as usize;
-            let ph = rows as usize * cell_h.max(1) as usize;
-            let fb = self.inner.render(pw, ph);
+            let (pw, ph, pan_scale) = scaled_dims(cols, rows, cell_w, cell_h, scale);
+            let fb = self.inner.render_at(pw, ph, pan_scale);
             if compat_chunks {
                 plotui_protocol::kitty_compat(&fb, cols, rows)
             } else {
@@ -298,6 +302,7 @@ impl Plot {
     /// splice text (label overlays) into a row without breaking the cells after
     /// the gap. Returns `(transmit_escape, (id_r, id_g, id_b), cells)` where
     /// `cells[y][x]` is the placeholder string for that cell. GIL released.
+    #[pyo3(signature = (cols, rows, cell_w, cell_h, scale=1.0))]
     fn render_kitty_placeholder_cells(
         &self,
         py: Python<'_>,
@@ -305,11 +310,11 @@ impl Plot {
         rows: u16,
         cell_w: u16,
         cell_h: u16,
+        scale: f64,
     ) -> (String, (u8, u8, u8), Vec<Vec<String>>) {
         py.allow_threads(|| {
-            let pw = cols as usize * cell_w.max(1) as usize;
-            let ph = rows as usize * cell_h.max(1) as usize;
-            let fb = self.inner.render(pw, ph);
+            let (pw, ph, pan_scale) = scaled_dims(cols, rows, cell_w, cell_h, scale);
+            let fb = self.inner.render_at(pw, ph, pan_scale);
             let p = plotui_protocol::kitty_placeholder_cells(&fb, cols, rows);
             (p.transmit, p.id_rgb, p.cells)
         })
@@ -322,11 +327,34 @@ impl Plot {
         self.inner.pick(px_w, px_h, px, py, radius)
     }
 
+    /// True when any trace is 3D (the orbit-camera path). Lets a frontend
+    /// decide whether interaction-time half-res rendering applies.
+    fn is_3d(&self) -> bool {
+        self.inner.is_3d()
+    }
+
+    /// Number of pickable nodes across all traces — a cheap "is this plot big
+    /// enough to bother rendering at reduced resolution while moving?" signal.
+    fn node_count(&self) -> usize {
+        self.inner.node_count()
+    }
+
     /// Escape sequence that removes plotui's image from the terminal.
     #[staticmethod]
     fn kitty_cleanup() -> String {
         plotui_protocol::kitty_cleanup()
     }
+}
+
+/// Framebuffer pixel size for `cols`×`rows` cells at `scale`, plus the pan
+/// scale that keeps a reduced-resolution frame aligned with the full-res one.
+fn scaled_dims(cols: u16, rows: u16, cell_w: u16, cell_h: u16, scale: f64) -> (usize, usize, f64) {
+    let s = scale.clamp(0.05, 1.0);
+    let full_w = cols as usize * cell_w.max(1) as usize;
+    let full_h = rows as usize * cell_h.max(1) as usize;
+    let pw = ((full_w as f64 * s).round() as usize).max(1);
+    let ph = ((full_h as f64 * s).round() as usize).max(1);
+    (pw, ph, s)
 }
 
 #[pymodule]
