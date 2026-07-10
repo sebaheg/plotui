@@ -1,0 +1,11 @@
+[package]
+name = "plotui-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Encodes a plotui RGBA framebuffer into terminal bytes (Kitty graphics, halfblock fallback)."
+
+[dependencies]
+plotui-core = { path = "../plotui-core" }
+flate2 = "1"
+base64 = "0.22"

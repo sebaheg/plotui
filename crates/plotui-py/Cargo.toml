@@ -1,0 +1,15 @@
+[package]
+name = "plotui-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyO3 bindings: exposes the plotui rendering engine to Python."
+
+[lib]
+name = "_plotui"
+crate-type = ["cdylib"]
+
+[dependencies]
+plotui-core = { path = "../plotui-core" }
+plotui-protocol = { path = "../plotui-protocol" }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }

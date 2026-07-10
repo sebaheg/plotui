@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "plotui"
+version = "0.1.0"
+description = "Interactive 2D/3D plots in the terminal — Plotly-style, for Textual, powered by a Rust core and the Kitty graphics protocol."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["terminal", "plot", "3d", "textual", "kitty", "tui", "visualization"]
+dependencies = []
+
+[project.optional-dependencies]
+textual = ["textual>=0.60"]
+
+[tool.maturin]
+manifest-path = "crates/plotui-py/Cargo.toml"
+module-name = "plotui._plotui"
+python-source = "python"

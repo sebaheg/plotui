@@ -1,0 +1,8 @@
+[package]
+name = "plotui-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure rendering core for plotui: data model, 3D camera, software rasterizer → RGBA."
+
+[dependencies]

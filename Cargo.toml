@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/plotui-core", "crates/plotui-protocol", "crates/plotui-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sebaheg/plotui"
+
+[profile.release]
+opt-level = 3
