@@ -202,7 +202,9 @@ fn kitty_with_framing(fb: &Framebuffer, cols: u16, rows: u16, id_every_chunk: bo
             // z=-1 draws the image below text glyphs (but above colored
             // backgrounds, per the Kitty spec), so hosts can print labels
             // over the plot — the direct-tier stand-in for the placeholder
-            // path's text splicing.
+            // path's text splicing. (Note: a below-text image needs a
+            // renderer with a transparent cell background — e.g. xterm.js's
+            // DOM renderer, not WebGL, which paints over it.)
             let _ = write!(
                 out,
                 "q=2,i={IMAGE_ID},p=1,a=T,f=32,o=z,z=-1,s={w},v={h},c={cols},r={rows},"
