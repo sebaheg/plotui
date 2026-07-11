@@ -149,7 +149,7 @@ pub fn kitty_placeholder_cells(fb: &Framebuffer, cols: u16, rows: u16) -> KittyP
 /// current cursor position, scaled to span `cols`×`rows` cells. Cursor is saved
 /// and restored, so the caller's cursor position is preserved.
 pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
-    kitty_with_framing(fb, cols, rows, false)
+    kitty_with_framing(fb, cols, rows, false, true)
 }
 
 /// Like [`kitty`], but repeats `q=2,i=<id>` on every continuation chunk.
@@ -159,11 +159,24 @@ pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
 /// silently drops the whole image (empirically: spec framing → nothing drawn,
 /// id-on-every-chunk → renders). Use this for terminals in the "direct" tier
 /// (iTerm2/WezTerm/Konsole); keep [`kitty`] for Kitty/Ghostty.
-pub fn kitty_compat(fb: &Framebuffer, cols: u16, rows: u16) -> String {
-    kitty_with_framing(fb, cols, rows, true)
+///
+/// `delete_first` deletes the previous placement before transmitting the new
+/// frame. iTerm2 creates a new placement per `a=T` and needs this to avoid
+/// stacking. Terminals whose Kitty decoder *replaces* a same-id image (e.g.
+/// xterm.js's addon-image) must set it `false`: the delete blanks the image
+/// while the next frame decodes (asynchronously, there), which flickers badly
+/// during interaction.
+pub fn kitty_compat(fb: &Framebuffer, cols: u16, rows: u16, delete_first: bool) -> String {
+    kitty_with_framing(fb, cols, rows, true, delete_first)
 }
 
-fn kitty_with_framing(fb: &Framebuffer, cols: u16, rows: u16, id_every_chunk: bool) -> String {
+fn kitty_with_framing(
+    fb: &Framebuffer,
+    cols: u16,
+    rows: u16,
+    id_every_chunk: bool,
+    delete_first: bool,
+) -> String {
     let rgba = fb.rgba();
 
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
@@ -181,11 +194,12 @@ fn kitty_with_framing(fb: &Framebuffer, cols: u16, rows: u16, id_every_chunk: bo
     let mut out = String::with_capacity(b64.len() + 256);
     // Save cursor so placement doesn't move the caller's cursor.
     out.push_str("\x1b[s");
-    // Every a=T creates a NEW placement — without this delete, each redraw
-    // stacks another copy on screen (and they outlive the app). Deleting our
-    // id first makes a frame REPLACE the previous one; inside a synchronized
-    // update the swap is invisible.
-    let _ = write!(out, "\x1b_Ga=d,d=i,i={IMAGE_ID},q=2\x1b\\");
+    // Delete the prior placement first (see `delete_first` on `kitty_compat`).
+    // On terminals that replace a same-id image, skipping this avoids a blank
+    // frame between delete and the (async) redraw — the interaction flicker.
+    if delete_first {
+        let _ = write!(out, "\x1b_Ga=d,d=i,i={IMAGE_ID},q=2\x1b\\");
+    }
 
     const CHUNK: usize = 4096;
     let bytes = b64.as_bytes();

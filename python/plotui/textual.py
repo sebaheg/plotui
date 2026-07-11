@@ -241,6 +241,11 @@ class PlotWidget(Widget, can_focus=True):
         self._pickable = pickable
         self._interactive_scale = min(1.0, max(0.05, interactive_scale))
         self._large = plot.node_count() >= _LARGE_NODE_COUNT
+        # Direct mode deletes the prior image before each frame to stop iTerm2
+        # stacking placements. Terminals whose Kitty decoder replaces a same-id
+        # image (xterm.js addon-image) flicker from that delete; PLOTUI_KITTY_
+        # REPLACE=1 skips it. See render_kitty(replace=...).
+        self._kitty_replace = os.environ.get("PLOTUI_KITTY_REPLACE", "").strip() in ("1", "true")
         self._hovered: tuple[str, int] | None = None
         if render_mode != "auto":
             if render_mode not in (*RENDER_MODES, "unsupported"):
@@ -389,7 +394,8 @@ class PlotWidget(Widget, can_focus=True):
             # so the image reaches a browser terminal like xterm.js.
             self._transmit = tmux_wrap(
                 self._plot.render_kitty(
-                    w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale
+                    w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale,
+                    replace=self._kitty_replace
                 )
             )
 

@@ -241,7 +241,12 @@ impl Plot {
     /// `scale` (0 < s ≤ 1) shrinks the rasterized framebuffer while the image
     /// still fills the same `cols`×`rows` cells — the terminal upscales it.
     /// Used for cheap half-resolution frames during interaction.
-    #[pyo3(signature = (cols, rows, cell_w, cell_h, compat_chunks=false, scale=1.0))]
+    /// `replace=True` skips the delete-before-transmit: use it on terminals
+    /// whose Kitty decoder replaces a same-id image atomically (e.g. xterm.js
+    /// addon-image), where the delete otherwise blanks the image between the
+    /// async redraws and flickers during interaction. Leave it `False` for
+    /// iTerm2, which stacks placements without the delete.
+    #[pyo3(signature = (cols, rows, cell_w, cell_h, compat_chunks=false, scale=1.0, replace=false))]
     #[allow(clippy::too_many_arguments)]
     fn render_kitty(
         &self,
@@ -252,12 +257,13 @@ impl Plot {
         cell_h: u16,
         compat_chunks: bool,
         scale: f64,
+        replace: bool,
     ) -> String {
         py.allow_threads(|| {
             let (pw, ph, pan_scale) = scaled_dims(cols, rows, cell_w, cell_h, scale);
             let fb = self.inner.render_at(pw, ph, pan_scale);
             if compat_chunks {
-                plotui_protocol::kitty_compat(&fb, cols, rows)
+                plotui_protocol::kitty_compat(&fb, cols, rows, !replace)
             } else {
                 plotui_protocol::kitty(&fb, cols, rows)
             }

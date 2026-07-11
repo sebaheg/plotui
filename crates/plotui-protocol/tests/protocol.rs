@@ -98,7 +98,7 @@ fn kitty_compat_repeats_the_id_on_every_chunk() {
     use plotui_protocol::kitty_compat;
     // Big frame → many chunks. iTerm2 drops spec-framed (bare m=) chunk
     // streams, so the compat variant must carry the id on every chunk.
-    let s = kitty_compat(&frame(600, 400), 80, 25);
+    let s = kitty_compat(&frame(600, 400), 80, 25, true);
     let apcs: Vec<&str> = s.split("\x1b_G").skip(1).collect(); // [delete, chunk0, chunk1, ...]
     assert!(apcs.len() > 3, "expected a delete plus several data chunks");
     for (i, apc) in apcs.iter().enumerate() {
@@ -114,4 +114,19 @@ fn kitty_compat_repeats_the_id_on_every_chunk() {
     let bare: Vec<&str> = spec.split("\x1b_G").skip(3).collect();
     assert!(!bare.is_empty(), "large frame must have continuation chunks");
     assert!(bare.iter().all(|c| c.starts_with("m=")), "spec continuations carry only m=");
+}
+
+#[test]
+fn kitty_compat_without_delete_skips_the_blanking_delete() {
+    use plotui_protocol::kitty_compat;
+    // delete_first=false: no a=d before the frame, so a replacing decoder
+    // (xterm.js addon-image) never sees a blank gap — the interaction-flicker
+    // fix. Still exactly one placement, still id-per-chunk.
+    let s = kitty_compat(&frame(80, 40), 20, 10, false);
+    assert!(!s.contains("a=d"), "no delete when the terminal replaces same-id images");
+    assert!(s.starts_with("\x1b[s\x1b_G"), "goes straight to the transmit APC");
+    assert_eq!(s.matches("a=T").count(), 1, "still exactly one placement");
+    assert!(s.contains("i=4242") && s.contains("p=1"));
+    // And with delete_first=true it still deletes (iTerm2 path).
+    assert!(kitty_compat(&frame(80, 40), 20, 10, true).contains("a=d,d=i,i=4242"));
 }
