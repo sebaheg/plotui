@@ -330,11 +330,11 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
 
 <span class="cm"># then pipe numbers at it:</span>
 <span class="ps1">❯</span> seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line</code></pre>
-        <pre class="shell" data-pm="pip" hidden aria-label="pip install"><code><span class="cm"># the CLI as a prebuilt wheel:</span>
-<span class="ps1">❯</span> pip install plotui-cli
+        <pre class="shell" data-pm="pip" hidden aria-label="pip install"><code><span class="cm"># the Python library — the CLI comes bundled:</span>
+<span class="ps1">❯</span> pip install plotui
 
-<span class="cm"># or the Python library — the CLI comes with it:</span>
-<span class="ps1">❯</span> pip install plotui</code></pre>
+<span class="cm"># then pipe numbers at it:</span>
+<span class="ps1">❯</span> seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line</code></pre>
         <pre class="shell" data-pm="cargo" hidden aria-label="cargo install"><code><span class="cm"># prebuilt, via cargo-binstall:</span>
 <span class="ps1">❯</span> cargo binstall plotui
 

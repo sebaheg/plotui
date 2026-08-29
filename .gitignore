@@ -13,6 +13,7 @@ __pycache__/
 
 # maturin
 /wheels
+python/plotui/_bin/
 .gstack/
 
 # docs site (Next.js / fumadocs — all generated)

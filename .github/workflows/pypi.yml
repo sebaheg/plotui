@@ -1,9 +1,9 @@
 name: PyPI
 
-# Builds and publishes the two PyPI packages on every version tag:
-#   plotui      — the Python library (PyO3 extension, abi3 ≥ 3.9)
-#   plotui-cli  — the compiled `plotui` binary in a wheel (maturin bin bindings);
-#                 the library depends on it, so `pip install plotui` gets the CLI
+# Builds and publishes the `plotui` PyPI package on every version tag: the
+# Python library (PyO3 extension, abi3 ≥ 3.9) with the compiled CLI bundled
+# inside the wheel at plotui/_bin/plotui, exposed as the `plotui` command via
+# a [project.scripts] entry point.
 #
 # Publishing authenticates with the PYPI_API_TOKEN repo secret.
 
@@ -14,17 +14,11 @@ on:
 
 jobs:
   wheels:
-    name: ${{ matrix.package }} wheel (${{ matrix.target }})
+    name: wheel (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        package: [lib, cli]
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - aarch64-apple-darwin
-          - x86_64-apple-darwin
         include:
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
@@ -32,18 +26,35 @@ jobs:
           - { target: x86_64-apple-darwin, runner: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
+      # The Linux wheels compile inside maturin-action's manylinux container,
+      # so the CLI must be built there too (same glibc floor) — hence
+      # before-script-linux instead of a host step.
+      - name: Bundle the CLI (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release -p plotui --target ${{ matrix.target }}
+          mkdir -p python/plotui/_bin
+          cp target/${{ matrix.target }}/release/plotui python/plotui/_bin/plotui
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist ${{ matrix.package == 'cli' && '-m crates/plotui-cli/Cargo.toml' || '' }}
+          args: --release --out dist
           manylinux: auto
+          before-script-linux: |
+            cargo build --release -p plotui --target ${{ matrix.target }}
+            mkdir -p python/plotui/_bin
+            cp target/${{ matrix.target }}/release/plotui python/plotui/_bin/plotui
+      - name: Check the CLI is inside the wheel
+        run: |
+          unzip -l dist/*.whl | grep "plotui/_bin/plotui"
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.package }}-${{ matrix.target }}
+          name: wheel-${{ matrix.target }}
           path: dist/*.whl
 
   sdist:
-    name: sdists
+    name: sdist
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -51,10 +62,6 @@ jobs:
         with:
           command: sdist
           args: --out dist
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist -m crates/plotui-cli/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
           name: sdists
@@ -73,6 +80,6 @@ jobs:
         with:
           packages-dir: dist
           password: ${{ secrets.PYPI_API_TOKEN }}
-          # a partially-uploaded release (like 0.4.1's wheels) must not fail
-          # the rerun that completes it
+          # a partially-uploaded release must not fail the rerun that
+          # completes it
           skip-existing: true

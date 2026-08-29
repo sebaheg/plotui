@@ -67,7 +67,7 @@ printed frame when piped or with `--static`.
 ```bash
 curl -fsSL https://plotui.xyz/install.sh | sh   # prebuilt binary
 brew install sebaheg/tap/plotui                 # Homebrew (macOS / Linux)
-pip install plotui-cli                          # prebuilt wheel (included in `pip install plotui`)
+pip install plotui                              # prebuilt wheel: the library + the CLI
 cargo install plotui                            # build from source
 cargo binstall plotui                           # prebuilt, via cargo-binstall
 ```
@@ -209,8 +209,8 @@ dispatches those to every class in the MRO, so both would run).
       supported-terminals notice elsewhere and a `PLOTUI_RENDER` override)
 - [ ] Sixel + iTerm2 OSC 1337 encoders for terminals without Kitty graphics
 - [x] Prebuilt wheels (maturin + GitHub Actions): `pip install plotui` — macOS
-      arm64/x86_64, Linux x86_64/aarch64, abi3 ≥ 3.9; the wheels pull in the
-      CLI via the `plotui-cli` package
+      arm64/x86_64, Linux x86_64/aarch64, abi3 ≥ 3.9; the wheel bundles the
+      CLI binary
 - [x] Ratatui frontend (native): `plotui-ratatui` — StatefulWidget + app-owned
       PlotState, full parity with the Textual widget
       (`cargo run -p plotui-ratatui --example demo`)

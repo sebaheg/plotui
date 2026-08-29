@@ -4,23 +4,31 @@ build-backend = "maturin"
 
 [project]
 name = "plotui"
-version = "0.4.1"
+version = "0.4.2"
 description = "Interactive 2D/3D plots in the terminal — Plotly-style, for Textual, powered by a Rust core and the Kitty graphics protocol."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 keywords = ["terminal", "plot", "3d", "textual", "kitty", "tui", "visualization"]
-# plotui-cli is the compiled `plotui` binary in a wheel (built from
-# crates/plotui-cli); depending on it puts the CLI on PATH for pip users.
-dependencies = ["plotui-cli>=0.4.1"]
+dependencies = []
 
 [project.optional-dependencies]
 textual = ["textual>=0.60"]
 
+# The CLI ships inside the wheel: CI compiles crates/plotui-cli for the wheel's
+# target into python/plotui/_bin/plotui, and this entry point execs it.
+[project.scripts]
+plotui = "plotui._cli:main"
+
 [tool.maturin]
 # maturin declares License-File: LICENSE in the metadata but does not put the
-# file in the sdist on its own, and PyPI rejects that mismatch
-include = [{ path = "LICENSE", format = "sdist" }]
+# file in the sdist on its own, and PyPI rejects that mismatch. The _bin glob
+# bundles the prebuilt CLI when present (wheel builds); it matches nothing in
+# sdists and source builds.
+include = [
+    { path = "LICENSE", format = "sdist" },
+    { path = "python/plotui/_bin/*", format = "wheel" },
+]
 manifest-path = "crates/plotui-py/Cargo.toml"
 module-name = "plotui._plotui"
 python-source = "python"
