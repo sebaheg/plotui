@@ -58,6 +58,28 @@ The three TUI widgets have feature parity: render-path detection, tmux
 passthrough, drag/zoom/pan/keys, picking + hover, the 2D crosshair, text
 overlays, half-resolution interaction frames, and streaming extend.
 
+## Install the CLI
+
+`plotui` is also a command-line tool: pipe columns of numbers in, get a
+real-pixel chart out — interactive on a TTY (pan, zoom, crosshair), a single
+printed frame when piped or with `--static`.
+
+```bash
+curl -fsSL https://plotui.xyz/install.sh | sh   # prebuilt binary
+brew install sebaheg/tap/plotui                 # Homebrew (macOS / Linux)
+cargo install plotui                            # build from source
+cargo binstall plotui                           # prebuilt, via cargo-binstall
+```
+
+```bash
+seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line
+plotui scatter -H -d, data.csv                  # header row + comma-delimited
+plotui bar counts.tsv
+```
+
+Like every plotui frontend, the CLI needs a terminal with Kitty graphics
+(supported terminals below); elsewhere it prints a notice and exits.
+
 ## Develop
 
 Requires Rust and Python 3.9+. Build the native module into a virtualenv with

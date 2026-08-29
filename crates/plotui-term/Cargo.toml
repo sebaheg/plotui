@@ -3,11 +3,17 @@ name = "plotui-term"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Shared terminal-environment glue for plotui frontends: render-path detection, cell-pixel probing, tmux passthrough, and the per-frame render policy."
 
 [dependencies]
-plotui-core = { path = "../plotui-core" }
-plotui-protocol = { path = "../plotui-protocol" }
+plotui-core = { workspace = true }
+plotui-protocol = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["termios"] }

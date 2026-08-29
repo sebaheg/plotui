@@ -5,6 +5,7 @@ members = [
     "crates/plotui-protocol",
     "crates/plotui-term",
     "crates/plotui-bind",
+    "crates/plotui-cli",
     "crates/plotui-ffi",
     "crates/plotui-py",
     "crates/plotui-ratatui",
@@ -12,10 +13,29 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/sebaheg/plotui"
+homepage = "https://plotui.xyz"
+rust-version = "1.88"
+readme = "README.md"
+keywords = ["plot", "terminal", "tui", "kitty", "visualization"]
+categories = ["visualization", "command-line-utilities"]
+
+[workspace.dependencies]
+plotui-core = { version = "0.4.0", path = "crates/plotui-core" }
+plotui-protocol = { version = "0.4.0", path = "crates/plotui-protocol" }
+plotui-term = { version = "0.4.0", path = "crates/plotui-term" }
+plotui-bind = { version = "0.4.0", path = "crates/plotui-bind" }
+plotui-ratatui = { version = "0.4.0", path = "crates/plotui-ratatui" }
+ratatui = { version = "0.30", default-features = false }
+crossterm = "0.29"
 
 [profile.release]
 opt-level = 3
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

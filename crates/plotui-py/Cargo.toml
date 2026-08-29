@@ -3,6 +3,7 @@ name = "plotui-py"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "PyO3 bindings: exposes the plotui rendering engine to Python."
 
 [lib]

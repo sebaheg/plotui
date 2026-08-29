@@ -3,6 +3,7 @@ name = "plotui-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "wasm-bindgen bindings: expose the plotui engine to the browser as an ES module."
 
 [lib]

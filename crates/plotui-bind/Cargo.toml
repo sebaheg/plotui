@@ -3,7 +3,13 @@ name = "plotui-bind"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Shared binding-layer semantics for plotui language bindings: argument parsing, validation, defaults, and their exact error messages."
 
 [dependencies]
-plotui-core = { path = "../plotui-core" }
+plotui-core = { workspace = true }

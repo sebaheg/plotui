@@ -3,6 +3,7 @@ name = "plotui-ffi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "C ABI for the plotui engine (cdylib + staticlib), the layer behind the Go bindings."
 
 [lib]

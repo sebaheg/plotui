@@ -1,5 +1,5 @@
 [package]
-name = "plotui-ratatui"
+name = "plotui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,16 @@ rust-version.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Ratatui widget for plotui: interactive terminal plots via the Kitty graphics protocol."
+description = "Plot data from stdin or files as real terminal pixels (Kitty graphics): line, scatter, bar."
+
+[[bin]]
+name = "plotui"
+path = "src/main.rs"
 
 [dependencies]
 plotui-core = { workspace = true }
-plotui-protocol = { workspace = true }
 plotui-term = { workspace = true }
-ratatui = { workspace = true }
+plotui-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["crossterm"] }
 crossterm = { workspace = true }
-
-[dev-dependencies]
-ratatui = { version = "0.30", features = ["crossterm"] }
+clap = { version = "4", features = ["derive"] }

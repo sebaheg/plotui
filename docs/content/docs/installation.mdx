@@ -1,7 +1,39 @@
 ---
 title: Installation
-description: Build plotui from source with maturin. Wheels are coming.
+description: Install the plotui CLI with one command, or build the Python library from source with maturin.
 ---
+
+## CLI
+
+The `plotui` command plots data piped from the shell — line, scatter, and bar
+charts as real terminal pixels. Install a prebuilt binary:
+
+```bash
+curl -fsSL https://plotui.xyz/install.sh | sh
+```
+
+Or through a package manager:
+
+```bash
+brew install sebaheg/tap/plotui      # Homebrew (macOS / Linux)
+cargo install plotui                 # build from source
+cargo binstall plotui                # prebuilt, via cargo-binstall
+```
+
+Then pipe numbers at it:
+
+```bash
+seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line
+plotui scatter -H -d, data.csv
+```
+
+On a TTY the chart opens interactively (drag to pan, scroll to zoom, hover for
+the crosshair, `q` to quit); piped or with `--static` it prints one frame and
+exits. The CLI needs a terminal with Kitty graphics — **Kitty**, **Ghostty**,
+**iTerm2 ≥ 3.5**, **WezTerm**, or **Konsole**; see
+[Terminal support](/docs/terminals).
+
+## Python library
 
 plotui is a Rust extension for Python, built with
 [maturin](https://www.maturin.rs/). It requires **Rust** and **Python 3.9+**.
