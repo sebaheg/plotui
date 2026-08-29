@@ -139,7 +139,8 @@ fn drag_rotates_and_shift_drag_pans() {
     state.handle_event(&mouse(MouseEventKind::Down(MouseButton::Left), 5, 5, KeyModifiers::NONE));
     state.handle_event(&mouse(MouseEventKind::Drag(MouseButton::Left), 8, 5, KeyModifiers::NONE));
     let (yaw, pitch, ..) = state.plot().camera.state();
-    assert!((yaw - yaw0 - 3.0 * 0.03).abs() < 1e-9, "3 cells of drag = 3 * 0.03 rad of yaw");
+    // Camera-grab direction: dragging right orbits the view right (yaw −).
+    assert!((yaw0 - yaw - 3.0 * 0.03).abs() < 1e-9, "3 cells of drag = 3 * 0.03 rad of yaw");
     assert_eq!(pitch, pitch0);
     assert!(state.dragging());
     state.handle_event(&mouse(MouseEventKind::Up(MouseButton::Left), 8, 5, KeyModifiers::NONE));
@@ -167,7 +168,7 @@ fn scroll_and_keys_zoom_rotate_pan_reset() {
     let yaw0 = state.plot().camera.yaw;
     let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
     state.handle_event(&key(KeyCode::Left, KeyModifiers::NONE));
-    assert!((state.plot().camera.yaw - yaw0 + 0.1).abs() < 1e-9);
+    assert!((state.plot().camera.yaw - yaw0 - 0.1).abs() < 1e-9);
     state.handle_event(&key(KeyCode::Up, KeyModifiers::SHIFT));
     assert_eq!(state.plot().camera.pan_y, -2.0 * CELL_PX.1 as f64);
     state.handle_event(&key(KeyCode::Char('+'), KeyModifiers::NONE));

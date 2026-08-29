@@ -73,7 +73,9 @@ impl PlotState {
                     // under the pointer instead of lagging it.
                     self.plot.camera.pan(dx * self.cell_px.0 as f64, dy * self.cell_px.1 as f64);
                 } else {
-                    self.plot.camera.rotate(dx * ROTATE_PER_CELL, dy * ROTATE_PER_CELL);
+                    // Negated: dragging grabs the camera, not the object —
+                    // drag right orbits the view right (website-example feel).
+                    self.plot.camera.rotate(-dx * ROTATE_PER_CELL, -dy * ROTATE_PER_CELL);
                 }
                 self.invalidate();
                 None
@@ -160,10 +162,10 @@ impl PlotState {
             KeyCode::Right if shift => self.plot.camera.pan(KEY_PAN_CELLS * cw, 0.0),
             KeyCode::Up if shift => self.plot.camera.pan(0.0, -KEY_PAN_CELLS * ch),
             KeyCode::Down if shift => self.plot.camera.pan(0.0, KEY_PAN_CELLS * ch),
-            KeyCode::Left => self.plot.camera.rotate(-KEY_ROTATE_STEP, 0.0),
-            KeyCode::Right => self.plot.camera.rotate(KEY_ROTATE_STEP, 0.0),
-            KeyCode::Up => self.plot.camera.rotate(0.0, -KEY_ROTATE_STEP),
-            KeyCode::Down => self.plot.camera.rotate(0.0, KEY_ROTATE_STEP),
+            KeyCode::Left => self.plot.camera.rotate(KEY_ROTATE_STEP, 0.0),
+            KeyCode::Right => self.plot.camera.rotate(-KEY_ROTATE_STEP, 0.0),
+            KeyCode::Up => self.plot.camera.rotate(0.0, KEY_ROTATE_STEP),
+            KeyCode::Down => self.plot.camera.rotate(0.0, -KEY_ROTATE_STEP),
             KeyCode::Char('r') => self.plot.camera.reset(),
             _ => return,
         }

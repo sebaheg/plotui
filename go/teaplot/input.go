@@ -33,7 +33,9 @@ func (m Model) motion(mouse tea.Mouse) (Model, tea.Cmd) {
 			// cell's worth of pixels, so the plot stays under the pointer.
 			m.plot.Pan(dx*float64(m.cellW), dy*float64(m.cellH))
 		} else {
-			m.plot.Rotate(dx*rotatePerCell, dy*rotatePerCell)
+			// Negated: dragging grabs the camera, not the object — drag
+			// right orbits the view right (website-example feel).
+			m.plot.Rotate(-dx*rotatePerCell, -dy*rotatePerCell)
 		}
 		m.dirty = true
 		return m, m.refresh()
@@ -133,13 +135,13 @@ func (m Model) key(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case msg.Code == tea.KeyDown && shift:
 		m.plot.Pan(0, keyPanCells*ch)
 	case msg.Code == tea.KeyLeft:
-		m.plot.Rotate(-keyRotateStep, 0)
-	case msg.Code == tea.KeyRight:
 		m.plot.Rotate(keyRotateStep, 0)
+	case msg.Code == tea.KeyRight:
+		m.plot.Rotate(-keyRotateStep, 0)
 	case msg.Code == tea.KeyUp:
-		m.plot.Rotate(0, -keyRotateStep)
-	case msg.Code == tea.KeyDown:
 		m.plot.Rotate(0, keyRotateStep)
+	case msg.Code == tea.KeyDown:
+		m.plot.Rotate(0, -keyRotateStep)
 	case msg.Code == 'r':
 		m.plot.Reset()
 	default:

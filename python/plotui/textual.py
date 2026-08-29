@@ -520,7 +520,9 @@ class PlotWidget(Widget, can_focus=True):
                 # pointer instead of lagging it.
                 self.apply_pan(dx * self._cell_w, dy * self._cell_h)
             else:
-                self.apply_rotate(dx * 0.03, dy * 0.03)
+                # Negated: dragging grabs the camera, not the object — drag
+                # right orbits the view right (matches the website examples).
+                self.apply_rotate(-dx * 0.03, -dy * 0.03)
         elif not self._plot.is_3d():
             if self._crosshair:
                 px_w, px_h, px, py, _ = self._pixel_geometry(event.x, event.y)
@@ -566,13 +568,13 @@ class PlotWidget(Widget, can_focus=True):
         elif key in ("minus", "-"):
             self.apply_zoom(0.9)
         elif key == "left":
-            self.apply_rotate(-0.1, 0.0)
-        elif key == "right":
             self.apply_rotate(0.1, 0.0)
+        elif key == "right":
+            self.apply_rotate(-0.1, 0.0)
         elif key == "up":
-            self.apply_rotate(0.0, -0.1)
-        elif key == "down":
             self.apply_rotate(0.0, 0.1)
+        elif key == "down":
+            self.apply_rotate(0.0, -0.1)
         elif key == "shift+left":
             self.apply_pan(-2.0 * self._cell_w, 0.0)
         elif key == "shift+right":
