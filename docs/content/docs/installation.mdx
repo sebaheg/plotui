@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install the plotui CLI with one command, or build the Python library from source with maturin.
+description: Install the plotui CLI with one command, and the Python library with pip.
 ---
 
 ## CLI
@@ -16,6 +16,7 @@ Or through a package manager:
 
 ```bash
 brew install sebaheg/tap/plotui      # Homebrew (macOS / Linux)
+pip install plotui-cli               # prebuilt wheel (also comes with pip install plotui)
 cargo install plotui                 # build from source
 cargo binstall plotui                # prebuilt, via cargo-binstall
 ```
@@ -35,8 +36,17 @@ exits. The CLI needs a terminal with Kitty graphics — **Kitty**, **Ghostty**,
 
 ## Python library
 
+Prebuilt wheels (Python 3.9+, macOS and Linux) include the CLI:
+
+```bash
+pip install plotui
+```
+
+### Build from source
+
 plotui is a Rust extension for Python, built with
-[maturin](https://www.maturin.rs/). It requires **Rust** and **Python 3.9+**.
+[maturin](https://www.maturin.rs/). Building it yourself requires **Rust**
+and **Python 3.9+**.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate

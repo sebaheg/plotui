@@ -67,6 +67,7 @@ printed frame when piped or with `--static`.
 ```bash
 curl -fsSL https://plotui.xyz/install.sh | sh   # prebuilt binary
 brew install sebaheg/tap/plotui                 # Homebrew (macOS / Linux)
+pip install plotui-cli                          # prebuilt wheel (included in `pip install plotui`)
 cargo install plotui                            # build from source
 cargo binstall plotui                           # prebuilt, via cargo-binstall
 ```
