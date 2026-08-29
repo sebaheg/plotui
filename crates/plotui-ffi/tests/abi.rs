@@ -79,13 +79,14 @@ fn render_rgba_writes_structured_pixels() {
         assert_eq!(plotui_render_rgba(p, w, h, buf.as_mut_ptr()), PLOTUI_OK);
         plotui_free(p);
     }
-    let drawn = buf.chunks_exact(4).filter(|px| px[3] != 0).count();
+    let pixels = buf.as_chunks::<4>().0;
+    let drawn = pixels.iter().filter(|px| px[3] != 0).count();
     assert!(drawn > 0, "something must be drawn");
     assert!(drawn < w * h, "undrawn pixels keep alpha 0 (the plot floats on the terminal)");
     // The first palette slot must appear (the auto-assigned line color).
     let palette0 = plotui_core::PALETTE[0];
-    assert!(buf
-        .chunks_exact(4)
+    assert!(pixels
+        .iter()
         .any(|px| px[0] == palette0[0] && px[1] == palette0[1] && px[2] == palette0[2]));
 }
 

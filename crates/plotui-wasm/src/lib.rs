@@ -95,7 +95,7 @@ impl Plot {
         let c = resolve_color(&self.inner, color.as_deref())?;
         let nodes = plotui_bind::zip3(xs, ys, zs);
         let colors = plotui_bind::graph_node_colors(nodes.len(), None, c);
-        let pairs = edges.chunks_exact(2).map(|e| (e[0], e[1])).collect();
+        let pairs = edges.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
         Ok(self.inner.add_graph3d(nodes, colors, pairs, size.unwrap_or(3.5), None, None, None))
     }
 
