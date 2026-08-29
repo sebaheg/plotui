@@ -17,5 +17,9 @@ publish-jobs = ["homebrew"]
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
 # Whether to install an updater program
 install-updater = false
+# Build each app with --package instead of --workspace: plotui-py is a PyO3
+# cdylib that cannot compile for the musl targets and must stay out of the
+# release builds
+precise-builds = true
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
