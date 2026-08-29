@@ -259,13 +259,13 @@ pub unsafe extern "C" fn plotui_add_graph3d(
         let nodes = plotui_bind::zip3(xs, ys, zs);
         let n = nodes.len();
         let edge_list = match slice(edges, n_edges * 2) {
-            Ok(e) => e.chunks_exact(2).map(|c| (c[0], c[1])).collect(),
+            Ok(e) => e.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect(),
             Err(s) => return s,
         };
         let uniform = opt_rgb(rgb).unwrap_or([120, 180, 230]);
         let node_colors = match slice(node_rgbs, n_node_rgbs * 3) {
             Ok([]) => None,
-            Ok(bytes) => Some(bytes.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()),
+            Ok(bytes) => Some(bytes.as_chunks::<3>().0.to_vec()),
             Err(s) => return s,
         };
         let colors = plotui_bind::graph_node_colors(n, node_colors, uniform);
@@ -276,7 +276,7 @@ pub unsafe extern "C" fn plotui_add_graph3d(
         };
         let edge_colors = match slice(edge_rgbs, n_edge_rgbs * 3) {
             Ok([]) => None,
-            Ok(bytes) => Some(bytes.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()),
+            Ok(bytes) => Some(bytes.as_chunks::<3>().0.to_vec()),
             Err(s) => return s,
         };
         let shapes = match slice(node_shapes, n_shapes) {
