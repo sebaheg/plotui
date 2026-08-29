@@ -5,8 +5,7 @@ name: PyPI
 #   plotui-cli  — the compiled `plotui` binary in a wheel (maturin bin bindings);
 #                 the library depends on it, so `pip install plotui` gets the CLI
 #
-# Publishing uses PyPI trusted publishing: both project names must list this
-# repo + workflow as a publisher on pypi.org (no token secret needed).
+# Publishing authenticates with the PYPI_API_TOKEN repo secret.
 
 on:
   push:
@@ -65,8 +64,6 @@ jobs:
     name: Publish to PyPI
     needs: [wheels, sdist]
     runs-on: ubuntu-22.04
-    permissions:
-      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -75,3 +72,4 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
