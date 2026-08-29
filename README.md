@@ -208,12 +208,19 @@ dispatches those to every class in the MRO, so both would run).
 - [x] Graceful render-path auto-detection (placeholder / direct Kitty, with a
       supported-terminals notice elsewhere and a `PLOTUI_RENDER` override)
 - [ ] Sixel + iTerm2 OSC 1337 encoders for terminals without Kitty graphics
-- [ ] Prebuilt wheels (maturin + cibuildwheel)
+- [x] Prebuilt wheels (maturin + GitHub Actions): `pip install plotui` — macOS
+      arm64/x86_64, Linux x86_64/aarch64, abi3 ≥ 3.9; the wheels pull in the
+      CLI via the `plotui-cli` package
 - [x] Ratatui frontend (native): `plotui-ratatui` — StatefulWidget + app-owned
       PlotState, full parity with the Textual widget
       (`cargo run -p plotui-ratatui --example demo`)
 - [x] Bubble Tea frontend (cgo): `go/` bindings over the `plotui-ffi` C ABI +
       the `teaplot` component for Bubble Tea v2 (see `go/README.md`)
+- [x] CLI: `plotui line|scatter|bar` from stdin or a file — interactive on a
+      TTY, one static frame when piped; installed via curl, Homebrew, cargo,
+      or pip (see Install above)
+- [ ] CLI v2: `--follow` streaming, `scatter3d`, histogram/density/count
+      transforms, `--out png`
 - [ ] Prebuilt static libs for the Go bindings (today: local source build)
 
 ## License
