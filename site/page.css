@@ -155,6 +155,10 @@
   .fine { font-size: 15px; color: var(--body); max-width: 62ch; }
   .fine b { color: var(--bright); font-weight: 600; }
 
+  /* ---------- installation ---------- */
+  .install-panel { max-width: 680px; margin-top: 30px; }
+  .install-panel pre.shell { min-height: 180px; }
+
   /* ---------- get started ---------- */
   .start-grid {
     display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);

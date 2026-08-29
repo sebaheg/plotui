@@ -18,6 +18,7 @@
   <div class="wrap nav">
     <a class="wordmark" href="index.html">plo<span class="t1">t</span><span class="t2">u</span><span class="t3">i.</span>xyz</a>
     <nav class="nav-links" aria-label="Main">
+      <a href="#install">install</a>
       <a href="#start">get started</a>
       <a class="ex" href="examples.html">examples</a>
       <a href="https://docs.plotui.xyz">docs</a>
@@ -305,15 +306,57 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
     </div>
   </section>
 
+  <section id="install">
+    <div class="wrap">
+      <p class="sec-label"><span class="sw" style="background:var(--trace-3)"></span>installation</p>
+      <h2>One command. Pick yours.</h2>
+      <p class="sec-intro">The <b>plotui</b> CLI ships prebuilt for macOS and Linux — plot straight
+        from your shell: <code style="font-family:var(--mono);font-size:.85em">seq 100 | plotui line</code>.
+        Python users get the CLI bundled with the library wheel.</p>
+      <div class="install-panel">
+        <div class="lang-tabs" role="tablist" aria-label="Install method">
+          <button class="lang-tab active" type="button" role="tab" aria-selected="true" data-pm="shell">shell</button>
+          <button class="lang-tab" type="button" role="tab" aria-selected="false" data-pm="brew">homebrew</button>
+          <button class="lang-tab" type="button" role="tab" aria-selected="false" data-pm="pip">pip</button>
+          <button class="lang-tab" type="button" role="tab" aria-selected="false" data-pm="cargo">cargo</button>
+        </div>
+        <pre class="shell" data-pm="shell" aria-label="Shell installer"><code><span class="cm"># prebuilt binary, macOS &amp; Linux:</span>
+<span class="ps1">❯</span> curl -fsSL https://plotui.xyz/install.sh | sh
+
+<span class="cm"># then pipe numbers at it:</span>
+<span class="ps1">❯</span> seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line</code></pre>
+        <pre class="shell" data-pm="brew" hidden aria-label="Homebrew install"><code><span class="cm"># prebuilt bottle, macOS &amp; Linux:</span>
+<span class="ps1">❯</span> brew install sebaheg/tap/plotui
+
+<span class="cm"># then pipe numbers at it:</span>
+<span class="ps1">❯</span> seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line</code></pre>
+        <pre class="shell" data-pm="pip" hidden aria-label="pip install"><code><span class="cm"># the CLI as a prebuilt wheel:</span>
+<span class="ps1">❯</span> pip install plotui-cli
+
+<span class="cm"># or the Python library — the CLI comes with it:</span>
+<span class="ps1">❯</span> pip install plotui</code></pre>
+        <pre class="shell" data-pm="cargo" hidden aria-label="cargo install"><code><span class="cm"># prebuilt, via cargo-binstall:</span>
+<span class="ps1">❯</span> cargo binstall plotui
+
+<span class="cm"># or compile from source:</span>
+<span class="ps1">❯</span> cargo install plotui</code></pre>
+      </div>
+      <p class="fine">The chart opens interactively in your terminal — drag to pan, scroll to
+        zoom, <b>q</b> to quit; pipe the output onward and it prints a single frame instead.
+        Needs a <a href="#compat">terminal with Kitty graphics</a>.</p>
+    </div>
+  </section>
+
   <section id="start">
     <div class="wrap">
       <p class="sec-label"><span class="sw" style="background:var(--trace-1)"></span>get started</p>
       <div class="start-grid">
         <div>
           <span class="status-tag">status: early scaffold</span>
-          <h2>Build from source today. Wheels are coming.</h2>
-          <p>You need Rust and Python 3.9+. <a href="https://www.maturin.rs/">maturin</a> compiles
-            the native module into your virtualenv; then run the demos in any supported terminal.</p>
+          <h2>Prefer source? Build it locally.</h2>
+          <p>For hacking on plotui itself you need Rust and Python 3.9+.
+            <a href="https://www.maturin.rs/">maturin</a> compiles the native module into your
+            virtualenv; then run the demos in any supported terminal.</p>
           <div class="road" aria-label="Roadmap">
             <div class="done">2D scatter · line · bar</div>
             <div class="todo">3D surface / mesh</div>
@@ -324,7 +367,7 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
             <div class="done">render auto-detect</div>
             <div class="todo">rolling window (max_points)</div>
             <div class="done">tmux passthrough</div>
-            <div class="todo">prebuilt wheels</div>
+            <div class="done">prebuilt wheels · CLI</div>
             <div class="done">trace visibility toggles</div>
             <div class="done">Ratatui / Bubble Tea</div>
           </div>
@@ -396,6 +439,19 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
 document.querySelector('a.wordmark').addEventListener('click', function (e) {
   e.preventDefault();
   window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+// Install section: toggle between install methods.
+document.querySelectorAll('#install .lang-tab').forEach(function (tab) {
+  tab.addEventListener('click', function () {
+    document.querySelectorAll('#install .lang-tab').forEach(function (t) {
+      t.classList.toggle('active', t === tab);
+      t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
+    });
+    document.querySelectorAll('#install pre.shell[data-pm]').forEach(function (p) {
+      p.hidden = p.dataset.pm !== tab.dataset.pm;
+    });
+  });
 });
 
 // API section: toggle the example between Python, Rust, and Go.
