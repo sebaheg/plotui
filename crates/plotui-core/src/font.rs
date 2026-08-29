@@ -144,6 +144,70 @@ pub fn draw_text(fb: &mut Framebuffer, x: i32, y: i32, text: &str, scale: i32, z
     }
 }
 
+/// Draw `text` like [`draw_text`], but antialiased against a known opaque
+/// background: each output pixel takes its coverage from a sharpened bilinear
+/// sample of the glyph bitmap and is written pre-blended between `bg` and
+/// `color`. Made for the legend, which paints its own background first — text
+/// over transparency has nothing to blend with and keeps using [`draw_text`].
+/// At scale 1 the samples land on cell centers and the output is identical.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_text_aa(
+    fb: &mut Framebuffer,
+    x: i32,
+    y: i32,
+    text: &str,
+    scale: i32,
+    z: f32,
+    color: Rgb,
+    bg: Rgb,
+) {
+    let scale = scale.max(1);
+    if scale == 1 {
+        return draw_text(fb, x, y, text, scale, z, color);
+    }
+    let s = scale as f32;
+    let mut cx = x;
+    for ch in text.chars() {
+        let code = ch as usize;
+        if (0x20..=0x7E).contains(&code) {
+            let glyph = &FONT[code - 0x20];
+            let sample = |gx: i32, gy: i32| -> f32 {
+                if (0..5).contains(&gx) && (0..7).contains(&gy) {
+                    (glyph[gx as usize] >> gy & 1) as f32
+                } else {
+                    0.0
+                }
+            };
+            for oy in 0..(CHAR_H * scale) {
+                for ox in 0..(5 * scale) {
+                    let u = (ox as f32 + 0.5) / s - 0.5;
+                    let v = (oy as f32 + 0.5) / s - 0.5;
+                    let (fu, fv) = (u - u.floor(), v - v.floor());
+                    let (gu, gv) = (u.floor() as i32, v.floor() as i32);
+                    let cov = sample(gu, gv) * (1.0 - fu) * (1.0 - fv)
+                        + sample(gu + 1, gv) * fu * (1.0 - fv)
+                        + sample(gu, gv + 1) * (1.0 - fu) * fv
+                        + sample(gu + 1, gv + 1) * fu * fv;
+                    // Sharpen: pure bilinear reads blurry at glyph sizes; a
+                    // narrow smoothstep keeps cores solid and edges soft.
+                    let t = ((cov - 0.35) / 0.3).clamp(0.0, 1.0);
+                    let t = t * t * (3.0 - 2.0 * t);
+                    if t <= 0.02 {
+                        continue;
+                    }
+                    let px = [
+                        (bg[0] as f32 + (color[0] as f32 - bg[0] as f32) * t) as u8,
+                        (bg[1] as f32 + (color[1] as f32 - bg[1] as f32) * t) as u8,
+                        (bg[2] as f32 + (color[2] as f32 - bg[2] as f32) * t) as u8,
+                    ];
+                    fb.put_px(cx + ox, y + oy, z, px);
+                }
+            }
+        }
+        cx += CHAR_W * scale;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +236,37 @@ mod tests {
         draw_text(&mut fb2, 0, 0, "8", 2, 0.0, [255, 255, 255]);
         let count = |fb: &Framebuffer| fb.rgba().chunks(4).filter(|px| px[3] > 0).count();
         assert_eq!(count(&fb2), count(&fb1) * 4);
+    }
+
+    /// At scale 1 the antialiased path matches the hard-pixel path exactly.
+    #[test]
+    fn aa_at_scale_one_matches_draw_text() {
+        let mut plain = Framebuffer::new(80, 20);
+        let mut aa = Framebuffer::new(80, 20);
+        draw_text(&mut plain, 0, 0, "Ag4", 1, 0.0, [255, 255, 255]);
+        draw_text_aa(&mut aa, 0, 0, "Ag4", 1, 0.0, [255, 255, 255], [0, 0, 0]);
+        assert_eq!(plain.rgba(), aa.rgba());
+    }
+
+    /// At scale ≥ 2 the edges carry intermediate blends toward the background
+    /// — the antialiasing that softens the scaled bitmap staircase.
+    #[test]
+    fn aa_at_scale_two_blends_edges() {
+        let mut fb = Framebuffer::new(80, 40);
+        draw_text_aa(&mut fb, 0, 0, "y", 2, 0.0, [255, 255, 255], [0, 0, 0]);
+        let mut full = 0;
+        let mut partial = 0;
+        for px in fb.rgba().chunks(4) {
+            if px[3] == 255 {
+                if px[0] == 255 {
+                    full += 1;
+                } else {
+                    partial += 1;
+                }
+            }
+        }
+        assert!(full > 0, "glyph cores stay solid");
+        assert!(partial > 0, "edges carry blended pixels");
     }
 
     #[test]

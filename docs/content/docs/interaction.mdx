@@ -1,0 +1,80 @@
+---
+title: Interaction
+description: The orbit camera, hover picking, the 2D crosshair, and camera state.
+---
+
+The engine has no input handling of its own — frontends forward events to
+these methods and re-render. The Textual widget wires all of this up for you.
+
+## Camera
+
+```python
+plot.rotate(d_yaw, d_pitch)   # radians; pitch clamps to ±1.55
+plot.zoom_by(factor)          # clamps to [0.05, 50]
+plot.pan(dx_px, dy_px)        # screen-space, in framebuffer pixels
+plot.reset()
+```
+
+Save and restore views across plot rebuilds (needed only for *structural*
+changes — for growing data, [stream instead](#streaming-data)):
+
+```python
+state = plot.camera_state()               # (yaw, pitch, zoom, pan_x, pan_y)
+plot.set_camera_state(*state)             # clamped like the mutators
+plot.set_bounds((x0, y0, z0), (x1, y1, z1))  # pin the 3D frame
+```
+
+## Streaming data
+
+Every `add_*` call returns a **trace handle**. Append points through it
+instead of rebuilding the plot — the cost is proportional to the new points,
+not the history, and axes autoscale to the grown data on the next render:
+
+```python
+h = plot.add_line([], [], name="loss")
+plot.extend(h, xs, ys)             # 2D: (xs, ys); bars: (xs, heights)
+plot.extend(h3, xs, ys, zs)        # 3D scatter/line
+plot.set_visible(h, False)         # hide; True if the state changed
+```
+
+`extend` accepts the same inputs as the `add_*` calls (lists or numpy
+arrays) and renders exactly as if the concatenated data had been added in
+one call. Graph and surface traces are structural — edges reference node
+indices and grids have a fixed shape — so extending them raises
+`ValueError`; rebuild for those, carrying the view over with
+`camera_state`/`set_bounds` as above.
+
+A hidden trace keeps its handle, its palette slot, and its flat node/edge
+indices; only its geometry, bounds contribution, legend entry, and
+right-axis column disappear until you show it again. Two caveats worth
+knowing: appending a bar whose x narrows the smallest gap re-flows every
+bar's width in that trace, and appending to a 3D scatter that is not the
+last node-bearing trace shifts the flat node indices after it (plotui remaps
+its own selection/hover; hosts holding node indices must do the same).
+
+## Picking (3D)
+
+```python
+element = plot.pick_element_px(px_w, px_h, px, py, node_r, edge_r)
+# -> ("node", i) | ("edge", i) | None, nodes take priority
+
+plot.set_hovered(element)    # lights it up white; True if state changed
+plot.set_selected(element)   # ring/glow treatment
+```
+
+Flat indices count nodes across all traces in insertion order. Project them
+to exact pixel coordinates for overlays and hit-testing:
+
+```python
+positions = plot.project_nodes(px_w, px_h)   # [x_px, y_px, depth] per node
+```
+
+## Crosshair (2D)
+
+```python
+plot.set_hover2d(px)     # snap to nearest sample x, draw guide + values
+plot.set_hover2d(None)   # clear
+```
+
+Both hover setters return `True` when the state actually changed, so
+frontends know whether a repaint is needed.

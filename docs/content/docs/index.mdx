@@ -1,0 +1,48 @@
+---
+title: Introduction
+description: Interactive 2D/3D plots in the terminal — real pixels, a Rust core, and the Kitty graphics protocol.
+---
+
+**plotui** renders charts as real pixel graphics inside a terminal — not
+block characters, not braille approximations — and lets you rotate, pan, and
+zoom them live. It is built to drop into a
+[Textual](https://textual.textualize.io/) app, with the rendering engine
+written in Rust so it stays fast in 2D and 3D.
+
+```python
+from plotui import Plot
+
+plot = Plot()
+plot.add_line(xs, ys, name="forecast")     # 2D: axes/ticks/legend appear
+plot.add_line(xs, costs, axis="y2")        # independent right-hand axis
+plot.add_scatter3d(xs, ys, zs)             # any 3D trace -> orbit camera
+plot.add_line3d(xs, ys, zs)                # 3D trajectory/curve
+plot.add_surface3d(xs, ys, Z)              # grid surface, viridis by default
+```
+
+## The one rule
+
+**The Rust core owns pixels, not the terminal.** The engine has no event loop
+and no input handling — your TUI framework owns the loop, forwards input to
+the camera, and asks for a frame:
+
+```
+f64 data ─▶ camera + rasterizer ─▶ RGBA buffer ─▶ kitty escape bytes ─▶ your terminal
+```
+
+Because the core and the protocol layer are pure and I/O-free, the same engine
+can back every frontend — and be unit-tested by hashing pixel buffers.
+
+## What works today
+
+- **2D** — line, scatter, and bar charts with automatic axes, ticks, and a
+  legend; up to two independent right-hand y-axes; a hover crosshair with a
+  value readout.
+- **3D** — scatter clouds, node-link graphs with hover/click picking,
+  polylines, and Gouraud-shaded grid surfaces with viridis/plasma colormaps —
+  all under one orbit camera.
+- **Textual widget** — `PlotWidget` picks the right render path per terminal,
+  routes mouse and keyboard input to the camera, and repaints without flicker.
+
+Status: **early scaffold** — APIs may still move. Build from source with
+[maturin](/docs/installation); wheels are coming.

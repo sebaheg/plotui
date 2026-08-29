@@ -1,0 +1,19 @@
+# fly.io config for the plotui landing page (plotui.fly.dev).
+# Deploy from this directory:  cd site && fly deploy
+
+app = "plotui"
+primary_region = "arn"  # Stockholm
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 80
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

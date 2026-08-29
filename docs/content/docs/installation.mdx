@@ -1,0 +1,41 @@
+---
+title: Installation
+description: Build plotui from source with maturin. Wheels are coming.
+---
+
+plotui is a Rust extension for Python, built with
+[maturin](https://www.maturin.rs/). It requires **Rust** and **Python 3.9+**.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install maturin textual
+maturin develop --release
+```
+
+This compiles the three crates and installs the `plotui` package (with the
+native `plotui._plotui` module) into your virtualenv.
+
+## Try the demos
+
+In a terminal with Kitty graphics support — **Kitty**, **Ghostty**,
+**iTerm2 ≥ 3.5**, or **WezTerm**:
+
+```bash
+python examples/raw_demo.py        # 3D scatter via Kitty images
+python examples/textual_demo.py    # embedded in Textual
+python examples/textual_graph.py   # interactive graph: hover + click-to-inspect
+```
+
+plotui only draws real pixels. Terminals without Kitty graphics get a notice
+naming supported terminals — never a degraded plot. See
+[Terminal support](/docs/terminals) for the full matrix.
+
+## Project layout
+
+```
+crates/
+  plotui-core/      pure engine: data model, 3D camera, rasterizer -> RGBA
+  plotui-protocol/  RGBA -> terminal bytes (Kitty graphics protocol)
+  plotui-py/        PyO3 bindings -> the plotui._plotui native module
+python/plotui/      the Python package + Textual PlotWidget
+```

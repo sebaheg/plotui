@@ -1,0 +1,19 @@
+[package]
+name = "plotui-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI for the plotui engine (cdylib + staticlib), the layer behind the Go bindings."
+
+[lib]
+name = "plotui_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+plotui-core = { path = "../plotui-core" }
+plotui-protocol = { path = "../plotui-protocol" }
+plotui-term = { path = "../plotui-term" }
+plotui-bind = { path = "../plotui-bind" }
+
+[dev-dependencies]
+cbindgen = { version = "0.29", default-features = false }

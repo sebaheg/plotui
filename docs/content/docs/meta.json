@@ -1,0 +1,12 @@
+{
+  "pages": [
+    "index",
+    "installation",
+    "quickstart",
+    "charts-2d",
+    "plots-3d",
+    "interaction",
+    "textual-widget",
+    "terminals"
+  ]
+}

@@ -1,0 +1,1161 @@
+//! plotui-ffi — the C ABI over the plotui engine.
+//!
+//! Mirrors the PyO3 binding surface function-for-function, with the shared
+//! semantics (defaults, validation, error text) coming from `plotui-bind`
+//! and the terminal glue from `plotui-term`, so Python and C callers see
+//! identical behavior.
+//!
+//! Conventions (documented in include/plotui.h, which cbindgen generates
+//! from this file — see tests/header.rs):
+//! - A plot is an opaque `PlotuiPlot*` from `plotui_new`, freed with
+//!   `plotui_free`. Not thread-safe: one thread at a time.
+//! - Fallible functions return a `PlotuiStatus` (`PLOTUI_OK` = 0); the
+//!   message is `plotui_last_error()` — a thread-local pointer valid until
+//!   the next failing call on that thread.
+//! - Input pointers are borrowed for the call only. Optional values are
+//!   NULL pointers (colors are 3-byte RGB arrays); arrays are (ptr, len)
+//!   with independent per-axis lengths, min-truncated like every binding.
+//! - Returned strings are freed with `plotui_string_free`; pixel/float
+//!   output buffers are caller-allocated.
+
+use std::cell::RefCell;
+use std::ffi::{c_char, CStr, CString};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ptr;
+
+use plotui_bind::{BindError, BindErrorKind};
+use plotui_core::{Element, Plot, Rgb};
+use plotui_term::policy::{active_scale, scaled_dims};
+
+pub const PLOTUI_OK: i32 = 0;
+pub const PLOTUI_ERR_INVALID_ARG: i32 = 1;
+pub const PLOTUI_ERR_UNKNOWN_HANDLE: i32 = 2;
+pub const PLOTUI_ERR_STRUCTURAL: i32 = 3;
+pub const PLOTUI_ERR_NULL: i32 = 4;
+
+/// Above this 3D vertex count, render at reduced resolution while
+/// interacting (see `plotui_interactive_scale`).
+pub const PLOTUI_LARGE_VERTEX_COUNT: usize = plotui_term::policy::LARGE_VERTEX_COUNT;
+
+/// An opaque plot handle: data + camera + this plot's Kitty image id.
+pub struct PlotuiPlot {
+    plot: Plot,
+    image_id: u32,
+}
+
+thread_local! {
+    static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
+}
+
+fn set_error(msg: &str) {
+    let sanitized = msg.replace('\0', " ");
+    LAST_ERROR.with(|e| *e.borrow_mut() = CString::new(sanitized).unwrap_or_default());
+}
+
+fn bind_status(e: BindError) -> i32 {
+    set_error(&e.msg);
+    match e.kind {
+        BindErrorKind::InvalidArg => PLOTUI_ERR_INVALID_ARG,
+        BindErrorKind::UnknownHandle => PLOTUI_ERR_UNKNOWN_HANDLE,
+        BindErrorKind::Structural => PLOTUI_ERR_STRUCTURAL,
+    }
+}
+
+/// Run a fallible export body with panic containment (unwinding across
+/// `extern "C"` is undefined behavior).
+fn guard(f: impl FnOnce() -> i32) -> i32 {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(status) => status,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "internal panic".into());
+            set_error(&format!("internal panic: {msg}"));
+            PLOTUI_ERR_INVALID_ARG
+        }
+    }
+}
+
+/// # Safety
+/// The standard (ptr, len) contract: null with len 0 is an empty slice.
+unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], i32> {
+    if ptr.is_null() {
+        if len == 0 {
+            return Ok(&[]);
+        }
+        set_error("null pointer with nonzero length");
+        return Err(PLOTUI_ERR_NULL);
+    }
+    Ok(std::slice::from_raw_parts(ptr, len))
+}
+
+unsafe fn opt_rgb(ptr: *const u8) -> Option<Rgb> {
+    if ptr.is_null() {
+        None
+    } else {
+        let s = std::slice::from_raw_parts(ptr, 3);
+        Some([s[0], s[1], s[2]])
+    }
+}
+
+unsafe fn opt_str<'a>(ptr: *const c_char) -> Result<Option<&'a str>, i32> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    match CStr::from_ptr(ptr).to_str() {
+        Ok(s) => Ok(Some(s)),
+        Err(_) => {
+            set_error("string argument is not valid UTF-8");
+            Err(PLOTUI_ERR_INVALID_ARG)
+        }
+    }
+}
+
+unsafe fn plot_ref<'a>(p: *const PlotuiPlot) -> Result<&'a PlotuiPlot, i32> {
+    p.as_ref().ok_or_else(|| {
+        set_error("null plot handle");
+        PLOTUI_ERR_NULL
+    })
+}
+
+unsafe fn plot_mut<'a>(p: *mut PlotuiPlot) -> Result<&'a mut PlotuiPlot, i32> {
+    p.as_mut().ok_or_else(|| {
+        set_error("null plot handle");
+        PLOTUI_ERR_NULL
+    })
+}
+
+fn out_string(s: String, out: *mut *mut c_char) -> i32 {
+    if out.is_null() {
+        set_error("null output pointer");
+        return PLOTUI_ERR_NULL;
+    }
+    let c = CString::new(s.replace('\0', "")).unwrap_or_default();
+    unsafe { *out = c.into_raw() };
+    PLOTUI_OK
+}
+
+fn axis_of(axis: Option<&str>) -> Result<plotui_core::YAxis, BindError> {
+    plotui_bind::parse_axis(axis.unwrap_or("y"))
+}
+
+// ---- lifecycle & errors ----
+
+/// A fresh plot with its own Kitty image id (the first plot in a process
+/// gets the protocol's default id, 4242).
+#[no_mangle]
+pub extern "C" fn plotui_new() -> *mut PlotuiPlot {
+    Box::into_raw(Box::new(PlotuiPlot {
+        plot: Plot::new(),
+        image_id: plotui_term::next_image_id(),
+    }))
+}
+
+/// Free a plot. NULL is a no-op.
+///
+/// # Safety
+/// `p` must be a pointer from `plotui_new` not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_free(p: *mut PlotuiPlot) {
+    if !p.is_null() {
+        drop(Box::from_raw(p));
+    }
+}
+
+/// The message for the last failing call on this thread ("" when none).
+/// Borrowed: valid until the next failing call on the same thread.
+#[no_mangle]
+pub extern "C" fn plotui_last_error() -> *const c_char {
+    LAST_ERROR.with(|e| e.borrow().as_ptr())
+}
+
+/// Free a string returned by this library. NULL is a no-op.
+///
+/// # Safety
+/// `s` must be a string returned by this library, not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_string_free(s: *mut c_char) {
+    if !s.is_null() {
+        drop(CString::from_raw(s));
+    }
+}
+
+// ---- traces ----
+
+/// # Safety
+/// Pointer arguments follow the crate conventions (see the module docs).
+#[no_mangle]
+pub unsafe extern "C" fn plotui_add_scatter3d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    zs: *const f32,
+    nz: usize,
+    rgb: *const u8,
+    size: f32,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys, zs) = match (slice(xs, nx), slice(ys, ny), slice(zs, nz)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(s), ..) | (_, Err(s), _) | (.., Err(s)) => return s,
+        };
+        let pts = plotui_bind::zip3(xs, ys, zs);
+        // Same default as the Python binding's add_scatter3d.
+        let color = opt_rgb(rgb).unwrap_or([230, 60, 120]);
+        let h = p.plot.add_scatter3d(pts, color, size);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// # Safety
+/// Pointer arguments follow the crate conventions. `edges` is `2 * n_edges`
+/// u32s as (i, j) pairs; `node_rgbs`/`edge_rgbs` are `3 * n` byte triples;
+/// `node_shapes` is an array of NUL-terminated shape names.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_graph3d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    zs: *const f32,
+    nz: usize,
+    edges: *const u32,
+    n_edges: usize,
+    node_rgbs: *const u8,
+    n_node_rgbs: usize,
+    rgb: *const u8,
+    size: f32,
+    node_sizes: *const f32,
+    n_node_sizes: usize,
+    edge_rgbs: *const u8,
+    n_edge_rgbs: usize,
+    node_shapes: *const *const c_char,
+    n_shapes: usize,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys, zs) = match (slice(xs, nx), slice(ys, ny), slice(zs, nz)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(s), ..) | (_, Err(s), _) | (.., Err(s)) => return s,
+        };
+        let nodes = plotui_bind::zip3(xs, ys, zs);
+        let n = nodes.len();
+        let edge_list = match slice(edges, n_edges * 2) {
+            Ok(e) => e.chunks_exact(2).map(|c| (c[0], c[1])).collect(),
+            Err(s) => return s,
+        };
+        let uniform = opt_rgb(rgb).unwrap_or([120, 180, 230]);
+        let node_colors = match slice(node_rgbs, n_node_rgbs * 3) {
+            Ok([]) => None,
+            Ok(bytes) => Some(bytes.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()),
+            Err(s) => return s,
+        };
+        let colors = plotui_bind::graph_node_colors(n, node_colors, uniform);
+        let sizes = match slice(node_sizes, n_node_sizes) {
+            Ok([]) => None,
+            Ok(s) => Some(s.to_vec()),
+            Err(s) => return s,
+        };
+        let edge_colors = match slice(edge_rgbs, n_edge_rgbs * 3) {
+            Ok([]) => None,
+            Ok(bytes) => Some(bytes.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()),
+            Err(s) => return s,
+        };
+        let shapes = match slice(node_shapes, n_shapes) {
+            Ok([]) => None,
+            Ok(ptrs) => {
+                let mut names = Vec::with_capacity(ptrs.len());
+                for &sp in ptrs {
+                    match opt_str(sp) {
+                        Ok(Some(s)) => names.push(s),
+                        Ok(None) => {
+                            set_error("null node shape name");
+                            return PLOTUI_ERR_NULL;
+                        }
+                        Err(s) => return s,
+                    }
+                }
+                match plotui_bind::parse_shapes(&names) {
+                    Ok(v) => Some(v),
+                    Err(e) => return bind_status(e),
+                }
+            }
+            Err(s) => return s,
+        };
+        let h = p.plot.add_graph3d(nodes, colors, edge_list, size, sizes, edge_colors, shapes);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_line3d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    zs: *const f32,
+    nz: usize,
+    rgb: *const u8,
+    width: f32,
+    name: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys, zs) = match (slice(xs, nx), slice(ys, ny), slice(zs, nz)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(s), ..) | (_, Err(s), _) | (.., Err(s)) => return s,
+        };
+        let name = match opt_str(name) {
+            Ok(n) => n.map(str::to_string),
+            Err(s) => return s,
+        };
+        let pts = plotui_bind::zip3(xs, ys, zs);
+        let color = p.plot.resolve_color(opt_rgb(rgb));
+        let h = p.plot.add_line3d(pts, color, width, name);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// `zs` is the flat row-major grid: `zs[j * nx + i]` = height at
+/// `(xs[i], ys[j])`; `nz` must equal `nx * ny`. `colormap` NULL means a
+/// solid color.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_surface3d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    zs: *const f32,
+    nz: usize,
+    rgb: *const u8,
+    colormap: *const c_char,
+    wireframe: bool,
+    name: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys, zs) = match (slice(xs, nx), slice(ys, ny), slice(zs, nz)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(s), ..) | (_, Err(s), _) | (.., Err(s)) => return s,
+        };
+        if let Err(e) = plotui_bind::check_surface_grid_len(nx, ny, nz) {
+            return bind_status(e);
+        }
+        let cm = match opt_str(colormap) {
+            Ok(name) => match plotui_bind::parse_colormap(name) {
+                Ok(cm) => cm,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let name = match opt_str(name) {
+            Ok(n) => n.map(str::to_string),
+            Err(s) => return s,
+        };
+        let color = p.plot.resolve_color(opt_rgb(rgb));
+        let h =
+            p.plot.add_surface3d(xs.to_vec(), ys.to_vec(), zs.to_vec(), color, cm, wireframe, name);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn add_2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    rgb: *const u8,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+    add: impl FnOnce(&mut Plot, Vec<f32>, Vec<f32>, Rgb, Option<String>, plotui_core::YAxis) -> usize,
+) -> i32 {
+    let p = match plot_mut(p) {
+        Ok(p) => p,
+        Err(s) => return s,
+    };
+    let (xs, ys) = match (slice(xs, nx), slice(ys, ny)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(s), _) | (_, Err(s)) => return s,
+    };
+    let name = match opt_str(name) {
+        Ok(n) => n.map(str::to_string),
+        Err(s) => return s,
+    };
+    let axis = match opt_str(axis) {
+        Ok(a) => match axis_of(a) {
+            Ok(a) => a,
+            Err(e) => return bind_status(e),
+        },
+        Err(s) => return s,
+    };
+    let color = p.plot.resolve_color(opt_rgb(rgb));
+    let h = add(&mut p.plot, xs.to_vec(), ys.to_vec(), color, name, axis);
+    if !out_handle.is_null() {
+        *out_handle = h;
+    }
+    PLOTUI_OK
+}
+
+/// # Safety
+/// Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+/// "y3" (NULL = "y").
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_scatter2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    rgb: *const u8,
+    size: f32,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        add_2d(p, xs, nx, ys, ny, rgb, name, axis, out_handle, |plot, xs, ys, c, name, ax| {
+            plot.add_scatter2d(xs, ys, c, size, name, ax)
+        })
+    })
+}
+
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_line2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    rgb: *const u8,
+    width: f32,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        add_2d(p, xs, nx, ys, ny, rgb, name, axis, out_handle, |plot, xs, ys, c, name, ax| {
+            plot.add_line2d(xs, ys, c, width, name, ax)
+        })
+    })
+}
+
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_bar2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    heights: *const f32,
+    nh: usize,
+    rgb: *const u8,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        add_2d(p, xs, nx, heights, nh, rgb, name, axis, out_handle, |plot, xs, ys, c, name, ax| {
+            plot.add_bar2d(xs, ys, c, name, ax)
+        })
+    })
+}
+
+/// Append points to a trace: `(xs, ys)` for 2D traces (`zs` NULL), `(xs,
+/// ys, zs)` for 3D scatter/line traces.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_extend(
+    p: *mut PlotuiPlot,
+    handle: usize,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    zs: *const f32,
+    nz: usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys) = match (slice(xs, nx), slice(ys, ny)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(s), _) | (_, Err(s)) => return s,
+        };
+        let zs = if zs.is_null() {
+            None
+        } else {
+            match slice(zs, nz) {
+                Ok(z) => Some(z),
+                Err(s) => return s,
+            }
+        };
+        match plotui_bind::extend(&mut p.plot, handle, xs, ys, zs) {
+            Ok(()) => PLOTUI_OK,
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_visible(
+    p: *mut PlotuiPlot,
+    handle: usize,
+    visible: bool,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        match p.plot.set_visible(handle, visible) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(_) => {
+                set_error(&format!("unknown trace handle {handle}"));
+                PLOTUI_ERR_UNKNOWN_HANDLE
+            }
+        }
+    })
+}
+
+const ELEMENT_NONE: i32 = 0;
+const ELEMENT_NODE: i32 = 1;
+const ELEMENT_EDGE: i32 = 2;
+
+fn element_of(kind: i32, index: usize) -> Result<Option<Element>, BindError> {
+    match kind {
+        ELEMENT_NONE => Ok(None),
+        ELEMENT_NODE => Ok(Some(Element::Node(index))),
+        ELEMENT_EDGE => Ok(Some(Element::Edge(index))),
+        _ => Err(BindError {
+            kind: BindErrorKind::InvalidArg,
+            msg: format!("element kind must be 0 (none), 1 (node) or 2 (edge), got {kind}"),
+        }),
+    }
+}
+
+fn element_parts(el: Option<Element>) -> (i32, usize) {
+    match el {
+        None => (ELEMENT_NONE, 0),
+        Some(Element::Node(i)) => (ELEMENT_NODE, i),
+        Some(Element::Edge(i)) => (ELEMENT_EDGE, i),
+    }
+}
+
+/// Select an element (`kind`: 0 none, 1 node, 2 edge).
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_selected(p: *mut PlotuiPlot, kind: i32, index: usize) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        match element_of(kind, index) {
+            Ok(el) => {
+                p.plot.selected = el;
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Hover an element (`kind` as in `plotui_set_selected`); `out_changed`
+/// tells the frontend whether a repaint is needed.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_hovered(
+    p: *mut PlotuiPlot,
+    kind: i32,
+    index: usize,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        match element_of(kind, index) {
+            Ok(el) => {
+                let changed = plotui_bind::set_hovered(&mut p.plot, el);
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Set the 2D crosshair position in framebuffer pixels (`has_px` false
+/// clears it). Returns whether the state changed (repaint needed).
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_hover2d(p: *mut PlotuiPlot, has_px: bool, px: f32) -> bool {
+    match plot_mut(p) {
+        Ok(p) => plotui_bind::set_hover2d(&mut p.plot, has_px.then_some(px)),
+        Err(_) => false,
+    }
+}
+
+/// Pick under `(px, py)`: nearest node within `node_radius`, else nearest
+/// graph edge within `edge_radius` (negative = the default,
+/// 0.75 × node_radius). `out_kind` is 0/1/2 as in `plotui_set_selected`.
+///
+/// # Safety
+/// `p` must be a live plot handle; out pointers may be NULL.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_pick_element_px(
+    p: *const PlotuiPlot,
+    px_w: usize,
+    px_h: usize,
+    px: f32,
+    py: f32,
+    node_radius: f32,
+    edge_radius: f32,
+    out_kind: *mut i32,
+    out_index: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let er = (edge_radius >= 0.0).then_some(edge_radius);
+        let el = plotui_bind::pick_element_px(&p.plot, px_w, px_h, px, py, node_radius, er);
+        let (kind, index) = element_parts(el);
+        if !out_kind.is_null() {
+            *out_kind = kind;
+        }
+        if !out_index.is_null() {
+            *out_index = index;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// Nearest node within `radius` of `(px, py)`, nodes only. Returns whether
+/// one was found; the index lands in `out_index`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out_index` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_pick_px(
+    p: *const PlotuiPlot,
+    px_w: usize,
+    px_h: usize,
+    px: f32,
+    py: f32,
+    radius: f32,
+    out_index: *mut usize,
+) -> bool {
+    match plot_ref(p) {
+        Ok(p) => match p.plot.pick(px_w, px_h, px, py, radius) {
+            Some(i) => {
+                if !out_index.is_null() {
+                    *out_index = i;
+                }
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+// ---- camera ----
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_rotate(p: *mut PlotuiPlot, d_yaw: f64, d_pitch: f64) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.camera.rotate(d_yaw, d_pitch);
+    }
+}
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_zoom_by(p: *mut PlotuiPlot, factor: f64) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.camera.zoom_by(factor);
+    }
+}
+
+/// Pan in framebuffer pixels.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_pan(p: *mut PlotuiPlot, dx: f64, dy: f64) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.camera.pan(dx, dy);
+    }
+}
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_reset(p: *mut PlotuiPlot) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.camera.reset();
+    }
+}
+
+/// Write the camera state (yaw, pitch, zoom, pan_x, pan_y) into `out[5]`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out` must hold 5 doubles.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_camera_state(p: *const PlotuiPlot, out: *mut f64) {
+    if let (Ok(p), false) = (plot_ref(p), out.is_null()) {
+        let (yaw, pitch, zoom, pan_x, pan_y) = p.plot.camera.state();
+        let out = std::slice::from_raw_parts_mut(out, 5);
+        out.copy_from_slice(&[yaw, pitch, zoom, pan_x, pan_y]);
+    }
+}
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_camera_state(
+    p: *mut PlotuiPlot,
+    yaw: f64,
+    pitch: f64,
+    zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.camera.set_state(yaw, pitch, zoom, pan_x, pan_y);
+    }
+}
+
+/// Pin the 3D data frame to `(lo, hi)` corners (each NULL or 3 floats);
+/// pass both NULL to restore auto-fit. Like the Python binding, anything
+/// short of two corners means auto-fit.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_bounds(
+    p: *mut PlotuiPlot,
+    lo: *const f32,
+    hi: *const f32,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        p.plot.bounds_override = if lo.is_null() || hi.is_null() {
+            None
+        } else {
+            let l = std::slice::from_raw_parts(lo, 3);
+            let h = std::slice::from_raw_parts(hi, 3);
+            Some(([l[0], l[1], l[2]], [h[0], h[1], h[2]]))
+        };
+        PLOTUI_OK
+    })
+}
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_show_box(p: *mut PlotuiPlot, show: bool) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.show_box = show;
+    }
+}
+
+/// Recolour the non-data chrome; each pointer is NULL (keep) or 3 RGB bytes.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_chrome(
+    p: *mut PlotuiPlot,
+    bg: *const u8,
+    frame: *const u8,
+    grid: *const u8,
+    ink: *const u8,
+    ink_bright: *const u8,
+) {
+    if let Ok(p) = plot_mut(p) {
+        let c = &mut p.plot.chrome;
+        if let Some(v) = opt_rgb(bg) {
+            c.bg = v;
+        }
+        if let Some(v) = opt_rgb(frame) {
+            c.frame = v;
+        }
+        if let Some(v) = opt_rgb(grid) {
+            c.grid = v;
+        }
+        if let Some(v) = opt_rgb(ink) {
+            c.ink = v;
+        }
+        if let Some(v) = opt_rgb(ink_bright) {
+            c.ink_bright = v;
+        }
+    }
+}
+
+// ---- info ----
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_is_3d(p: *const PlotuiPlot) -> bool {
+    plot_ref(p).map(|p| p.plot.is_3d()).unwrap_or(false)
+}
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_node_count(p: *const PlotuiPlot) -> usize {
+    plot_ref(p).map(|p| p.plot.node_count()).unwrap_or(0)
+}
+
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_vertex_count(p: *const PlotuiPlot) -> usize {
+    plot_ref(p).map(|p| p.plot.vertex_count()).unwrap_or(0)
+}
+
+/// This plot's Kitty image id.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_image_id(p: *const PlotuiPlot) -> u32 {
+    plot_ref(p).map(|p| p.image_id).unwrap_or(0)
+}
+
+/// Project every node to screen space for a `px_w`×`px_h` framebuffer:
+/// writes `plotui_node_count(p) * 3` floats — (x_px, y_px, depth) per node,
+/// flat-index order.
+///
+/// # Safety
+/// `out` must hold `plotui_node_count(p) * 3` floats.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_project_nodes(
+    p: *const PlotuiPlot,
+    px_w: usize,
+    px_h: usize,
+    out: *mut f32,
+) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        if out.is_null() {
+            set_error("null output pointer");
+            return PLOTUI_ERR_NULL;
+        }
+        let projected = p.plot.project_nodes(px_w, px_h);
+        let out = std::slice::from_raw_parts_mut(out, projected.len() * 3);
+        for (i, pt) in projected.iter().enumerate() {
+            out[i * 3..i * 3 + 3].copy_from_slice(pt);
+        }
+        PLOTUI_OK
+    })
+}
+
+// ---- rendering ----
+
+/// Render as a Kitty escape for `cols`×`rows` cells of `cell_w`×`cell_h`
+/// pixels, using this plot's image id. Same contract as the Python
+/// binding's `render_kitty` (`compat_chunks` for the iTerm2 tier, `scale`
+/// for reduced-resolution interaction frames, `replace` to skip the
+/// delete-before-transmit). Free the string with `plotui_string_free`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out_escape` must be a valid pointer.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_render_kitty(
+    p: *const PlotuiPlot,
+    cols: u16,
+    rows: u16,
+    cell_w: u16,
+    cell_h: u16,
+    compat_chunks: bool,
+    scale: f64,
+    replace: bool,
+    out_escape: *mut *mut c_char,
+) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (pw, ph, pan_scale) = scaled_dims(cols, rows, cell_w, cell_h, scale);
+        let fb = p.plot.render_at(pw, ph, pan_scale);
+        let escape = if compat_chunks {
+            plotui_protocol::kitty_compat_with_id(&fb, cols, rows, !replace, p.image_id)
+        } else {
+            plotui_protocol::kitty_with_id(&fb, cols, rows, p.image_id)
+        };
+        out_string(escape, out_escape)
+    })
+}
+
+/// Render one frame and write the raw RGBA8 pixels: `px_w * px_h * 4`
+/// bytes, row-major, alpha 0 for undrawn pixels.
+///
+/// # Safety
+/// `out` must hold `px_w * px_h * 4` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_render_rgba(
+    p: *const PlotuiPlot,
+    px_w: usize,
+    px_h: usize,
+    out: *mut u8,
+) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        if out.is_null() {
+            set_error("null output pointer");
+            return PLOTUI_ERR_NULL;
+        }
+        let rgba = p.plot.render(px_w, px_h).rgba();
+        std::slice::from_raw_parts_mut(out, rgba.len()).copy_from_slice(&rgba);
+        PLOTUI_OK
+    })
+}
+
+/// Render a Kitty Unicode-placeholder frame and return its *metadata*: the
+/// transmit escape (free with `plotui_string_free`), the placeholder
+/// foreground color in `out_id_rgb[3]`, and the high id byte in
+/// `out_extra`. The caller synthesizes each cell as U+10EEEE + the row
+/// diacritic + the column diacritic (+ the extra-byte diacritic when
+/// `out_extra` is nonzero) from `plotui_diacritics` — identical to what
+/// `kitty_placeholder_cells` would return, without marshaling cols×rows
+/// strings per frame.
+///
+/// # Safety
+/// `p` must be a live plot handle; out pointers must be valid
+/// (`out_id_rgb` holds 3 bytes).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_render_kitty_placeholder_meta(
+    p: *const PlotuiPlot,
+    cols: u16,
+    rows: u16,
+    cell_w: u16,
+    cell_h: u16,
+    scale: f64,
+    out_transmit: *mut *mut c_char,
+    out_id_rgb: *mut u8,
+    out_extra: *mut u8,
+) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (pw, ph, pan_scale) = scaled_dims(cols, rows, cell_w, cell_h, scale);
+        let fb = p.plot.render_at(pw, ph, pan_scale);
+        let enc = plotui_protocol::kitty_placeholder_cells_with_id(&fb, cols, rows, p.image_id);
+        if !out_id_rgb.is_null() {
+            let out = std::slice::from_raw_parts_mut(out_id_rgb, 3);
+            out.copy_from_slice(&[enc.id_rgb.0, enc.id_rgb.1, enc.id_rgb.2]);
+        }
+        if !out_extra.is_null() {
+            *out_extra = p.image_id.to_be_bytes()[0];
+        }
+        out_string(enc.transmit, out_transmit)
+    })
+}
+
+/// The escape that deletes this plot's image from the terminal (emit on
+/// exit). Free with `plotui_string_free`.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_kitty_cleanup(p: *const PlotuiPlot) -> *mut c_char {
+    match plot_ref(p) {
+        Ok(p) => CString::new(plotui_protocol::kitty_cleanup_with_id(p.image_id))
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// The spec-defined placeholder diacritic table: `out_len` codepoints,
+/// `table[n]` encoding row/column index `n`. Static — never free it.
+///
+/// # Safety
+/// `out_len` must be a valid pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_diacritics(out_len: *mut usize) -> *const u32 {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<u32>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        plotui_protocol::placeholder_diacritics().iter().map(|&c| c as u32).collect()
+    });
+    if !out_len.is_null() {
+        unsafe { *out_len = table.len() };
+    }
+    table.as_ptr()
+}
+
+// ---- terminal glue (plotui-term) ----
+
+pub const PLOTUI_RENDER_PLACEHOLDER: i32 = 0;
+pub const PLOTUI_RENDER_DIRECT: i32 = 1;
+pub const PLOTUI_RENDER_UNSUPPORTED: i32 = 2;
+
+/// Best render path for this terminal (honors `PLOTUI_RENDER`): 0
+/// placeholder, 1 direct, 2 unsupported.
+#[no_mangle]
+pub extern "C" fn plotui_detect_render_mode() -> i32 {
+    match plotui_term::detect_render_mode() {
+        plotui_term::RenderMode::Placeholder => PLOTUI_RENDER_PLACEHOLDER,
+        plotui_term::RenderMode::Direct => PLOTUI_RENDER_DIRECT,
+        plotui_term::RenderMode::Unsupported => PLOTUI_RENDER_UNSUPPORTED,
+    }
+}
+
+/// The terminal's device pixels per cell via ioctl. Returns false (and
+/// leaves the outputs alone) when no stream reports a pixel size — use the
+/// 12×24 fallback then.
+///
+/// # Safety
+/// Out pointers must be valid or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_detect_cell_px(out_w: *mut u16, out_h: *mut u16) -> bool {
+    // (0, 0) can't come back from a successful probe, so it marks failure.
+    let (w, h) = plotui_term::detect_cell_px((0, 0));
+    if w == 0 || h == 0 {
+        return false;
+    }
+    if !out_w.is_null() {
+        *out_w = w;
+    }
+    if !out_h.is_null() {
+        *out_h = h;
+    }
+    true
+}
+
+/// True when `PLOTUI_KITTY_REPLACE` asks direct mode to skip the
+/// delete-before-transmit.
+#[no_mangle]
+pub extern "C" fn plotui_kitty_replace_env() -> bool {
+    plotui_term::kitty_replace_env()
+}
+
+/// Wrap an escape for tmux passthrough when `$TMUX` is set (otherwise a
+/// plain copy). Free with `plotui_string_free`.
+///
+/// # Safety
+/// `escape` must be a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_tmux_wrap(escape: *const c_char) -> *mut c_char {
+    match opt_str(escape) {
+        Ok(Some(s)) => CString::new(plotui_term::tmux_wrap(s))
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut()),
+        _ => ptr::null_mut(),
+    }
+}
+
+/// Resolution multiplier for the next frame: `configured_scale` only for
+/// large 3D plots (≥ `PLOTUI_LARGE_VERTEX_COUNT` vertices) while
+/// `interacting`, else 1.0 — the shared half-resolution policy.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_interactive_scale(
+    p: *const PlotuiPlot,
+    interacting: bool,
+    configured_scale: f64,
+) -> f64 {
+    match plot_ref(p) {
+        Ok(p) => active_scale(configured_scale, p.plot.is_3d(), p.plot.vertex_count(), interacting),
+        Err(_) => 1.0,
+    }
+}

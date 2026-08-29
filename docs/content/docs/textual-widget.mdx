@@ -1,0 +1,70 @@
+---
+title: The Textual widget
+description: PlotWidget — terminal detection, input routing, picking, and flicker-free repaints.
+---
+
+```python
+from plotui.textual import PlotWidget
+
+PlotWidget(
+    plot,
+    auto_rotate=False,        # slow idle spin for 3D plots
+    cell_px=None,             # device pixels per cell; None = detect
+    pickable=False,           # 3D hover/click picking (posts messages)
+    crosshair=True,           # 2D hover crosshair with values
+    render_mode="auto",       # "placeholder" | "direct" to force a path
+    interactive_scale=0.5,    # resolution while interacting, for large plots
+)
+```
+
+## Input
+
+Drag rotates, **shift-drag** pans, scroll zooms, **double-click** resets.
+Arrow keys rotate, `+`/`-` zoom, `r` resets. All of it routes through the
+plot's camera — subclass and override to change the bindings.
+
+## Picking messages
+
+With `pickable=True`, moving the mouse over a node or edge lights it up
+white and posts `ElementHovered`; a click posts `ElementPicked` with
+`("node" | "edge", index)`. Off by default so plots without click semantics
+pay no per-mouse-move cost.
+
+## The 2D crosshair
+
+On by default: hovering a 2D chart draws a vertical guide snapped to the
+nearest sample, marks each series, and shows a value readout. Terminal mouse
+events arrive per character cell, which is far finer than typical point
+spacing — snapping makes the granularity invisible. `crosshair=False` opts
+out.
+
+## Resolution
+
+`cell_px=None` detects the terminal's true cell size so plots render at
+native resolution. Large 3D scenes (many thousands of vertices — surfaces
+count) drop to `interactive_scale` resolution *while* dragging or
+auto-rotating, and snap back to full resolution the moment interaction
+stops.
+
+## Text overlays
+
+`render_kitty_placeholder_cells` returns per-cell placeholder strings so a
+frontend can splice terminal-crisp text into a row of the image without
+re-rasterizing — the hook behind label overlays.
+
+## Streaming
+
+`widget.plot` exposes the wrapped `Plot`; after mutating it, call
+`widget.invalidate()` to repaint. For live data, the widget wraps the
+[streaming API](/docs/interaction#streaming-data) directly:
+
+```python
+handle = plot.add_line([], [], name="loss")
+widget.extend(handle, [t], [v])        # append + repaint, O(new points)
+widget.set_visible(handle, False)      # repaints only when the state changed
+```
+
+Repeated extends between frames coalesce into one repaint, and a plot that
+streams past the large-scene threshold picks up reduced-resolution
+interaction automatically. `examples/textual_stream.py` is a complete
+20 Hz feed with visibility toggles.

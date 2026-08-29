@@ -1,0 +1,9 @@
+[package]
+name = "plotui-bind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared binding-layer semantics for plotui language bindings: argument parsing, validation, defaults, and their exact error messages."
+
+[dependencies]
+plotui-core = { path = "../plotui-core" }

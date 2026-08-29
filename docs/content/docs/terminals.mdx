@@ -1,0 +1,44 @@
+---
+title: Terminal support
+description: Where the pixels are real, and how plotui picks its render path.
+---
+
+plotui draws through the **Kitty graphics protocol** and never degrades to a
+fake plot: terminals without support get a notice naming supported terminals.
+
+| Terminal | Path |
+| --- | --- |
+| Kitty | placeholder |
+| Ghostty | placeholder |
+| iTerm2 ≥ 3.5 | direct |
+| WezTerm | direct |
+| Konsole | direct |
+| Warp | direct (partial) |
+| Rio | direct (partial) |
+| VS Code | direct (partial) |
+| tmux | passthrough (wrapped escapes) |
+
+**Placeholder** mode composites the image through Unicode placeholder cells —
+the most robust path where supported. **Direct** mode places the image at the
+widget's origin; still full resolution. The widget detects the right path per
+terminal automatically.
+
+**Partial** marks terminals whose Kitty-graphics decoders are new and still
+maturing: plots render, but expect rough edges. VS Code additionally gates
+images behind its `terminal.integrated.enableImages` setting, and its decoder
+replaces same-id images atomically — set `PLOTUI_KITTY_REPLACE=1` if you see
+flicker while interacting.
+
+Override with the environment variable or per widget:
+
+```bash
+PLOTUI_RENDER=placeholder  # or: direct
+```
+
+Two more escape hatches:
+
+- `PLOTUI_KITTY_REPLACE=1` — skip the delete-before-transmit that stops
+  iTerm2 stacking placements, for terminals whose Kitty decoder replaces
+  same-id images and flickers from the delete (xterm.js addon-image).
+- `PlotWidget(..., cell_px=(w, h))` — pin the cell size when the terminal
+  reports none, instead of the detected default.

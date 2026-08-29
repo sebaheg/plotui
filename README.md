@@ -1,11 +1,13 @@
 # plotui
 
-**Interactive 2D/3D plots in the terminal — Plotly-style — for Textual, powered by a Rust core and the Kitty graphics protocol.**
+**Interactive 2D/3D plots in the terminal — Plotly-style — for Textual, Ratatui, and Bubble Tea, powered by a Rust core and the Kitty graphics protocol.**
 
 `plotui` renders scatter plots (and, soon, lines / surfaces / bars) as real
-pixel graphics inside a terminal, and lets you rotate, pan, and zoom them. It's
-built to drop into a [Textual](https://textual.textualize.io/) app, with the
-rendering engine written in Rust so it stays fast in 2D and 3D.
+pixel graphics inside a terminal, and lets you rotate, pan, and zoom them. It
+drops into a [Textual](https://textual.textualize.io/),
+[Ratatui](https://ratatui.rs/), or
+[Bubble Tea](https://github.com/charmbracelet/bubbletea) app as a first-class
+widget, with the rendering engine written in Rust so it stays fast in 2D and 3D.
 
 > Status: **early scaffold.** Working today: 2D scatter/line/bar charts with
 > axes, ticks, and a legend; a 3D scatter/graph engine; a Kitty-image raw demo;
@@ -15,20 +17,46 @@ rendering engine written in Rust so it stays fast in 2D and 3D.
 
 The one rule that shapes everything: **the Rust core owns pixels, not the
 terminal.** It has no event loop and no input handling — the TUI framework
-(Textual now; Bubble Tea / Ratatui later) owns the loop, forwards input to the
+(Textual, Ratatui, or Bubble Tea) owns the loop, forwards input to the
 camera, and asks for a frame.
 
 ```
 crates/
   plotui-core/      pure engine: data model, 3D camera, rasterizer → RGBA
   plotui-protocol/  RGBA → terminal bytes (Kitty graphics protocol)
+  plotui-term/      shared frontend glue: render-path detection, cell-pixel
+                    probing, tmux passthrough, the per-frame render policy
+  plotui-bind/      shared binding semantics: parsing, validation, defaults,
+                    and their exact error messages (Python and Go agree)
   plotui-py/        PyO3 bindings → the `plotui._plotui` native module
+  plotui-ratatui/   Ratatui widget (native Rust frontend)
+  plotui-ffi/       C ABI (cdylib + staticlib) behind the Go bindings
 python/plotui/      the Python package + Textual `PlotWidget`
+go/                 Go bindings + `teaplot`, the Bubble Tea v2 component
 examples/           raw_demo.py (Kitty images), textual_demo.py
 ```
 
 `core` and `protocol` are pure and I/O-free, so the same engine can back every
 frontend and be unit-tested by hashing pixel buffers.
+
+## Integrations
+
+Each TUI framework gets a first-class widget, not a port. All frontends sit on
+the same policy crates (`plotui-term` for detection/tmux/render policy,
+`plotui-bind` for argument validation and its exact error strings), so a plot
+looks and behaves identically whichever framework hosts it — down to the error
+messages.
+
+| Frontend | How it works | Where in the codebase | Try it |
+| --- | --- | --- | --- |
+| **Textual** (Python) | `PlotWidget` wraps the `plotui._plotui` native module (PyO3). Mouse events route to the camera, hover/click picking arrives as Textual messages, `extend` streams points in-place, and text overlays splice into the image without re-rasterizing. | `python/plotui/textual.py`; native module in `crates/plotui-py` | `python examples/textual_graph.py` |
+| **Ratatui** (Rust) | A native `StatefulWidget` plus an app-owned `PlotState`: hand it crossterm events, draw it like any other widget — frames and Kitty placement ride ratatui's own buffer diff, flicker-free. | `crates/plotui-ratatui` | `cargo run -p plotui-ratatui --example demo` |
+| **Bubble Tea** (Go) | `teaplot.New(plot)` returns an Elm-style model: `Update` consumes tea mouse/key events, `View` lays out the cell grid, and image escapes leave as `tea.Raw` commands. Links to the Rust engine statically over the `plotui-ffi` C ABI (cgo). | `go/` (bindings) + `go/teaplot` (component); ABI in `crates/plotui-ffi` | `go run ./examples/demo` from `go/` — see [go/README.md](go/README.md) |
+| **Browser** (WASM) | The same engine compiled to WebAssembly drives the live demos on the website: pointer events feed the engine's own camera, and every frame is its RGBA bytes blitted onto a canvas. Not a plotting-in-the-browser product — it exists so the site can show the real renderer. | `crates/plotui-wasm`; consumed by `site/` | [plotui.xyz/examples.html](https://plotui.xyz/examples.html) |
+
+The three TUI widgets have feature parity: render-path detection, tmux
+passthrough, drag/zoom/pan/keys, picking + hover, the 2D crosshair, text
+overlays, half-resolution interaction frames, and streaming extend.
 
 ## Develop
 
@@ -42,7 +70,7 @@ maturin develop --release
 ```
 
 Then, in a terminal with Kitty graphics support — **Kitty**, **Ghostty**,
-**iTerm2 ≥ 3.5**, or **WezTerm** — for the full-resolution pixel demos:
+**iTerm2 ≥ 3.5**, **WezTerm**, or **Konsole** — for the full-resolution pixel demos:
 
 ```bash
 python examples/raw_demo.py        # 3D scatter via Kitty images
@@ -52,7 +80,9 @@ python examples/textual_graph.py   # interactive graph: hover + click-to-inspect
 
 The Textual widget picks its render path per terminal: Unicode-placeholder
 Kitty graphics in Kitty/Ghostty, direct Kitty placement in iTerm2/WezTerm/
-Konsole (they speak the protocol but not placeholders). plotui only draws
+Konsole — plus Warp, Rio, and VS Code, whose younger Kitty decoders are
+supported but still maturing (VS Code needs its
+`terminal.integrated.enableImages` setting). plotui only draws
 real pixels — terminals without Kitty graphics get a notice naming supported
 terminals, never a degraded plot. Override with
 `PLOTUI_RENDER=placeholder|direct` or `PlotWidget(..., render_mode=...)`.
@@ -69,9 +99,23 @@ plot.add_line(xs, ys, name="forecast")
 plot.add_scatter(xs2, ys2, name="observed")
 plot.add_bar(xs3, heights)
 
+# Secondary axes: axis="y2"/"y3" bind a series to an independent right-hand
+# axis — its own autoscale and tick column, labels tinted to the series color
+# (y2 innermost, y3 outermost). The grid stays with the left axis.
+plot.add_line(xs, tokens, name="tokens", axis="y2")
+plot.add_line(xs, cpu_minutes, name="cpu min", axis="y3")
+
 # 3D: any 3D trace switches the plot to the orbit camera.
 plot = Plot()
 plot.add_scatter3d(xs, ys, zs, color=(230, 60, 120), size=2.0)
+
+# Streaming: every add_* returns a trace handle. Append through it instead
+# of rebuilding — O(new points), autoscale follows; numpy arrays are read
+# in one bulk copy. set_visible toggles a series without losing its handle,
+# palette slot, or node indices.
+h = plot.add_line([], [], name="loss")
+plot.extend(h, xs, ys)                # 3D scatter/line: extend(h, xs, ys, zs)
+plot.set_visible(h, False)
 
 # Interaction (forward your framework's events to these):
 plot.rotate(d_yaw, d_pitch)
@@ -92,8 +136,15 @@ rebuilding a plot without losing the view:
 plot.add_graph3d(xs, ys, zs, edges=[(0, 1), (1, 2)],
                  node_colors=[...],          # one (r, g, b) per node
                  node_sizes=[...],           # per-node radius (else `size`)
-                 edge_colors=[...])          # per-edge (r, g, b) (else derived)
+                 edge_colors=[...],          # per-edge (r, g, b) (else derived)
+                 node_shapes=[...])          # per-node "disc" | "ring" | "square" |
+                                             #   "triangle" | "diamond" | "diamond-open" | "dot"
 plot.set_show_box(False)                     # hide the 3D orientation cube
+plot.set_bounds((x0, y0, z0), (x1, y1, z1))  # pin the data frame (else the nodes'
+                                             #   bounding box); None, None restores
+plot.set_chrome(grid=(26, 32, 36),           # recolour the non-data chrome to sit on
+                frame=(43, 50, 55),          #   your own background: bg (legend box),
+                ink=(103, 111, 118))         #   frame, grid, ink, ink_bright
 
 state = plot.camera_state()                  # (yaw, pitch, zoom, pan_x, pan_y)
 plot.set_camera_state(*state)                # restore (e.g. onto a new Plot)
@@ -121,18 +172,26 @@ dispatches those to every class in the MRO, so both would run).
 - [x] Flicker-free Kitty placement via Unicode-placeholder virtual placement
       (fixed image id, atomic replace) — wire the pixel path into the Textual widget
 - [x] 2D traces: scatter, line, bar; axes, ticks, tick labels, legend
+- [x] Independent right-hand y-axes (`axis="y2"`/`"y3"`) with tinted tick labels
 - [ ] 2D step trace; axis titles; time-formatted x ticks
 - [ ] 3D surface / mesh; axis cube with labels
 - [x] Interactive hover / pick for 3D graph nodes *and* edges (opt-in via
       `PlotWidget(..., pickable=True)`: hover lights the element up white,
       click posts `ElementPicked`)
 - [ ] Hover / pick for 2D traces; spatial index for large graphs
-- [ ] numpy zero-copy input
+- [x] Streaming append: trace handles, `extend`, `set_visible`, incremental bounds
+- [x] numpy fast-path input (one bulk copy, no per-element conversion)
+- [ ] Rolling window (`max_points`) for endless streams
 - [x] Graceful render-path auto-detection (placeholder / direct Kitty, with a
       supported-terminals notice elsewhere and a `PLOTUI_RENDER` override)
 - [ ] Sixel + iTerm2 OSC 1337 encoders for terminals without Kitty graphics
 - [ ] Prebuilt wheels (maturin + cibuildwheel)
-- [ ] Bubble Tea (cgo) and Ratatui (native) frontends
+- [x] Ratatui frontend (native): `plotui-ratatui` — StatefulWidget + app-owned
+      PlotState, full parity with the Textual widget
+      (`cargo run -p plotui-ratatui --example demo`)
+- [x] Bubble Tea frontend (cgo): `go/` bindings over the `plotui-ffi` C ABI +
+      the `teaplot` component for Bubble Tea v2 (see `go/README.md`)
+- [ ] Prebuilt static libs for the Go bindings (today: local source build)
 
 ## License
 

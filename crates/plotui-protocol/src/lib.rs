@@ -23,7 +23,22 @@ use std::io::Write as _;
 mod diacritics;
 use diacritics::DIACRITICS;
 
-const IMAGE_ID: u32 = 4242;
+/// The Unicode placeholder character every placeholder cell starts with.
+pub const PLACEHOLDER_CHAR: char = PLACEHOLDER;
+
+/// The spec-defined row/column diacritic table (`DIACRITICS[n]` encodes
+/// index `n`); exported so bindings can synthesize placeholder cells from
+/// metadata instead of shipping every cell string across a language boundary.
+pub fn placeholder_diacritics() -> &'static [char] {
+    &DIACRITICS
+}
+
+/// Image id used by the `_with_id`-less encoders. A fixed default keeps
+/// single-plot frontends replacing the same image atomically frame after
+/// frame; hosts with multiple plots pass distinct ids via the `_with_id`
+/// variants. Ids ≤ 0xFFFFFF fit entirely in the placeholder foreground
+/// color and avoid the fourth ("extra") diacritic per cell.
+pub const DEFAULT_IMAGE_ID: u32 = 4242;
 const PLACEHOLDER: char = '\u{10EEEE}';
 
 /// A Kitty image placed via Unicode placeholders, ready to composite inside a
@@ -58,7 +73,12 @@ pub struct KittyPlaceholderCells {
 /// The virtual-placement upload escape shared by both placeholder encoders:
 /// U=1 (shown only via placeholders), o=z zlib, c/r scale the source image to
 /// the cell region. Returns the escape and the id split for the placeholders.
-fn placeholder_transmit(fb: &Framebuffer, cols: u16, rows: u16) -> (String, (u8, u8, u8), u8) {
+fn placeholder_transmit(
+    fb: &Framebuffer,
+    cols: u16,
+    rows: u16,
+    image_id: u32,
+) -> (String, (u8, u8, u8), u8) {
     let rgba = fb.rgba();
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
     let _ = enc.write_all(&rgba);
@@ -68,7 +88,7 @@ fn placeholder_transmit(fb: &Framebuffer, cols: u16, rows: u16) -> (String, (u8,
 
     // Image id is carried by the placeholder foreground color (low 24 bits)
     // plus one "extra" high-byte diacritic.
-    let [extra, id_r, id_g, id_b] = IMAGE_ID.to_be_bytes();
+    let [extra, id_r, id_g, id_b] = image_id.to_be_bytes();
 
     let mut transmit = String::with_capacity(b64.len() + 128);
     const CHUNK: usize = 4096;
@@ -79,7 +99,7 @@ fn placeholder_transmit(fb: &Framebuffer, cols: u16, rows: u16) -> (String, (u8,
         if i == 0 {
             let _ = write!(
                 transmit,
-                "q=2,i={IMAGE_ID},a=T,U=1,f=32,o=z,t=d,s={w},v={h},c={cols},r={rows},"
+                "q=2,i={image_id},a=T,U=1,f=32,o=z,t=d,s={w},v={h},c={cols},r={rows},"
             );
         }
         let more = if i + 1 < n { 1 } else { 0 };
@@ -92,7 +112,18 @@ fn placeholder_transmit(fb: &Framebuffer, cols: u16, rows: u16) -> (String, (u8,
 
 /// Encode `fb` as a Kitty image + placeholder cells for a `cols`×`rows` region.
 pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceholder {
-    let (transmit, id_rgb, extra) = placeholder_transmit(fb, cols, rows);
+    kitty_placeholder_with_id(fb, cols, rows, DEFAULT_IMAGE_ID)
+}
+
+/// [`kitty_placeholder`] with a caller-chosen image id (for hosts running
+/// several plots at once).
+pub fn kitty_placeholder_with_id(
+    fb: &Framebuffer,
+    cols: u16,
+    rows: u16,
+    image_id: u32,
+) -> KittyPlaceholder {
+    let (transmit, id_rgb, extra) = placeholder_transmit(fb, cols, rows, image_id);
 
     // Placeholder rows. The first cell of each row carries (row, col=0, extra);
     // the rest inherit position by contiguity.
@@ -119,7 +150,17 @@ pub fn kitty_placeholder(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceho
 /// Encode `fb` as a Kitty image + a grid of individually addressed placeholder
 /// cells — the splice-safe variant for frontends that overlay text.
 pub fn kitty_placeholder_cells(fb: &Framebuffer, cols: u16, rows: u16) -> KittyPlaceholderCells {
-    let (transmit, id_rgb, extra) = placeholder_transmit(fb, cols, rows);
+    kitty_placeholder_cells_with_id(fb, cols, rows, DEFAULT_IMAGE_ID)
+}
+
+/// [`kitty_placeholder_cells`] with a caller-chosen image id.
+pub fn kitty_placeholder_cells_with_id(
+    fb: &Framebuffer,
+    cols: u16,
+    rows: u16,
+    image_id: u32,
+) -> KittyPlaceholderCells {
+    let (transmit, id_rgb, extra) = placeholder_transmit(fb, cols, rows, image_id);
 
     // Every cell is fully addressed: row diacritic, column diacritic, and —
     // only when the image id needs a fourth byte — the "extra" diacritic.
@@ -149,7 +190,12 @@ pub fn kitty_placeholder_cells(fb: &Framebuffer, cols: u16, rows: u16) -> KittyP
 /// current cursor position, scaled to span `cols`×`rows` cells. Cursor is saved
 /// and restored, so the caller's cursor position is preserved.
 pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
-    kitty_with_framing(fb, cols, rows, false, true)
+    kitty_with_id(fb, cols, rows, DEFAULT_IMAGE_ID)
+}
+
+/// [`kitty`] with a caller-chosen image id.
+pub fn kitty_with_id(fb: &Framebuffer, cols: u16, rows: u16, image_id: u32) -> String {
+    kitty_with_framing(fb, cols, rows, false, true, image_id)
 }
 
 /// Like [`kitty`], but repeats `q=2,i=<id>` on every continuation chunk.
@@ -167,7 +213,18 @@ pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
 /// while the next frame decodes (asynchronously, there), which flickers badly
 /// during interaction.
 pub fn kitty_compat(fb: &Framebuffer, cols: u16, rows: u16, delete_first: bool) -> String {
-    kitty_with_framing(fb, cols, rows, true, delete_first)
+    kitty_compat_with_id(fb, cols, rows, delete_first, DEFAULT_IMAGE_ID)
+}
+
+/// [`kitty_compat`] with a caller-chosen image id.
+pub fn kitty_compat_with_id(
+    fb: &Framebuffer,
+    cols: u16,
+    rows: u16,
+    delete_first: bool,
+    image_id: u32,
+) -> String {
+    kitty_with_framing(fb, cols, rows, true, delete_first, image_id)
 }
 
 fn kitty_with_framing(
@@ -176,6 +233,7 @@ fn kitty_with_framing(
     rows: u16,
     id_every_chunk: bool,
     delete_first: bool,
+    image_id: u32,
 ) -> String {
     let rgba = fb.rgba();
 
@@ -198,7 +256,7 @@ fn kitty_with_framing(
     // On terminals that replace a same-id image, skipping this avoids a blank
     // frame between delete and the (async) redraw — the interaction flicker.
     if delete_first {
-        let _ = write!(out, "\x1b_Ga=d,d=i,i={IMAGE_ID},q=2\x1b\\");
+        let _ = write!(out, "\x1b_Ga=d,d=i,i={image_id},q=2\x1b\\");
     }
 
     const CHUNK: usize = 4096;
@@ -221,10 +279,10 @@ fn kitty_with_framing(
             // DOM renderer, not WebGL, which paints over it.)
             let _ = write!(
                 out,
-                "q=2,i={IMAGE_ID},p=1,a=T,f=32,o=z,z=-1,s={w},v={h},c={cols},r={rows},"
+                "q=2,i={image_id},p=1,a=T,f=32,o=z,z=-1,s={w},v={h},c={cols},r={rows},"
             );
         } else if id_every_chunk {
-            let _ = write!(out, "q=2,i={IMAGE_ID},");
+            let _ = write!(out, "q=2,i={image_id},");
         }
         let more = if i + 1 < n { 1 } else { 0 };
         let _ = write!(out, "m={more};");
@@ -238,5 +296,10 @@ fn kitty_with_framing(
 
 /// Escape sequence that deletes plotui's image from the terminal. Emit on exit.
 pub fn kitty_cleanup() -> String {
-    format!("\x1b_Ga=d,d=i,i={IMAGE_ID}\x1b\\")
+    kitty_cleanup_with_id(DEFAULT_IMAGE_ID)
+}
+
+/// [`kitty_cleanup`] for a caller-chosen image id.
+pub fn kitty_cleanup_with_id(image_id: u32) -> String {
+    format!("\x1b_Ga=d,d=i,i={image_id}\x1b\\")
 }

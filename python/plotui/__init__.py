@@ -8,8 +8,12 @@ Quick start::
 
     from plotui import Plot
     plot = Plot()
-    plot.add_line(xs, ys, name="forecast")     # 2D: axes/ticks/legend appear
+    h = plot.add_line(xs, ys, name="forecast") # 2D: axes/ticks/legend appear
+    plot.add_line(xs, costs, axis="y2")        # independent right-hand axis
     plot.add_scatter3d(xs, ys, zs)             # any 3D trace -> orbit camera
+    plot.add_line3d(xs, ys, zs)                # 3D trajectory/curve
+    plot.add_surface3d(xs, ys, Z)              # grid surface, viridis by default
+    plot.extend(h, more_xs, more_ys)           # stream data by trace handle
     # In a raw loop: escape = plot.render_kitty(cols, rows, cell_w, cell_h)
     # In Textual:   use plotui.textual.PlotWidget(plot)
 """
@@ -17,4 +21,4 @@ Quick start::
 from ._plotui import Plot
 
 __all__ = ["Plot"]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

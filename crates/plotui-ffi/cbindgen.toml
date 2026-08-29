@@ -1,0 +1,12 @@
+language = "C"
+include_guard = "PLOTUI_H"
+autogen_warning = "/* Generated from crates/plotui-ffi by cbindgen — do not edit. Regenerate with: PLOTUI_REGEN_HEADER=1 cargo test -p plotui-ffi header_is_fresh */"
+documentation = true
+cpp_compat = true
+usize_is_size_t = true
+
+[export]
+prefix = ""
+
+[fn]
+sort_by = "None"

@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>plotui — examples</title>
+<meta name="description" content="Interactive plotui examples — the real Rust engine compiled to WebAssembly, rendering into your browser exactly as it renders into a terminal.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23101418'/%3E%3Ccircle cx='10' cy='20' r='3' fill='%23ec4c86'/%3E%3Ccircle cx='17' cy='12' r='3' fill='%2345c8d1'/%3E%3Ccircle cx='24' cy='17' r='3' fill='%23f0a13c'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@400;500;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+<style>
+  .ex-hero { padding: 56px 0 8px; border-top: 0; }
+  .dim-toggle {
+    display: inline-flex; margin-top: 26px;
+    border: 1px solid var(--frame); border-radius: 7px; overflow: hidden;
+  }
+  .dim-toggle .dim-btn {
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    letter-spacing: .02em; color: var(--body);
+    background: none; border: 0; cursor: pointer; padding: 8px 18px;
+  }
+  .dim-toggle .dim-btn + .dim-btn { border-left: 1px solid var(--frame); }
+  .dim-toggle .dim-btn:hover { color: var(--bright); }
+  .dim-toggle .dim-btn.on { background: var(--trace-2); color: #0b0e11; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="wordmark" href="index.html">plo<span class="t1">t</span><span class="t2">u</span><span class="t3">i.</span>xyz</a>
+    <nav class="nav-links" aria-label="Main">
+      <a href="index.html#start">get started</a>
+      <a class="ex" href="examples.html" aria-current="page">examples</a>
+      <a href="https://docs.plotui.xyz">docs</a>
+      <a class="gh" href="https://github.com/sebaheg/plotui">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<section class="ex-hero">
+  <div class="wrap">
+    <div class="sec-label"><span class="sw" style="background:var(--trace-2)"></span>live examples</div>
+    <h2>The real engine, in your browser.</h2>
+    <p class="sec-intro">Every plot below is rasterized by <b>plotui-core</b> — the same Rust
+      code that draws into your terminal — compiled to WebAssembly. Nothing here is a mock-up:
+      the camera, the picking, the legends and the crosshair are the engine's own.
+      Drag, zoom, hover.</p>
+
+    <div class="dim-toggle" role="group" aria-label="Filter examples by dimension">
+      <button class="dim-btn on" type="button" data-dim="3d" aria-pressed="true">3d</button>
+      <button class="dim-btn" type="button" data-dim="2d" aria-pressed="false">2d</button>
+      <button class="dim-btn" type="button" data-dim="all" aria-pressed="false">all</button>
+    </div>
+
+    <div class="gallery-grid">
+
+      <figure class="term ex-card" data-example="scatter3d" data-dim="3d">
+        <div class="term-bar" aria-hidden="true">
+          <span class="b"></span><span class="b"></span><span class="b"></span>
+          <span class="term-title">scatter3d — three gaussian clusters</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="Interactive 3D scatter plot"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">hover</span>coords</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
+        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_scatter3d</span>(xs_a, ys_a, zs_a, color=(<span class="str">236, 76, 134</span>))
+p.<span class="fn">add_scatter3d</span>(xs_b, ys_b, zs_b, color=(<span class="str">69, 200, 209</span>))
+p.<span class="fn">add_scatter3d</span>(xs_c, ys_c, zs_c, color=(<span class="str">240, 161, 60</span>))
+<span class="cm"># drag events → p.rotate(dyaw, dpitch); hover → p.pick_px(...)</span></code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="surface3d" data-dim="3d">
+        <div class="term-bar" aria-hidden="true">
+          <span class="b"></span><span class="b"></span><span class="b"></span>
+          <span class="term-title">surface3d — 48×48 grid, viridis</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="Interactive 3D surface plot"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn wire-toggle" type="button" aria-pressed="false">wire</button>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
+        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_surface3d</span>(xs, ys, zs, colormap=<span class="str">"viridis"</span>)
+<span class="cm"># zs is a len(ys) × len(xs) grid of heights</span>
+p.<span class="fn">add_surface3d</span>(xs, ys, zs, colormap=<span class="kw">None</span>,
+               color=(<span class="str">103, 111, 118</span>), wireframe=<span class="kw">True</span>)</code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="graph3d" data-dim="3d">
+        <div class="term-bar" aria-hidden="true">
+          <span class="b"></span><span class="b"></span><span class="b"></span>
+          <span class="term-title">graph3d — node + edge picking</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="Interactive 3D network graph"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">hover</span>nodes &amp; edges</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
+        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_graph3d</span>(xs, ys, zs, edges=[(<span class="str">0</span>, <span class="str">1</span>), (<span class="str">1</span>, <span class="str">2</span>), ...],
+             color=(<span class="str">69, 200, 209</span>))
+hit = p.<span class="fn">pick_element_px</span>(w, h, mx, my, node_radius=<span class="str">8</span>)
+<span class="cm"># hit → ("node", i) or ("edge", i); highlight via p.set_hovered(hit)</span></code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="lorenz" data-dim="3d">
+        <div class="term-bar" aria-hidden="true">
+          <span class="b"></span><span class="b"></span><span class="b"></span>
+          <span class="term-title">line3d — lorenz attractor, 2 500 points</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="Interactive 3D line plot of the Lorenz attractor"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
+        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_line3d</span>(xs, ys, zs, color=(<span class="str">236, 76, 134</span>),
+            width=<span class="str">1.5</span>, name=<span class="str">"lorenz"</span>)
+<span class="cm"># while dragging, plotui renders at reduced resolution —</span>
+<span class="cm"># the same policy the terminal widget uses</span></code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="lines2d" data-dim="2d" hidden>
+        <div class="term-bar" aria-hidden="true">
+          <span class="b"></span><span class="b"></span><span class="b"></span>
+          <span class="term-title">line + scatter — crosshair readout</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas crosshair" aria-label="Interactive 2D line chart"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">hover</span>crosshair</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
+        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_line</span>(xs, damped, name=<span class="str">"damped"</span>)
+p.<span class="fn">add_line</span>(xs, carrier, name=<span class="str">"carrier"</span>)
+p.<span class="fn">add_scatter</span>(sample_xs, sample_ys, name=<span class="str">"samples"</span>)
+p.<span class="fn">set_hover2d</span>(mouse_x)  <span class="cm"># engine draws the crosshair + readout</span></code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="bars2d" data-dim="2d" hidden>
+        <div class="term-bar" aria-hidden="true">
+          <span class="b"></span><span class="b"></span><span class="b"></span>
+          <span class="term-title">bar — monthly totals + trend</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas crosshair" aria-label="Interactive 2D bar chart"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">hover</span>crosshair</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
+        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_bar</span>(months, totals, color=(<span class="str">69, 200, 209</span>), name=<span class="str">"total"</span>)
+p.<span class="fn">add_line</span>(months, trend, color=(<span class="str">240, 161, 60</span>), name=<span class="str">"trend"</span>)</code></pre>
+      </figure>
+
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-row">
+    <span>plotui · MIT license</span>
+    <span><a href="https://github.com/sebaheg/plotui">github.com/sebaheg/plotui</a></span>
+  </div>
+</footer>
+
+<script type="module" src="examples.js"></script>
+</body>
+</html>

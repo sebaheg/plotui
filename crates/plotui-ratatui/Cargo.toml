@@ -1,0 +1,16 @@
+[package]
+name = "plotui-ratatui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ratatui widget for plotui: interactive terminal plots via the Kitty graphics protocol."
+
+[dependencies]
+plotui-core = { path = "../plotui-core" }
+plotui-protocol = { path = "../plotui-protocol" }
+plotui-term = { path = "../plotui-term" }
+ratatui = { version = "0.30", default-features = false }
+crossterm = "0.29"
+
+[dev-dependencies]
+ratatui = { version = "0.30", features = ["crossterm"] }

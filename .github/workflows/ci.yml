@@ -22,8 +22,8 @@ jobs:
       - run: cargo fmt --all --check
       # plotui-py is a cdylib extension module that only links through maturin,
       # so lint/test the pure crates here; the python job covers the bindings.
-      - run: cargo clippy -p plotui-core -p plotui-protocol --all-targets -- -D warnings
-      - run: cargo test -p plotui-core -p plotui-protocol
+      - run: cargo clippy -p plotui-core -p plotui-protocol -p plotui-term -p plotui-bind -p plotui-ffi -p plotui-ratatui --all-targets -- -D warnings
+      - run: cargo test -p plotui-core -p plotui-protocol -p plotui-term -p plotui-bind -p plotui-ffi -p plotui-ratatui
 
   python:
     name: Python wheel + pytest

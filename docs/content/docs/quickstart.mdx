@@ -1,0 +1,63 @@
+---
+title: Quickstart
+description: One Plot, three ways to put it on screen.
+---
+
+Everything goes through one class: `Plot`. Add traces, and axes, ticks, and a
+legend appear on their own. The first 3D trace switches the plot to the orbit
+camera.
+
+```python
+from plotui import Plot
+
+plot = Plot()
+plot.add_line(hours, observed, name="observed")
+plot.add_line(hours, forecast, name="forecast")
+```
+
+Every `add_*` returns a trace handle — keep it to
+[stream more data in later](/docs/interaction#streaming-data) with
+`plot.extend(handle, xs, ys)` instead of rebuilding the plot.
+
+## In a Textual app
+
+Drop the widget in; it detects the terminal, routes input, and repaints:
+
+```python
+from plotui.textual import PlotWidget
+
+class MyApp(App):
+    def compose(self):
+        yield PlotWidget(plot)
+```
+
+Drag rotates 3D plots (shift-drag pans, scroll zooms, double-click resets),
+and 2D plots get a hover crosshair with values by default. See
+[the widget page](/docs/textual-widget) for every knob.
+
+## In a raw loop
+
+No framework — ask for the escape bytes and print them:
+
+```python
+escape = plot.render_kitty(cols, rows, cell_w, cell_h)
+sys.stdout.write(escape)
+sys.stdout.flush()
+```
+
+Forward your own input events to the camera between frames:
+
+```python
+plot.rotate(d_yaw, d_pitch)
+plot.zoom_by(factor)
+plot.pan(dx_px, dy_px)
+plot.reset()
+```
+
+## Raw pixels
+
+For tests, screenshots, or your own encoder, skip the terminal entirely:
+
+```python
+rgba: bytes = plot.render_rgba(width_px, height_px)  # RGBA8, transparent bg
+```

@@ -39,8 +39,7 @@ class PlotApp(App):
         yield Footer()
 
     def action_reset(self) -> None:
-        self.query_one("#plot", PlotWidget)._plot.reset()
-        self.query_one("#plot", PlotWidget).refresh()
+        self.query_one("#plot", PlotWidget).apply_reset()
 
 
 if __name__ == "__main__":

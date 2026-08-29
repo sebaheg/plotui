@@ -4,7 +4,7 @@
 //! compared within one process) rather than hard-coded image hashes, so they
 //! hold on any platform regardless of libm rounding in the camera trig.
 
-use plotui_core::{draw_text, nice_ticks, Framebuffer, Plot, PALETTE};
+use plotui_core::{draw_text, nice_ticks, Element, Framebuffer, Plot, TraceError, YAxis, PALETTE};
 
 /// FNV-1a over the RGBA buffer — stable fingerprint for same-process compares.
 fn hash(fb: &Framebuffer) -> u64 {
@@ -48,7 +48,7 @@ fn demo_2d() -> Plot {
     let mut p = Plot::new();
     let xs: Vec<f32> = (0..=20).map(|i| i as f32).collect();
     let ys: Vec<f32> = xs.iter().map(|x| (x * 0.5).sin() * 3.0 + 5.0).collect();
-    p.add_line2d(xs, ys, PALETTE[0], 2.0, Some("signal".into()));
+    p.add_line2d(xs, ys, PALETTE[0], 2.0, Some("signal".into()), YAxis::Primary);
     p
 }
 
@@ -127,6 +127,7 @@ fn empty_plot_renders_without_panicking() {
     assert_eq!(fb.rgba().len(), 100 * 60 * 4);
     // Tiny buffers must not panic either.
     let _ = demo_2d().render(1, 1);
+    let _ = demo_2r().render(1, 1);
     let _ = demo_3d().render(1, 1);
 }
 
@@ -148,7 +149,7 @@ fn named_trace_gets_a_legend_and_unnamed_does_not() {
     assert!(has_color(&named, [26, 30, 44]), "legend background present");
 
     let mut p = Plot::new();
-    p.add_line2d(vec![0.0, 1.0], vec![0.0, 1.0], PALETTE[0], 2.0, None);
+    p.add_line2d(vec![0.0, 1.0], vec![0.0, 1.0], PALETTE[0], 2.0, None, YAxis::Primary);
     let unnamed = p.render(400, 240);
     assert!(!has_color(&unnamed, [205, 210, 220]), "no legend without names");
 }
@@ -156,7 +157,7 @@ fn named_trace_gets_a_legend_and_unnamed_does_not() {
 #[test]
 fn bars_fill_from_the_zero_baseline() {
     let mut p = Plot::new();
-    p.add_bar2d(vec![0.0, 1.0, 2.0], vec![3.0, 1.0, 2.0], PALETTE[2], None);
+    p.add_bar2d(vec![0.0, 1.0, 2.0], vec![3.0, 1.0, 2.0], PALETTE[2], None, YAxis::Primary);
     let fb = p.render(400, 240);
     let bar_px = drawn_pixels(&fb).into_iter().filter(|(_, _, c)| *c == PALETTE[2]).count();
     // Three bars on a 400x240 canvas are a large filled area, not a sliver.
@@ -166,7 +167,14 @@ fn bars_fill_from_the_zero_baseline() {
 #[test]
 fn scatter2d_marks_all_points() {
     let mut p = Plot::new();
-    p.add_scatter2d(vec![0.0, 5.0, 10.0], vec![0.0, 5.0, 10.0], PALETTE[5], 3.0, None);
+    p.add_scatter2d(
+        vec![0.0, 5.0, 10.0],
+        vec![0.0, 5.0, 10.0],
+        PALETTE[5],
+        3.0,
+        None,
+        YAxis::Primary,
+    );
     let fb = p.render(400, 240);
     assert!(has_color(&fb, PALETTE[5]));
 }
@@ -204,6 +212,7 @@ fn non_finite_data_is_skipped_not_drawn() {
         PALETTE[0],
         2.0,
         None,
+        YAxis::Primary,
     );
     let fb = p.render(300, 200);
     assert!(has_color(&fb, PALETTE[0]), "finite segments still draw");
@@ -212,10 +221,202 @@ fn non_finite_data_is_skipped_not_drawn() {
 #[test]
 fn mixed_2d_and_3d_uses_the_3d_camera_path() {
     let mut p = demo_3d();
-    p.add_line2d(vec![0.0, 1.0], vec![0.0, 1.0], PALETTE[0], 2.0, Some("x".into()));
+    p.add_line2d(vec![0.0, 1.0], vec![0.0, 1.0], PALETTE[0], 2.0, Some("x".into()), YAxis::Primary);
     let fb = p.render(300, 200);
     // 3D path: no axes frame, no legend ink.
     assert!(!has_color(&fb, [205, 210, 220]));
+}
+
+// --- right-hand axes (y2/y3) ---
+
+/// Primary ~0..1, y2 0..1000, y3 0..50000 — three scales that would flatten
+/// each other to slivers if they shared an axis. Distinct shapes (sine,
+/// linear, quadratic), because three full-scale straight lines would be one
+/// screen diagonal and the z-buffer would keep only the last.
+fn demo_2r() -> Plot {
+    let xs: Vec<f32> = (0..=20).map(|i| i as f32).collect();
+    let mut p = Plot::new();
+    p.add_line2d(
+        xs.clone(),
+        xs.iter().map(|x| (x * 0.5).sin() * 0.5 + 0.5).collect(),
+        PALETTE[0],
+        2.0,
+        Some("score".into()),
+        YAxis::Primary,
+    );
+    p.add_line2d(
+        xs.clone(),
+        xs.iter().map(|x| x * 50.0).collect(),
+        PALETTE[1],
+        2.0,
+        Some("tokens".into()),
+        YAxis::Y2,
+    );
+    p.add_line2d(
+        xs.clone(),
+        xs.iter().map(|x| x * x * 125.0).collect(),
+        PALETTE[2],
+        2.0,
+        Some("cpu".into()),
+        YAxis::Y3,
+    );
+    p
+}
+
+/// The x of the plot area's right edge, located structurally: the rightmost
+/// column in the right half whose frame-colored pixels form most of a rule.
+/// (The legend border also uses frame color, but its box is far shorter.)
+fn frame_x1(fb: &Framebuffer) -> usize {
+    let mut runs = vec![0usize; fb.w];
+    for (x, _, c) in drawn_pixels(fb) {
+        if c == [70, 78, 96] {
+            runs[x] += 1;
+        }
+    }
+    (fb.w / 2..fb.w).filter(|x| runs[*x] > fb.h / 3).max().expect("no right rule found")
+}
+
+#[test]
+fn no_secondary_means_no_right_rule_or_gutter() {
+    // Without right-axis traces the layout must match the pre-y2 engine:
+    // a fixed 6px right margin (s=1) holding nothing but, at most, the
+    // clamped last x tick label near the bottom.
+    let fb = demo_2d().render(400, 240);
+    for (x, y, _) in drawn_pixels(&fb) {
+        if y < fb.h / 2 {
+            assert!(x < fb.w - 6, "pixel in the right gutter at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn y2_draws_right_rule_and_tinted_labels() {
+    let xs: Vec<f32> = (0..=10).map(|i| i as f32).collect();
+    let mut p = Plot::new();
+    p.add_line2d(
+        xs.clone(),
+        xs.iter().map(|x| x / 10.0).collect(),
+        PALETTE[0],
+        2.0,
+        None,
+        YAxis::Primary,
+    );
+    p.add_line2d(
+        xs.clone(),
+        xs.iter().map(|x| x * 100.0).collect(),
+        PALETTE[1],
+        2.0,
+        None,
+        YAxis::Y2,
+    );
+    let fb = p.render(400, 240);
+    let x1 = frame_x1(&fb);
+    // Data is clipped to the plot area, so any series-colored pixel beyond
+    // the rule can only be a tick label tinted to the y2 series.
+    assert!(
+        drawn_pixels(&fb).iter().any(|(x, y, c)| *x > x1 && *y < fb.h / 2 && *c == PALETTE[1]),
+        "no tinted y2 labels in the right gutter"
+    );
+    // One shared rule: no frame-colored pixels beyond x1.
+    assert!(
+        !drawn_pixels(&fb).iter().any(|(x, _, c)| *x > x1 && *c == [70, 78, 96]),
+        "unexpected second rule beyond x1"
+    );
+}
+
+#[test]
+fn two_right_axes_stack_y2_inside_y3() {
+    let fb = demo_2r().render(400, 240);
+    let x1 = frame_x1(&fb);
+    let gutter: Vec<(usize, [u8; 3])> = drawn_pixels(&fb)
+        .into_iter()
+        .filter(|(x, y, _)| *x > x1 && *y < fb.h / 2)
+        .map(|(x, _, c)| (x, c))
+        .collect();
+    let min_x = |color: [u8; 3]| {
+        gutter.iter().filter(|(_, c)| *c == color).map(|(x, _)| *x).min().expect("column missing")
+    };
+    assert!(min_x(PALETTE[1]) < min_x(PALETTE[2]), "y2 must sit inside y3");
+}
+
+#[test]
+fn right_axes_scale_independently() {
+    // Each series spans most of the plot height on its own axis; shared
+    // scaling would flatten the smaller-magnitude series into slivers.
+    let fb = demo_2r().render(400, 240);
+    let x1 = frame_x1(&fb);
+    for color in [PALETTE[0], PALETTE[1], PALETTE[2]] {
+        let ys: Vec<usize> = drawn_pixels(&fb)
+            .into_iter()
+            .filter(|(x, _, c)| *x < x1 && *c == color)
+            .map(|(_, y, _)| y)
+            .collect();
+        let extent = ys.iter().max().unwrap() - ys.iter().min().unwrap();
+        assert!(extent > fb.h / 3, "series {color:?} spans only {extent}px");
+    }
+}
+
+#[test]
+fn data_never_bleeds_into_either_gutter() {
+    // Toward the right label columns…
+    let mut p = demo_2r();
+    p.camera.pan(2000.0, 0.0);
+    let fb = p.render(400, 240);
+    let x1 = frame_x1(&fb);
+    // Primary labels stay neutral ink, so its color beyond the rule can only
+    // be leaked data.
+    assert!(
+        !drawn_pixels(&fb).iter().any(|(x, _, c)| *x > x1 && *c == PALETTE[0]),
+        "primary series leaked into the right gutter"
+    );
+    // …and toward the left one, where right-axis series have no labels.
+    let mut p = demo_2r();
+    p.camera.pan(-2000.0, 0.0);
+    let fb = p.render(400, 240);
+    for (x, _, c) in drawn_pixels(&fb) {
+        if c == PALETTE[1] || c == PALETTE[2] {
+            assert!(x > 20, "right-axis series leaked into the left margin at x={x}");
+        }
+    }
+}
+
+#[test]
+fn only_y3_compacts_to_innermost_column() {
+    let series = |axis| {
+        let xs: Vec<f32> = (0..=10).map(|i| i as f32).collect();
+        let ys: Vec<f32> = xs.iter().map(|x| x * 5000.0).collect();
+        let mut p = Plot::new();
+        p.add_line2d(xs.clone(), xs.clone(), PALETTE[0], 2.0, None, YAxis::Primary);
+        p.add_line2d(xs, ys, PALETTE[1], 2.0, None, axis);
+        p
+    };
+    // The same single right-axis series must claim the same margin whether it
+    // is y2 or y3 — an absent axis reserves no column.
+    let x1_y2 = frame_x1(&series(YAxis::Y2).render(400, 240));
+    let x1_y3 = frame_x1(&series(YAxis::Y3).render(400, 240));
+    assert_eq!(x1_y2, x1_y3, "a lone y3 axis must compact into the inner slot");
+    // And two right axes take more room than one.
+    let x1_both = frame_x1(&demo_2r().render(400, 240));
+    assert!(x1_both < x1_y2, "two label columns must widen the right margin");
+}
+
+#[test]
+fn bars_on_y2_fill_from_their_own_baseline() {
+    let mut p = Plot::new();
+    // Primary range far above zero: if the bar baseline used the primary
+    // map, the bars would hang off-screen instead of filling from zero.
+    p.add_line2d(
+        vec![0.0, 1.0, 2.0],
+        vec![500.0, 501.0, 502.0],
+        PALETTE[0],
+        2.0,
+        None,
+        YAxis::Primary,
+    );
+    p.add_bar2d(vec![0.0, 1.0, 2.0], vec![3.0, 1.0, 2.0], PALETTE[2], None, YAxis::Y2);
+    let fb = p.render(400, 240);
+    let bar_px = drawn_pixels(&fb).into_iter().filter(|(_, _, c)| *c == PALETTE[2]).count();
+    assert!(bar_px > 2000, "y2 bars should be solid fills, got {bar_px} px");
 }
 
 // --- pick / projection consistency (beyond the in-crate unit tests) ---
@@ -249,13 +450,11 @@ fn ticks_stay_inside_the_requested_range() {
 
 // --- element picking & hover (3D graphs) ---
 
-use plotui_core::Element;
-
 fn demo_graph() -> (Plot, Vec<[f32; 3]>, Vec<(u32, u32)>) {
     let nodes = vec![[0.0, 0.0, 0.0], [5.0, 5.0, 5.0], [-5.0, -5.0, -5.0], [5.0, -5.0, 0.0]];
     let edges = vec![(0u32, 1u32), (1, 2), (0, 3)];
     let mut p = Plot::new();
-    p.add_graph3d(nodes.clone(), vec![[200, 100, 100]; 4], edges.clone(), 3.0, None, None);
+    p.add_graph3d(nodes.clone(), vec![[200, 100, 100]; 4], edges.clone(), 3.0, None, None, None);
     (p, nodes, edges)
 }
 
@@ -340,6 +539,7 @@ fn edge_flat_index_counts_invalid_edges_too() {
         3.0,
         None,
         None,
+        None,
     );
     let found = scan_elements(&p, 300, 200);
     let edge_hits: Vec<usize> = found
@@ -394,6 +594,245 @@ fn node_count_spans_all_traces() {
     let mut p = Plot::new();
     assert_eq!(p.node_count(), 0);
     p.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [1, 2, 3], 1.0);
-    p.add_graph3d(vec![[0.0; 3]; 3], vec![[9, 9, 9]; 3], vec![(0, 1)], 1.0, None, None);
+    p.add_graph3d(vec![[0.0; 3]; 3], vec![[9, 9, 9]; 3], vec![(0, 1)], 1.0, None, None, None);
     assert_eq!(p.node_count(), 5);
+}
+
+// --- streaming append: handles, extend, set_visible ---
+
+#[test]
+fn incremental_build_hash_equals_one_shot_2d() {
+    let xs: Vec<f32> = (0..=20).map(|i| i as f32).collect();
+    let ys: Vec<f32> = xs.iter().map(|x| (x * 0.5).sin() * 3.0 + 5.0).collect();
+    let bxs: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    let bhs: Vec<f32> = bxs.iter().map(|x| x * 0.3 + 1.0).collect();
+
+    let mut whole = Plot::new();
+    whole.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, Some("l".into()), YAxis::Primary);
+    whole.add_scatter2d(xs.clone(), ys.clone(), PALETTE[1], 2.5, None, YAxis::Primary);
+    whole.add_bar2d(bxs.clone(), bhs.clone(), PALETTE[2], None, YAxis::Primary);
+
+    let mut inc = Plot::new();
+    let l = inc.add_line2d(
+        xs[..7].to_vec(),
+        ys[..7].to_vec(),
+        PALETTE[0],
+        2.0,
+        Some("l".into()),
+        YAxis::Primary,
+    );
+    let s = inc.add_scatter2d(
+        xs[..1].to_vec(),
+        ys[..1].to_vec(),
+        PALETTE[1],
+        2.5,
+        None,
+        YAxis::Primary,
+    );
+    let b = inc.add_bar2d(bxs[..3].to_vec(), bhs[..3].to_vec(), PALETTE[2], None, YAxis::Primary);
+    inc.extend_xy(l, &xs[7..], &ys[7..]).unwrap();
+    inc.extend_xy(s, &xs[1..12], &ys[1..12]).unwrap();
+    inc.extend_xy(s, &xs[12..], &ys[12..]).unwrap();
+    inc.extend_xy(b, &bxs[3..], &bhs[3..]).unwrap();
+
+    assert_eq!(hash(&whole.render(240, 160)), hash(&inc.render(240, 160)));
+}
+
+#[test]
+fn incremental_build_hash_equals_one_shot_3d() {
+    let pts: Vec<[f32; 3]> = (0..30)
+        .map(|i| [(i as f32 * 0.7).sin() * 2.0, i as f32 * 0.1, (i as f32 * 0.5).cos()])
+        .collect();
+
+    let mut whole = Plot::new();
+    whole.add_scatter3d(pts.clone(), [230, 60, 120], 3.0);
+    whole.add_line3d(pts.clone(), [69, 200, 209], 2.0, Some("path".into()));
+
+    let mut inc = Plot::new();
+    let s = inc.add_scatter3d(pts[..10].to_vec(), [230, 60, 120], 3.0);
+    let l = inc.add_line3d(pts[..4].to_vec(), [69, 200, 209], 2.0, Some("path".into()));
+    inc.extend_pts(s, &pts[10..]).unwrap();
+    inc.extend_pts(l, &pts[4..20]).unwrap();
+    inc.extend_pts(l, &pts[20..]).unwrap();
+
+    assert_eq!(hash(&whole.render(240, 160)), hash(&inc.render(240, 160)));
+}
+
+#[test]
+fn bar_extend_reflows_like_one_shot() {
+    // The appended bar at x=3.4 narrows the min gap from 1.0 to 0.4, which
+    // must re-flow every bar's width exactly as a one-shot build would.
+    let mut whole = Plot::new();
+    whole.add_bar2d(
+        vec![0.0, 1.0, 2.0, 3.0, 3.4],
+        vec![1.0, 2.0, 3.0, 2.0, 1.5],
+        PALETTE[0],
+        None,
+        YAxis::Primary,
+    );
+    let mut inc = Plot::new();
+    let b = inc.add_bar2d(
+        vec![0.0, 1.0, 2.0, 3.0],
+        vec![1.0, 2.0, 3.0, 2.0],
+        PALETTE[0],
+        None,
+        YAxis::Primary,
+    );
+    inc.extend_xy(b, &[3.4], &[1.5]).unwrap();
+    assert_eq!(hash(&whole.render(240, 160)), hash(&inc.render(240, 160)));
+}
+
+#[test]
+fn ragged_extend_matches_concatenation() {
+    let mut whole = Plot::new();
+    whole.add_line2d(
+        vec![1.0, 2.0, 3.0, 4.0],
+        vec![1.0, 2.0, 3.0],
+        PALETTE[0],
+        2.0,
+        None,
+        YAxis::Primary,
+    );
+    let mut inc = Plot::new();
+    let l =
+        inc.add_line2d(vec![1.0, 2.0, 3.0], vec![1.0, 2.0], PALETTE[0], 2.0, None, YAxis::Primary);
+    inc.extend_xy(l, &[4.0], &[3.0]).unwrap();
+    assert_eq!(hash(&whole.render(200, 120)), hash(&inc.render(200, 120)));
+}
+
+#[test]
+fn hidden_trace_renders_like_never_added_2d() {
+    let xs: Vec<f32> = (0..=10).map(|i| i as f32).collect();
+    let ys: Vec<f32> = xs.iter().map(|x| x * 0.5 + 1.0).collect();
+    let y2: Vec<f32> = xs.iter().map(|x| 100.0 - x * 3.0).collect();
+
+    let mut bare = Plot::new();
+    bare.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, Some("a".into()), YAxis::Primary);
+
+    let mut toggled = Plot::new();
+    toggled.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, Some("a".into()), YAxis::Primary);
+    let h =
+        toggled.add_line2d(xs.clone(), y2.clone(), PALETTE[1], 2.0, Some("b".into()), YAxis::Y2);
+    let before = hash(&toggled.render(240, 160));
+
+    // Hiding the y2 trace releases its geometry, legend row, bounds
+    // contribution, AND the right-axis column + tint.
+    assert!(toggled.set_visible(h, false).unwrap());
+    assert!(!toggled.set_visible(h, false).unwrap(), "second hide is a no-op");
+    assert_eq!(hash(&toggled.render(240, 160)), hash(&bare.render(240, 160)));
+
+    assert!(toggled.set_visible(h, true).unwrap());
+    assert_eq!(hash(&toggled.render(240, 160)), before, "re-show restores the original frame");
+}
+
+#[test]
+fn hidden_trace_renders_like_never_added_3d() {
+    // The fog depth range is the subtle dependency: hidden geometry that
+    // stretched the depth span must stop tinting what remains.
+    let near: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0], [1.0, 1.0, 0.5], [-1.0, 0.5, -0.5]];
+    let far: Vec<[f32; 3]> = vec![[8.0, 8.0, 8.0], [-8.0, -8.0, -8.0]];
+
+    let mut bare = Plot::new();
+    bare.add_scatter3d(near.clone(), [230, 60, 120], 3.0);
+
+    let mut toggled = Plot::new();
+    toggled.add_scatter3d(near.clone(), [230, 60, 120], 3.0);
+    let h = toggled.add_scatter3d(far.clone(), [69, 200, 209], 3.0);
+    toggled.set_visible(h, false).unwrap();
+    assert_eq!(hash(&toggled.render(200, 140)), hash(&bare.render(200, 140)));
+}
+
+#[test]
+fn hidden_trace_keeps_flat_slots() {
+    let a_pts: Vec<[f32; 3]> = vec![[-4.0, 0.0, 0.0], [-4.0, 2.0, 0.0]];
+    let b_nodes: Vec<[f32; 3]> = vec![[4.0, 0.0, 0.0], [4.0, 2.0, 0.0]];
+    let mut p = Plot::new();
+    let a = p.add_scatter3d(a_pts, [230, 60, 120], 3.0);
+    p.add_graph3d(b_nodes, vec![[69, 200, 209]; 2], vec![(0, 1)], 3.0, None, None, None);
+    // Pin the projection so hiding A cannot move B's nodes on screen.
+    p.bounds_override = Some(([-5.0, -1.0, -1.0], [5.0, 3.0, 1.0]));
+
+    let nodes = p.project_nodes(200, 140);
+    let (bx, by) = (nodes[2][0], nodes[2][1]); // first B node, flat index 2
+    let (ax, ay) = (nodes[0][0], nodes[0][1]); // first A node, flat index 0
+    assert_eq!(p.pick(200, 140, bx, by, 3.0), Some(2));
+
+    p.set_visible(a, false).unwrap();
+    assert_eq!(p.node_count(), 4, "hidden nodes still occupy the flat index space");
+    assert_eq!(p.pick(200, 140, bx, by, 3.0), Some(2), "B keeps its flat index while A is hidden");
+    assert_eq!(p.pick(200, 140, ax, ay, 3.0), None, "hidden geometry is not a pick target");
+}
+
+#[test]
+fn extend_remaps_selection() {
+    let a: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let b: Vec<[f32; 3]> = vec![[0.0, 2.0, 0.0], [1.0, 2.0, 0.0]];
+    let extra = [[0.5, 1.0, 0.5]];
+
+    let mut inc = Plot::new();
+    let ha = inc.add_scatter3d(a.clone(), [230, 60, 120], 3.0);
+    inc.add_scatter3d(b.clone(), [69, 200, 209], 3.0);
+    inc.selected = Some(Element::Node(2)); // first node of B
+    inc.extend_pts(ha, &extra).unwrap();
+    assert_eq!(inc.selected, Some(Element::Node(3)), "selection follows the shifted flat index");
+
+    let mut whole = Plot::new();
+    whole.add_scatter3d([a.as_slice(), &extra].concat(), [230, 60, 120], 3.0);
+    whole.add_scatter3d(b, [69, 200, 209], 3.0);
+    whole.selected = Some(Element::Node(3));
+    assert_eq!(hash(&whole.render(200, 140)), hash(&inc.render(200, 140)));
+}
+
+#[test]
+fn extend_and_visibility_error_paths() {
+    let mut p = Plot::new();
+    let s3 = p.add_scatter3d(vec![[0.0, 0.0, 0.0]], [230, 60, 120], 3.0);
+    let g =
+        p.add_graph3d(vec![[1.0, 1.0, 1.0]], vec![[69, 200, 209]], vec![], 3.0, None, None, None);
+    let sf =
+        p.add_surface3d(vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0; 4], [1, 2, 3], None, false, None);
+    let l2 = p.add_line2d(vec![0.0], vec![0.0], PALETTE[0], 2.0, None, YAxis::Primary);
+
+    assert_eq!(p.extend_xy(99, &[], &[]), Err(TraceError::UnknownTrace));
+    assert_eq!(p.set_visible(99, false), Err(TraceError::UnknownTrace));
+    assert_eq!(p.extend_xy(s3, &[1.0], &[1.0]), Err(TraceError::WrongKind));
+    assert_eq!(p.extend_pts(l2, &[[0.0; 3]]), Err(TraceError::WrongKind));
+    assert_eq!(p.extend_pts(g, &[[0.0; 3]]), Err(TraceError::Structural));
+    assert_eq!(p.extend_xy(sf, &[1.0], &[1.0]), Err(TraceError::Structural));
+}
+
+#[test]
+fn extend_survives_degenerate_frames() {
+    let mut p = Plot::new();
+    let l = p.add_line2d(vec![], vec![], PALETTE[0], 2.0, None, YAxis::Primary);
+    p.extend_xy(l, &[], &[]).unwrap();
+    p.extend_xy(l, &[0.0, f32::NAN, 1.0], &[1.0, 2.0, f32::NAN]).unwrap();
+    p.render(1, 1);
+    p.render(120, 80);
+
+    let mut q = Plot::new();
+    let s = q.add_scatter3d(vec![], [230, 60, 120], 3.0);
+    q.extend_pts(s, &[[f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]]).unwrap();
+    q.render(1, 1);
+    q.render(120, 80);
+}
+
+#[test]
+fn direct_trace_push_falls_back_without_panicking() {
+    use plotui_core::Trace;
+    let mut p = Plot::new();
+    p.add_line2d(vec![0.0, 1.0], vec![0.0, 1.0], PALETTE[0], 2.0, None, YAxis::Primary);
+    // Bypass the API: the meta cache is now behind, so consumers must fall
+    // back to full scans and still draw the pushed trace.
+    p.traces.push(Trace::Scatter2d {
+        xs: vec![0.5],
+        ys: vec![0.5],
+        color: [1, 2, 3],
+        size: 4.0,
+        name: None,
+        axis: YAxis::Primary,
+    });
+    let fb = p.render(160, 120);
+    assert!(has_color(&fb, [1, 2, 3]), "directly pushed trace still draws");
+    assert_eq!(p.node_count(), 0);
 }

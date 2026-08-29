@@ -1,0 +1,169 @@
+// Package plotui — Go bindings for the plotui terminal plotting engine.
+//
+// The engine is the same Rust core behind the Python/Textual and Ratatui
+// frontends, linked statically through the plotui-ffi C ABI. Build the
+// library once with `cargo build -p plotui-ffi --release` at the repo root,
+// then `go build` here links it in; the resulting binary has no runtime
+// dependency on the Rust artifact.
+//
+// A Plot is not thread-safe: use it from one goroutine at a time (Bubble
+// Tea's Update/View already guarantee that).
+package plotui
+
+/*
+#cgo CFLAGS: -I${SRCDIR}/../crates/plotui-ffi/include
+#cgo LDFLAGS: ${SRCDIR}/../target/release/libplotui_ffi.a
+#cgo linux LDFLAGS: -lm -ldl -lpthread
+#include <plotui.h>
+#include <stdlib.h>
+*/
+import "C"
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+// RGB is a color triple, matching the engine's (r, g, b) byte tuples.
+type RGB struct{ R, G, B uint8 }
+
+// TraceHandle names a trace for Extend / SetVisible.
+type TraceHandle int
+
+// Plot is a handle to an engine-side plot: data + camera + a Kitty image id
+// of its own (so several plots never clobber each other's images).
+type Plot struct{ h *C.PlotuiPlot }
+
+// New creates an empty plot. Close it when done; a finalizer covers leaks.
+func New() *Plot {
+	p := &Plot{h: C.plotui_new()}
+	runtime.SetFinalizer(p, (*Plot).Close)
+	return p
+}
+
+// Close frees the engine-side plot. Safe to call twice.
+func (p *Plot) Close() {
+	if p.h != nil {
+		C.plotui_free(p.h)
+		p.h = nil
+		runtime.SetFinalizer(p, nil)
+	}
+}
+
+// ---- camera (forward your framework's events to these) ----
+
+func (p *Plot) Rotate(dYaw, dPitch float64) { C.plotui_rotate(p.h, C.double(dYaw), C.double(dPitch)) }
+func (p *Plot) ZoomBy(factor float64)       { C.plotui_zoom_by(p.h, C.double(factor)) }
+
+// Pan moves the view in framebuffer pixels.
+func (p *Plot) Pan(dx, dy float64) { C.plotui_pan(p.h, C.double(dx), C.double(dy)) }
+func (p *Plot) Reset()             { C.plotui_reset(p.h) }
+
+// CameraState returns (yaw, pitch, zoom, panX, panY) — capture it before
+// rebuilding a plot so the restored view is seamless.
+func (p *Plot) CameraState() [5]float64 {
+	var out [5]float64
+	C.plotui_camera_state(p.h, (*C.double)(unsafe.Pointer(&out[0])))
+	return out
+}
+
+// SetCameraState restores a state captured by CameraState (values clamped
+// the same way the incremental mutators clamp).
+func (p *Plot) SetCameraState(s [5]float64) {
+	C.plotui_set_camera_state(p.h, C.double(s[0]), C.double(s[1]), C.double(s[2]), C.double(s[3]), C.double(s[4]))
+}
+
+// SetBounds pins the 3D data frame to (lo, hi) corners; pass nil, nil to
+// restore auto-fit.
+func (p *Plot) SetBounds(lo, hi *[3]float32) {
+	var lp, hp *C.float
+	if lo != nil {
+		lp = (*C.float)(unsafe.Pointer(&lo[0]))
+	}
+	if hi != nil {
+		hp = (*C.float)(unsafe.Pointer(&hi[0]))
+	}
+	C.plotui_set_bounds(p.h, lp, hp)
+}
+
+// SetShowBox shows or hides the 3D orientation cube.
+func (p *Plot) SetShowBox(show bool) { C.plotui_set_show_box(p.h, C.bool(show)) }
+
+// Chrome recolors the non-data chrome; nil fields keep their current value.
+type Chrome struct{ BG, Frame, Grid, Ink, InkBright *RGB }
+
+func (p *Plot) SetChrome(c Chrome) {
+	C.plotui_set_chrome(p.h, rgbPtr(c.BG), rgbPtr(c.Frame), rgbPtr(c.Grid), rgbPtr(c.Ink), rgbPtr(c.InkBright))
+}
+
+// ---- info ----
+
+// Is3D reports whether any trace is 3D (the orbit-camera path).
+func (p *Plot) Is3D() bool { return bool(C.plotui_is_3d(p.h)) }
+
+// NodeCount is the number of pickable nodes across all traces.
+func (p *Plot) NodeCount() int { return int(C.plotui_node_count(p.h)) }
+
+// VertexCount counts every drawn 3D vertex — the load metric for the
+// reduced-resolution interaction policy.
+func (p *Plot) VertexCount() int { return int(C.plotui_vertex_count(p.h)) }
+
+// ImageID is this plot's Kitty image id.
+func (p *Plot) ImageID() uint32 { return uint32(C.plotui_image_id(p.h)) }
+
+// ProjectNodes projects every node (flat-index order, matching PickPx) to
+// screen space for a pxW×pxH framebuffer: (xPx, yPx, depth) per node.
+func (p *Plot) ProjectNodes(pxW, pxH int) [][3]float32 {
+	n := p.NodeCount()
+	if n == 0 {
+		return nil
+	}
+	out := make([][3]float32, n)
+	C.plotui_project_nodes(p.h, C.size_t(pxW), C.size_t(pxH), (*C.float)(unsafe.Pointer(&out[0][0])))
+	return out
+}
+
+// InteractiveScale is the shared half-resolution policy: the configured
+// scale only for large 3D plots while interacting, else 1.0.
+func (p *Plot) InteractiveScale(interacting bool, configured float64) float64 {
+	return float64(C.plotui_interactive_scale(p.h, C.bool(interacting), C.double(configured)))
+}
+
+// ---- small cgo helpers ----
+
+func fptr(s []float32) (*C.float, C.size_t) {
+	if len(s) == 0 {
+		return nil, 0
+	}
+	return (*C.float)(unsafe.Pointer(&s[0])), C.size_t(len(s))
+}
+
+func rgbPtr(c *RGB) *C.uint8_t {
+	if c == nil {
+		return nil
+	}
+	return (*C.uint8_t)(unsafe.Pointer(c))
+}
+
+func cstrOrNil(s *string) *C.char {
+	if s == nil {
+		return nil
+	}
+	return C.CString(*s)
+}
+
+func freeCStr(s *C.char) {
+	if s != nil {
+		C.free(unsafe.Pointer(s))
+	}
+}
+
+// takeString copies and frees a Rust-allocated string.
+func takeString(s *C.char) string {
+	if s == nil {
+		return ""
+	}
+	out := C.GoString(s)
+	C.plotui_string_free(s)
+	return out
+}

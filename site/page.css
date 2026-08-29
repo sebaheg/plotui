@@ -1,0 +1,217 @@
+  /* ---------- hero ---------- */
+  /* Vertical only — see the .nav comment in site.css: a shorthand would
+     wipe .wrap's 24px side padding on the same element. */
+  .hero { padding-top: 72px; padding-bottom: 40px; }
+  .hero-grid {
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: 56px; align-items: center;
+  }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    color: var(--ink); letter-spacing: .08em; text-transform: uppercase;
+    margin-bottom: 22px;
+  }
+  .eyebrow em { font-style: normal; color: var(--trace-3); }
+  h1 {
+    font-family: var(--mono); font-weight: 800;
+    font-size: clamp(30px, 3.6vw, 40px);
+    line-height: 1.18; letter-spacing: -.03em; color: var(--bright);
+    margin-bottom: 22px;
+  }
+  h1 .t1 { color: var(--trace-1); }
+  h1 .t2 { color: var(--trace-2); }
+  h1 .t3 { color: var(--trace-3); }
+  .hero p.lede { max-width: 46ch; margin-bottom: 30px; }
+  .hero .lede strong { color: var(--bright); font-weight: 600; }
+
+  /* ---------- the terminal ---------- */
+  #plot3d {
+    display: block; width: 100%; height: 380px;
+    cursor: grab; touch-action: none;
+  }
+  #plot3d.dragging { cursor: grabbing; }
+  .pipeline {
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    margin-bottom: 36px; overflow-x: auto; white-space: nowrap;
+    padding-bottom: 4px;
+  }
+  .pipeline b { font-weight: 500; color: var(--body); }
+  .pipeline .arr { color: var(--frame); padding: 0 10px; }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .card {
+    background: var(--bg-raise); border: 1px solid var(--grid);
+    border-radius: 10px; padding: 26px 24px;
+    min-width: 0; /* let a nowrap .snip scroll inside its grid track, not widen it */
+  }
+  .card h3 {
+    font-family: var(--mono); font-size: 14px; font-weight: 700;
+    color: var(--bright); margin-bottom: 4px; letter-spacing: -.01em;
+  }
+  .card .role {
+    font-family: var(--mono); font-size: 11px; margin-bottom: 14px;
+  }
+  .card p { font-size: 15px; }
+  .card .topline { height: 3px; border-radius: 2px; width: 44px; margin-bottom: 20px; }
+  .c1 .topline { background: var(--trace-1); } .c1 .role { color: var(--trace-1); }
+  .c2 .topline { background: var(--trace-2); } .c2 .role { color: var(--trace-2); }
+  .c3 .topline { background: var(--trace-3); } .c3 .role { color: var(--trace-3); }
+  .card .snip {
+    font-family: var(--mono); font-size: 10.5px; color: var(--ink);
+    margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--grid);
+    overflow-x: auto; white-space: nowrap;
+  }
+  /* ---------- compatibility ---------- */
+  .compat-head {
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    color: var(--ink); letter-spacing: .08em; text-transform: uppercase;
+    margin: 44px 0 16px;
+  }
+  /* Snips pin to the card bottom so the code lines align across the row. */
+  #compat .card { display: flex; flex-direction: column; }
+  #compat .card .snip { margin-top: auto; padding-top: 12px; }
+  #compat .fine { margin-top: 24px; }
+  .compat-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .compat-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    background: var(--bg-raise); border: 1px solid var(--grid);
+    border-radius: 10px; padding: 16px 20px;
+  }
+  .compat-row b {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-family: var(--mono); font-size: 13px; font-weight: 700;
+    color: var(--bright); letter-spacing: -.01em;
+  }
+  .compat-row b::before {
+    content: "✓";
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; flex: none; border-radius: 50%;
+    font-size: 12px; font-weight: 800;
+    -webkit-text-stroke: 1px currentColor;
+    color: #4cd684; border: 1.5px solid #4cd684;
+    background: rgba(76, 214, 132, .12);
+  }
+  .compat-row.partial b::before {
+    content: "~";
+    color: var(--trace-3); border-color: var(--trace-3);
+    background: rgba(240, 161, 60, .12);
+  }
+  .compat-row small {
+    font-family: var(--mono); font-size: 10.5px; color: var(--body);
+    background: var(--bg-term); border: 1px solid var(--frame);
+    border-radius: 6px; padding: 5px 10px; white-space: nowrap;
+  }
+  .mode-key { margin-top: 22px; display: grid; gap: 7px; }
+  .mode-key > div { font-size: 13px; color: var(--ink); line-height: 1.55; }
+  .mode-key dt { display: inline; font-family: var(--mono); font-size: 11px; color: var(--body); }
+  .mode-key dt::after { content: " — "; }
+  .mode-key dd { display: inline; }
+
+  /* ---------- code ---------- */
+  .code-grid {
+    display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 6fr);
+    gap: 48px; align-items: start;
+  }
+  .code-panel { min-width: 0; }
+  .lang-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .lang-tab {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 11.5px; font-weight: 500;
+    letter-spacing: .04em; color: var(--ink);
+    background: none; border: 1px solid var(--grid); border-radius: 6px;
+    padding: 7px 16px; cursor: pointer;
+  }
+  .lang-ico { width: 13px; height: 13px; flex: none; fill: currentColor; }
+  .lang-tab:hover { color: var(--body); border-color: var(--frame); }
+  .lang-tab.active {
+    color: var(--bright); border-color: var(--trace-2);
+    background: rgba(69, 200, 209, .08);
+  }
+  pre.code {
+    background: var(--bg-term); border: 1px solid var(--frame);
+    border-radius: 10px; padding: 24px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.9;
+    overflow-x: auto; color: var(--body);
+  }
+  .code .kw { color: var(--trace-1); }
+  .code .fn { color: var(--trace-2); }
+  .code .str { color: var(--trace-3); }
+  .code .cm { color: var(--ink); }
+  .code .self { color: var(--bright); }
+  .code .v1 { color: var(--trace-1); }
+  .code .v2 { color: var(--trace-2); }
+  .code .v3 { color: var(--trace-3); }
+  .feature-list { list-style: none; margin-top: 26px; }
+  .feature-list li {
+    padding-left: 26px; position: relative; margin-bottom: 12px; font-size: 15.5px;
+  }
+  .feature-list li::before {
+    content: "▪"; position: absolute; left: 2px; color: var(--trace-2);
+  }
+  .feature-list li b { color: var(--bright); font-weight: 600; }
+
+  .fine { font-size: 15px; color: var(--body); max-width: 62ch; }
+  .fine b { color: var(--bright); font-weight: 600; }
+
+  /* ---------- get started ---------- */
+  .start-grid {
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: 48px; align-items: start;
+  }
+  pre.shell {
+    background: var(--bg-term); border: 1px solid var(--frame);
+    border-radius: 10px; padding: 24px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 2.1;
+    overflow-x: auto; color: var(--bright);
+  }
+  .shell .ps1 { color: var(--trace-2); user-select: none; }
+  .shell .cm { color: var(--ink); }
+  .status-tag {
+    display: inline-block; font-family: var(--mono); font-size: 11px;
+    color: var(--trace-3); border: 1px solid rgba(240, 161, 60, .35);
+    border-radius: 4px; padding: 3px 10px; margin-bottom: 18px;
+  }
+  .road { margin-top: 26px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 28px; }
+  .road div {
+    font-family: var(--mono); font-size: 11.5px; line-height: 2;
+    padding-left: 2.6em; text-indent: -2.6em;
+  }
+  .road .done { color: var(--body); }
+  .road .done::before { content: "[x] "; color: var(--trace-2); }
+  .road .todo { color: var(--ink); }
+  .road .todo::before { content: "[ ] "; color: var(--frame); }
+
+  /* ---------- live gallery ---------- */
+  #surf3d { display: block; width: 100%; height: 300px; cursor: grab; touch-action: none; }
+  #surf3d.dragging { cursor: grabbing; }
+  #chart2d { display: block; width: 100%; height: 300px; cursor: crosshair; }
+
+  /* ---------- streaming ---------- */
+  .stream-grid {
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: 48px; align-items: center;
+  }
+  #stream2d { display: block; width: 100%; height: 300px; }
+  /* Keep the legend inside the plot frame, clear of the y2 label column —
+     the way the real renderer lays it out. */
+  #stream-legend { right: 56px; }
+  .stream-note {
+    font-family: var(--mono); font-size: 11px; color: var(--ink);
+    margin-top: 14px;
+  }
+  .stream-note b { color: var(--body); font-weight: 500; }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 920px) {
+    /* minmax(0, …) as in the desktop templates: bare 1fr would let nowrap
+       content (the escape caption) force the column wider than the screen. */
+    .hero-grid, .code-grid, .start-grid, .stream-grid { grid-template-columns: minmax(0, 1fr); gap: 40px; }
+    .cards { grid-template-columns: 1fr; }
+    .compat-list { grid-template-columns: 1fr 1fr; }
+    .hero { padding-top: 48px; }
+    #plot3d { height: 320px; }
+  }
+  @media (max-width: 640px) {
+    .road { grid-template-columns: 1fr; }
+    .compat-list { grid-template-columns: 1fr; }
+  }

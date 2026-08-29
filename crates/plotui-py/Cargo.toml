@@ -12,4 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 plotui-core = { path = "../plotui-core" }
 plotui-protocol = { path = "../plotui-protocol" }
+plotui-term = { path = "../plotui-term" }
+plotui-bind = { path = "../plotui-bind" }
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
+numpy = "0.25"

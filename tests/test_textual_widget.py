@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from textual.app import App, ComposeResult
 
 from plotui import Plot
@@ -303,25 +305,16 @@ def test_unmount_deletes_the_image_from_the_terminal() -> None:
     ), "unmount must emit the kitty delete escape"
 
 
-def test_detect_cell_px_uses_terminal_size(monkeypatch) -> None:
-    import struct
+def test_detect_cell_px_uses_terminal_size() -> None:
+    # The ioctl itself needs a real terminal; the size computation is exposed
+    # as a pure function (native, shared with the Rust frontends).
+    from plotui._plotui import cell_px_from_winsize
 
-    from plotui import textual as tx
-
-    # Fake a terminal reporting 1920x1350 over 80x25 cells (retina iTerm2).
-    fake = struct.pack("HHHH", 25, 80, 1920, 1350)
-
-    class FakeStream:
-        def fileno(self) -> int:
-            return 0
-
-    monkeypatch.setattr(tx.sys, "__stdout__", FakeStream())
-    monkeypatch.setattr("fcntl.ioctl", lambda *a, **k: fake)
-    assert tx.detect_cell_px() == (24, 54)  # 1920//80, 1350//25
-
-    # A terminal that reports no pixel size falls back.
-    monkeypatch.setattr("fcntl.ioctl", lambda *a, **k: struct.pack("HHHH", 25, 80, 0, 0))
-    assert tx.detect_cell_px(fallback=(11, 22)) == (11, 22)
+    # A terminal reporting 1920x1350 over 80x25 cells (retina iTerm2).
+    assert cell_px_from_winsize(25, 80, 1920, 1350) == (24, 54)  # 1920//80, 1350//25
+    # A terminal that reports no pixel size yields nothing → detect_cell_px
+    # falls back (fallback plumbing covered by the widget default-path tests).
+    assert cell_px_from_winsize(25, 80, 0, 0) is None
 
 
 def test_interactive_scale_reduces_only_while_dragging_a_large_3d_plot() -> None:
@@ -415,5 +408,112 @@ def test_direct_mode_wraps_transmit_for_tmux(monkeypatch) -> None:
             assert "\x1b\x1b_G" in line0, "inner APC has doubled ESCs"
             # The raw (unwrapped) APC must not appear un-doubled.
             assert "\x1b_G" not in line0.replace("\x1b\x1b", "")
+
+    asyncio.run(drive())
+
+
+def test_shift_drag_pans_the_plot_exactly_with_the_pointer() -> None:
+    """Pan is in image pixels; one dragged cell must move the picture one cell
+    (cell_w × cell_h pixels), so a node stays under the pointer that drags it."""
+    from types import SimpleNamespace
+
+    async def drive() -> None:
+        app = _Harness()
+        async with app.run_test(size=(60, 20)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            px_w, px_h, _px, _py, _r = widget._pixel_geometry(0, 0)
+            before = app.plot.project_nodes(px_w, px_h)[0]
+
+            await pilot.mouse_down("#plot", offset=(30, 10))
+            move = SimpleNamespace(screen_x=30 + 7, screen_y=10 + 3, x=37, y=13, shift=True)
+            widget.on_mouse_move(move)  # shift-drag 7 cells right, 3 down
+            after = app.plot.project_nodes(px_w, px_h)[0]
+
+            assert after[0] - before[0] == pytest.approx(7 * widget._cell_w)
+            assert after[1] - before[1] == pytest.approx(3 * widget._cell_h)
+
+    asyncio.run(drive())
+
+
+# --- streaming: widget.extend / widget.set_visible ---
+
+
+def test_widget_extend_invalidates_and_changes_the_frame() -> None:
+    async def drive() -> None:
+        class Stream(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.handle = self.plot.add_line([0.0, 1.0], [0.0, 1.0], color=(10, 20, 30))
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(self.plot, id="plot", render_mode="placeholder")
+
+        app = Stream()
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            assert widget.plot is app.plot
+            widget.render_line(0)
+            version, key = widget._version, widget._key
+
+            widget.extend(app.handle, [2.0, 3.0], [4.0, 0.5])
+            await pilot.pause()
+            widget.render_line(0)
+            assert widget._version == version + 1, "extend marks the frame dirty"
+            assert widget._key != key, "the frame cache re-keys after extend"
+
+    asyncio.run(drive())
+
+
+def test_widget_set_visible_repaints_only_on_change() -> None:
+    async def drive() -> None:
+        class Two(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.plot.add_line([0.0, 1.0], [0.0, 1.0])
+                self.handle = self.plot.add_line([0.0, 1.0], [1.0, 0.0])
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(self.plot, id="plot", render_mode="placeholder")
+
+        app = Two()
+        async with app.run_test(size=(80, 24)):
+            widget = app.query_one("#plot", PlotWidget)
+            version = widget._version
+            assert widget.set_visible(app.handle, False) is True
+            assert widget._version == version + 1
+            assert widget.set_visible(app.handle, False) is False
+            assert widget._version == version + 1, "a no-op toggle must not repaint"
+
+    asyncio.run(drive())
+
+
+def test_streamed_growth_flips_the_large_flag() -> None:
+    async def drive() -> None:
+        class Growing(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.handle = self.plot.add_scatter3d([0.0], [0.0], [0.0])
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(
+                    self.plot, id="plot", render_mode="direct", interactive_scale=0.5
+                )
+
+        app = Growing()
+        async with app.run_test(size=(80, 24)):
+            widget = app.query_one("#plot", PlotWidget)
+            assert widget._large is False
+
+            n = 500
+            widget.extend(
+                app.handle,
+                [float(i % 10) for i in range(n)],
+                [float(i // 10) for i in range(n)],
+                [float(i % 7) for i in range(n)],
+            )
+            assert widget._large is True, "streamed growth re-evaluates the load metric"
 
     asyncio.run(drive())

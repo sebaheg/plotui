@@ -1,0 +1,66 @@
+---
+title: 2D charts
+description: Line, scatter, and bar charts with automatic axes, ticks, legends, and secondary y-axes.
+---
+
+All 2D traces share the same conventions: with `color=None`, palette slots are
+assigned in a fixed, color-vision-safe order; `name` puts the series in the
+legend; non-finite values (NaN) break lines into separate runs instead of
+drawing through the gap. Every `add_*` returns a trace handle for
+`plot.extend(handle, xs, ys)` and `plot.set_visible(handle, ...)` — see
+[Streaming data](/docs/interaction#streaming-data). Coordinates accept lists
+or numpy float32/float64 arrays (arrays are read in one bulk copy).
+
+## Line and scatter
+
+```python
+plot.add_line(xs, ys, color=None, width=2.0, name=None, axis="y")
+plot.add_scatter(xs, ys, color=None, size=2.5, name=None, axis="y")
+```
+
+## Bars
+
+```python
+plot.add_bar(xs, heights, color=None, name=None, axis="y")
+```
+
+Bars rise (or fall) from the zero baseline. Bar width is derived from the
+smallest gap between x positions, so adjacent bars keep a visible gap —
+which also means `extend`-ing a bar whose x narrows that gap re-flows the
+width of every bar in the trace.
+
+**Stacked bars** are a painter's trick: draw cumulative totals first, then the
+shorter component bars on top:
+
+```python
+totals = [s + w + h for s, w, h in zip(solar, wind, hydro)]
+plot.add_bar(months, totals, name="hydro")                        # tallest first
+plot.add_bar(months, [s + w for s, w in zip(solar, wind)], name="wind")
+plot.add_bar(months, solar, name="solar")
+```
+
+## Secondary y-axes
+
+`axis="y2"` or `"y3"` binds a series to an independent right-hand axis with
+its own autoscale and tick column, labels tinted to the series color. The
+grid always belongs to the primary axis.
+
+```python
+plot.add_line(xs, mw, name="production")
+plot.add_line(xs, price, axis="y2", name="price")
+```
+
+## Hover crosshair
+
+2D plots support a hover crosshair: a vertical guide snapped to the nearest
+sample x, a marker on every series sampled there, and a value readout box.
+The Textual widget wires it to the mouse automatically; in a raw loop, set it
+yourself in framebuffer pixels:
+
+```python
+changed = plot.set_hover2d(px)   # None clears; returns True when state changed
+```
+
+Series match by exact sample x — series on a shared grid all get a row, while
+series on their own grids only show where they truly have a sample. Nothing
+is interpolated silently.

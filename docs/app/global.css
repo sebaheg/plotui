@@ -1,0 +1,78 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Martian+Mono:wght@400;500;700&display=swap');
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+/* plotui's landing-page palette, derived from the renderer's own chrome:
+   grid (26,32,36) · frame (43,50,55) · ink (103,111,118). Dark-only — the
+   product's identity is the terminal. */
+:root,
+.dark {
+  --fd-layout-width: 1400px;
+  --plotui-bg: #101418;
+  --plotui-bg-raise: #14191e;
+  --plotui-bg-term: #0b0e11;
+  --plotui-grid: #1a2026;
+  --plotui-frame: #2b3237;
+  --plotui-ink: #676f76;
+  --plotui-body: #aeb7bf;
+  --plotui-bright: #e9eef3;
+  --plotui-trace-1: #ec4c86;
+  --plotui-trace-2: #45c8d1;
+  --plotui-trace-3: #f0a13c;
+
+  --color-fd-background: var(--plotui-bg);
+  --color-fd-foreground: var(--plotui-body);
+  --color-fd-muted: var(--plotui-bg-raise);
+  --color-fd-muted-foreground: var(--plotui-ink);
+  --color-fd-popover: var(--plotui-bg-raise);
+  --color-fd-popover-foreground: var(--plotui-body);
+  --color-fd-card: var(--plotui-bg-raise);
+  --color-fd-card-foreground: var(--plotui-body);
+  --color-fd-border: var(--plotui-frame);
+  --color-fd-primary: var(--plotui-trace-2);
+  --color-fd-primary-foreground: var(--plotui-bg-term);
+  --color-fd-secondary: var(--plotui-grid);
+  --color-fd-secondary-foreground: var(--plotui-bright);
+  --color-fd-accent: var(--plotui-grid);
+  --color-fd-accent-foreground: var(--plotui-trace-2);
+  --color-fd-ring: var(--plotui-trace-2);
+  --color-fd-overlay: hsla(0, 0%, 0%, 0.45);
+  font-family:
+    'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+/* Headings and code in the landing page's mono voice. */
+.plotui-nav-title {
+  font-family: 'Martian Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.02em;
+  color: var(--plotui-bright);
+}
+
+.plotui-nav-accent {
+  color: var(--plotui-trace-2);
+}
+
+#nd-docs-layout h1,
+#nd-docs-layout h2,
+#nd-docs-layout h3 {
+  font-family: 'Martian Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  letter-spacing: -0.02em;
+}
+
+.prose :where(code):not(:where(pre code)) {
+  color: var(--plotui-trace-2);
+  background: var(--plotui-bg-term);
+  border: 1px solid var(--plotui-grid);
+}
+
+.prose :where(pre) {
+  background: var(--plotui-bg-term);
+  border-color: var(--plotui-frame);
+}

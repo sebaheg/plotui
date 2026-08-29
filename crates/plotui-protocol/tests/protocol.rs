@@ -1,11 +1,11 @@
 //! Encoder tests: escape-sequence structure, not terminal behavior.
 
-use plotui_core::{Plot, PALETTE};
+use plotui_core::{Plot, YAxis, PALETTE};
 use plotui_protocol::{kitty, kitty_cleanup, kitty_placeholder, kitty_placeholder_cells};
 
 fn frame(w: usize, h: usize) -> plotui_core::Framebuffer {
     let mut p = Plot::new();
-    p.add_line2d(vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 1.0], PALETTE[0], 2.0, None);
+    p.add_line2d(vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 1.0], PALETTE[0], 2.0, None, YAxis::Primary);
     p.render(w, h)
 }
 
@@ -91,6 +91,43 @@ fn placeholder_cells_are_individually_addressed() {
 #[test]
 fn cleanup_deletes_exactly_our_image() {
     assert_eq!(kitty_cleanup(), "\x1b_Ga=d,d=i,i=4242\x1b\\");
+}
+
+#[test]
+fn with_id_variants_thread_a_custom_image_id() {
+    use plotui_protocol::{
+        kitty_cleanup_with_id, kitty_compat_with_id, kitty_placeholder_cells_with_id,
+        kitty_with_id, DEFAULT_IMAGE_ID,
+    };
+    assert_eq!(DEFAULT_IMAGE_ID, 4242, "existing frontends stay bit-compatible");
+
+    let s = kitty_with_id(&frame(80, 40), 20, 10, 7);
+    assert!(s.contains("i=7,") && !s.contains("i=4242"));
+    assert!(s.starts_with("\x1b[s\x1b_Ga=d,d=i,i=7,q=2\x1b\\"), "delete uses the same id");
+
+    let s = kitty_compat_with_id(&frame(80, 40), 20, 10, true, 4243);
+    assert!(s.contains("a=d,d=i,i=4243") && s.contains("i=4243,p=1,a=T"));
+
+    let p = kitty_placeholder_cells_with_id(&frame(80, 40), 20, 10, 0x00A1B2C3);
+    assert!(p.transmit.contains("i=10597059,"), "id in decimal in the transmit escape");
+    assert_eq!(p.id_rgb, (0xA1, 0xB2, 0xC3), "foreground encodes the low 24 bits");
+    // Id fits in 24 bits → no extra diacritic, cells stay 3 chars.
+    assert_eq!(p.cells[0][0].chars().count(), 3);
+
+    assert_eq!(kitty_cleanup_with_id(7), "\x1b_Ga=d,d=i,i=7\x1b\\");
+}
+
+#[test]
+fn image_ids_above_24_bits_add_the_extra_diacritic() {
+    use plotui_protocol::kitty_placeholder_cells_with_id;
+    let p = kitty_placeholder_cells_with_id(&frame(80, 40), 20, 10, 0x01_00_10_92);
+    assert_eq!(p.id_rgb, (0x00, 0x10, 0x92), "color still carries the low 24 bits");
+    for row in &p.cells {
+        for cell in row {
+            // PLACEHOLDER + row + column + the high-byte "extra" diacritic.
+            assert_eq!(cell.chars().count(), 4);
+        }
+    }
 }
 
 #[test]

@@ -1,0 +1,68 @@
+---
+title: 3D plots
+description: Scatter clouds, pickable graphs, trajectories, and Gouraud-shaded surfaces under one orbit camera.
+---
+
+Any 3D trace switches the whole plot to the orbit camera: drag rotates,
+shift-drag pans, scroll zooms, double-click resets. All 3D traces share one
+(x, y, z) space — no axis is special — with a bounding-box wireframe for
+orientation (`set_show_box(False)` hides it) and depth fog for distance
+cueing. Named 3D traces get the same legend as 2D charts.
+
+## Scatter
+
+```python
+plot.add_scatter3d(xs, ys, zs, color=(230, 60, 120), size=3.0)
+```
+
+## Graphs
+
+Node-link graphs with per-node styling and interactive picking:
+
+```python
+plot.add_graph3d(
+    xs, ys, zs,
+    edges=[(0, 1), (1, 2)],
+    node_colors=[...],          # per node, else uniform `color`
+    node_sizes=[...],           # per node, else `size`
+    edge_colors=[...],          # per edge, else dimmed endpoint blend
+    node_shapes=["disc", "ring", "square", "triangle", "diamond",
+                 "diamond-open", "dot"],
+)
+```
+
+Hovered nodes and edges light up white; clicks select. See
+[Interaction](/docs/interaction).
+
+## Lines
+
+Polylines — trajectories, orbits, curves — in the same space as scatter:
+
+```python
+plot.add_line3d(xs, ys, zs, color=None, width=2.0, name=None)
+```
+
+Strokes carry interpolated depth, so lines occlude correctly against other
+geometry. A NaN vertex breaks the line into separate runs. Vertices are not
+pickable, so adding lines never shifts existing node indices.
+
+## Surfaces
+
+Grid surfaces, Gouraud-shaded with a headlight and a height colormap:
+
+```python
+plot.add_surface3d(
+    xs, ys, Z,               # Z[j][i] is the height at (xs[i], ys[j])
+    colormap="viridis",      # or "plasma"; None + `color` for a solid surface
+    wireframe=False,         # overlay the grid lines
+    name=None,
+)
+```
+
+`Z` is a list of rows or a 2D NumPy array. Every vertex gets its own ramp
+color, normal, and fog depth, interpolated across each cell — surfaces render
+as smooth gradients, not flat facets. Cells with a NaN corner become holes.
+Grid vertices are not pickable.
+
+The z-buffer handles occlusion globally: a trajectory drawn through a surface
+disappears behind hills and re-emerges, with no ordering to manage.

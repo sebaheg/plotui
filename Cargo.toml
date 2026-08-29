@@ -1,9 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["crates/plotui-core", "crates/plotui-protocol", "crates/plotui-py"]
+members = [
+    "crates/plotui-core",
+    "crates/plotui-protocol",
+    "crates/plotui-term",
+    "crates/plotui-bind",
+    "crates/plotui-ffi",
+    "crates/plotui-py",
+    "crates/plotui-ratatui",
+    "crates/plotui-wasm",
+]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/sebaheg/plotui"

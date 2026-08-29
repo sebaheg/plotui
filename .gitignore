@@ -14,3 +14,9 @@ __pycache__/
 
 # maturin
 /wheels
+.gstack/
+
+# docs site (Next.js / fumadocs — all generated)
+node_modules/
+docs/.next/
+docs/.source/

@@ -28,7 +28,6 @@ Set the ``PLOTUI_RENDER`` environment variable (or the widget's
 from __future__ import annotations
 
 import os
-import sys
 
 from rich.cells import cell_len
 from rich.color import Color
@@ -40,6 +39,9 @@ from textual.strip import Strip
 from textual.widget import Widget
 
 from ._plotui import Plot
+from ._plotui import detect_cell_px as _detect_cell_px
+from ._plotui import detect_render_mode as _detect_render_mode
+from ._plotui import tmux_wrap as _tmux_wrap
 
 # Fallback cell size in device pixels, used only when the terminal doesn't
 # report its own (see `detect_cell_px`). The image is scaled to the cell grid
@@ -61,9 +63,7 @@ def tmux_wrap(escape: str) -> str:
     ESC in the payload doubled — hands the raw bytes to the outer terminal.
     Requires ``set -g allow-passthrough on`` in tmux. A no-op outside tmux
     (``$TMUX`` unset), so normal terminals are unaffected."""
-    if not os.environ.get("TMUX"):
-        return escape
-    return "\x1bPtmux;" + escape.replace("\x1b", "\x1b\x1b") + "\x1b\\"
+    return _tmux_wrap(escape)
 
 
 def detect_cell_px(fallback: tuple[int, int] = (_CELL_W, _CELL_H)) -> tuple[int, int]:
@@ -72,22 +72,7 @@ def detect_cell_px(fallback: tuple[int, int] = (_CELL_W, _CELL_H)) -> tuple[int,
     report it — and report *device* pixels, so this yields the true retina
     resolution. Returns `fallback` when the terminal reports no pixel size
     (or on platforms without termios, e.g. Windows)."""
-    try:
-        import fcntl
-        import struct
-        import termios
-    except ImportError:
-        return fallback
-    for stream in (sys.__stdout__, sys.__stderr__, sys.__stdin__):
-        try:
-            fd = stream.fileno()
-            packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
-        except (AttributeError, ValueError, OSError):
-            continue
-        rows, cols, xpix, ypix = struct.unpack("HHHH", packed)
-        if rows and cols and xpix and ypix:
-            return (max(1, xpix // cols), max(1, ypix // rows))
-    return fallback
+    return _detect_cell_px(fallback)
 
 # An overlay span: (row, col, text, style) — text drawn over the plot in
 # terminal cells (labels, badges). See `PlotWidget.set_overlay`.
@@ -97,21 +82,15 @@ OverlaySpan = tuple[int, int, str, Style | None]
 RENDER_MODES = ("placeholder", "direct")
 
 # What the widget shows instead of a degraded plot when the terminal has no
-# Kitty graphics support (centered in the plot area).
+# Kitty graphics support (centered in the plot area). Change these strings
+# only in lockstep with UNSUPPORTED_MESSAGE in crates/plotui-term/src/policy.rs
+# — the Rust frontends center the same notice.
 _UNSUPPORTED_MESSAGE: tuple[tuple[str, Style | None], ...] = (
     ("Plotting requires a terminal that supports the Kitty graphics protocol.", Style(bold=True)),
     ("", None),
-    ("Supported terminals include Kitty, Ghostty, iTerm2 (3.5+), and WezTerm.", None),
+    ("Supported terminals include Kitty, Ghostty, iTerm2 (3.5+), WezTerm, and Konsole.", None),
     ("If yours does support it, force a path with PLOTUI_RENDER=placeholder|direct.", Style(dim=True)),
 )
-
-
-def _version_at_least(version: str, minimum: tuple[int, int]) -> bool:
-    try:
-        parts = version.split(".")
-        return (int(parts[0]), int(parts[1] if len(parts) > 1 else 0)) >= minimum
-    except (ValueError, IndexError):
-        return False
 
 
 def detect_render_mode(env: dict[str, str] | None = None) -> str:
@@ -128,35 +107,7 @@ def detect_render_mode(env: dict[str, str] | None = None) -> str:
     ``PLOTUI_RENDER`` overrides detection with ``placeholder`` or ``direct``
     ("kitty" is accepted as an alias for "placeholder").
     """
-    env = os.environ if env is None else env
-    forced = env.get("PLOTUI_RENDER", "").strip().lower()
-    if forced == "kitty":
-        return "placeholder"
-    if forced in RENDER_MODES:
-        return forced
-
-    # Placeholder tier: Kitty sets KITTY_WINDOW_ID / TERM=xterm-kitty;
-    # Ghostty speaks the same protocol (placeholders included).
-    if (
-        env.get("KITTY_WINDOW_ID")
-        or "kitty" in env.get("TERM", "")
-        or "ghostty" in env.get("TERM", "")
-        or env.get("TERM_PROGRAM", "").lower() == "ghostty"
-        or env.get("GHOSTTY_RESOURCES_DIR")
-    ):
-        return "placeholder"
-
-    # Direct tier: Kitty graphics without Unicode placeholders.
-    term_program = env.get("TERM_PROGRAM", "")
-    if term_program == "iTerm.app" or env.get("LC_TERMINAL") == "iTerm2":
-        version = env.get("TERM_PROGRAM_VERSION") or env.get("LC_TERMINAL_VERSION") or ""
-        if _version_at_least(version, (3, 5)):
-            return "direct"
-        return "unsupported"
-    if term_program == "WezTerm" or env.get("WEZTERM_EXECUTABLE") or env.get("KONSOLE_VERSION"):
-        return "direct"
-
-    return "unsupported"
+    return _detect_render_mode(None if env is None else dict(env))
 
 
 class PlotWidget(Widget, can_focus=True):
@@ -210,6 +161,7 @@ class PlotWidget(Widget, can_focus=True):
         auto_rotate: bool = False,
         cell_px: tuple[int, int] | None = None,
         pickable: bool = False,
+        crosshair: bool = True,
         render_mode: str = "auto",
         interactive_scale: float = 0.5,
         **kwargs,
@@ -218,6 +170,11 @@ class PlotWidget(Widget, can_focus=True):
         over a node or a graph edge lights it up white (it can be clicked),
         and clicking posts :class:`ElementPicked` with what was hit. Off by
         default so plots without click semantics pay no per-mouse-move cost.
+
+        ``crosshair`` (default on) gives 2D plots a hover crosshair: a
+        vertical guide snapped to the nearest sample x, a marker per series,
+        and a value readout. 2D renders are cheap enough to repaint per
+        mouse-move. 3D plots are unaffected.
 
         ``render_mode`` is ``"auto"`` (detect, honoring ``PLOTUI_RENDER``) or
         ``"placeholder"`` / ``"direct"`` to force a path — see
@@ -239,8 +196,11 @@ class PlotWidget(Widget, can_focus=True):
         self._auto = auto_rotate
         self._cell_w, self._cell_h = cell_px if cell_px is not None else detect_cell_px()
         self._pickable = pickable
+        self._crosshair = crosshair
         self._interactive_scale = min(1.0, max(0.05, interactive_scale))
-        self._large = plot.node_count() >= _LARGE_NODE_COUNT
+        # Vertex count, not node count: line vertices and surface grids load
+        # the rasterizer just as much as pickable nodes do.
+        self._large = plot.vertex_count() >= _LARGE_NODE_COUNT
         # Direct mode deletes the prior image before each frame to stop iTerm2
         # stacking placements. Terminals whose Kitty decoder replaces a same-id
         # image (xterm.js addon-image) flicker from that delete; PLOTUI_KITTY_
@@ -263,6 +223,14 @@ class PlotWidget(Widget, can_focus=True):
         # Text overlay, row -> non-overlapping spans sorted by column. Kept
         # outside the frame cache: changing it never re-rasterizes the image.
         self._overlay: dict[int, list[tuple[int, str, Style | None]]] = {}
+
+    @property
+    def plot(self) -> Plot:
+        """The wrapped :class:`Plot`. Mutate it freely — camera calls, or
+        ``extend``/``set_visible`` by trace handle — then call
+        :meth:`invalidate` (or use the widget-level :meth:`extend` /
+        :meth:`set_visible`, which do both)."""
+        return self._plot
 
     @property
     def dragging(self) -> bool:
@@ -340,8 +308,29 @@ class PlotWidget(Widget, can_focus=True):
 
     def invalidate(self) -> None:
         """Mark the view dirty and repaint (call after mutating the plot)."""
+        # Streamed data can grow a plot past the reduced-resolution threshold
+        # long after mount; vertex_count is O(traces), so re-checking on every
+        # invalidation is safe even mid-drag.
+        self._large = self._plot.vertex_count() >= _LARGE_NODE_COUNT
         self._version += 1
         self.refresh()
+
+    def extend(self, handle: int, xs, ys, zs=None) -> None:
+        """Append points to a trace by handle (see :meth:`Plot.extend`) and
+        repaint. Multiple extends between frames coalesce into one repaint."""
+        if zs is None:
+            self._plot.extend(handle, xs, ys)
+        else:
+            self._plot.extend(handle, xs, ys, zs)
+        self.invalidate()
+
+    def set_visible(self, handle: int, visible: bool) -> bool:
+        """Show or hide a trace by handle; repaints only when the state
+        actually changed. Returns True when it did."""
+        changed = self._plot.set_visible(handle, visible)
+        if changed:
+            self.invalidate()
+        return changed
 
     def set_overlay(self, spans: list[OverlaySpan]) -> None:
         """Draw text over the plot: each span is `(row, col, text, style)` in
@@ -526,15 +515,25 @@ class PlotWidget(Widget, can_focus=True):
             if dx or dy:
                 self._moved = True
             if event.shift:
-                self.apply_pan(dx * 4.0, dy * 4.0)
+                # Pan is in full-resolution image pixels, so one dragged cell
+                # is one cell's worth of pixels: the plot stays under the
+                # pointer instead of lagging it.
+                self.apply_pan(dx * self._cell_w, dy * self._cell_h)
             else:
                 self.apply_rotate(dx * 0.03, dy * 0.03)
+        elif not self._plot.is_3d():
+            if self._crosshair:
+                px_w, px_h, px, py, _ = self._pixel_geometry(event.x, event.y)
+                if self._plot.set_hover2d(px):
+                    self.invalidate()
         elif self._pickable:
             self._set_hover(self._pick_at(event.x, event.y))
 
     def on_leave(self, event: events.Leave) -> None:
         if self._pickable:
             self._set_hover(None)
+        if self._crosshair and self._plot.set_hover2d(None):
+            self.invalidate()
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         was_click = self._dragging and not self._moved
@@ -575,13 +574,13 @@ class PlotWidget(Widget, can_focus=True):
         elif key == "down":
             self.apply_rotate(0.0, 0.1)
         elif key == "shift+left":
-            self.apply_pan(-16.0, 0.0)
+            self.apply_pan(-2.0 * self._cell_w, 0.0)
         elif key == "shift+right":
-            self.apply_pan(16.0, 0.0)
+            self.apply_pan(2.0 * self._cell_w, 0.0)
         elif key == "shift+up":
-            self.apply_pan(0.0, -16.0)
+            self.apply_pan(0.0, -2.0 * self._cell_h)
         elif key == "shift+down":
-            self.apply_pan(0.0, 16.0)
+            self.apply_pan(0.0, 2.0 * self._cell_h)
         elif key == "r":
             self.apply_reset()
         else:
