@@ -14,7 +14,9 @@
   .eyebrow em { font-style: normal; color: var(--trace-3); }
   h1 {
     font-family: var(--mono); font-weight: 800;
-    font-size: clamp(30px, 3.6vw, 40px);
+    /* Sized so the four-line hero sentence holds its deliberate breaks —
+       at 40px "interactive plots," wrapped mid-line. */
+    font-size: clamp(28px, 3.2vw, 36px);
     line-height: 1.18; letter-spacing: -.03em; color: var(--bright);
     margin-bottom: 22px;
   }
