@@ -18,6 +18,9 @@ dependencies = ["plotui-cli>=0.4.1"]
 textual = ["textual>=0.60"]
 
 [tool.maturin]
+# maturin declares License-File: LICENSE in the metadata but does not put the
+# file in the sdist on its own, and PyPI rejects that mismatch
+include = [{ path = "LICENSE", format = "sdist" }]
 manifest-path = "crates/plotui-py/Cargo.toml"
 module-name = "plotui._plotui"
 python-source = "python"

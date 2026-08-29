@@ -73,3 +73,6 @@ jobs:
         with:
           packages-dir: dist
           password: ${{ secrets.PYPI_API_TOKEN }}
+          # a partially-uploaded release (like 0.4.1's wheels) must not fail
+          # the rerun that completes it
+          skip-existing: true
