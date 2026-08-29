@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 keywords = ["terminal", "plot", "3d", "textual", "kitty", "tui", "visualization"]
-dependencies = []
+# plotui-cli is the compiled `plotui` binary in a wheel (built from
+# crates/plotui-cli); depending on it puts the CLI on PATH for pip users.
+dependencies = ["plotui-cli>=0.4.1"]
 
 [project.optional-dependencies]
 textual = ["textual>=0.60"]

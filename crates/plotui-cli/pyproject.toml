@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "plotui-cli"
+description = "The plotui command-line tool: plot data from stdin or files as real terminal pixels (line, scatter, bar)."
+readme = "../../README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["terminal", "plot", "cli", "kitty", "tui", "visualization"]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://plotui.xyz"
+Repository = "https://github.com/sebaheg/plotui"
+
+[tool.maturin]
+# A binary wheel (ruff-style): maturin compiles the [[bin]] target and ships
+# it in the wheel's scripts directory, so pip puts `plotui` on the PATH.
+bindings = "bin"
