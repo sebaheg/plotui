@@ -111,6 +111,28 @@ fn render_is_deterministic() {
 }
 
 #[test]
+fn pitch_is_a_turntable_orbit_never_a_sideways_tumble() {
+    // A vertical drag must change elevation only: the world up-axis stays on
+    // the same screen column through any pitch, at any yaw. (Pitch-first
+    // rotation order used to tumble the scene around the data x-axis, which
+    // skewed vertical drags sideways at nonzero yaw.)
+    let mut p = Plot::new();
+    p.add_scatter3d(vec![[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [1.0, 0.0, 1.0]], [255, 0, 0], 2.0);
+    for yaw in [-0.9, 0.0, 0.6, 2.3] {
+        p.camera.reset();
+        p.camera.rotate(yaw - p.camera.yaw, 0.0);
+        let x_before = p.project_nodes(400, 400)[0][0];
+        p.camera.rotate(0.0, 0.35);
+        let after = p.project_nodes(400, 400);
+        assert!(
+            (after[0][0] - x_before).abs() < 1e-3,
+            "up-axis tip drifted sideways under pitch at yaw {yaw}: {x_before} -> {}",
+            after[0][0]
+        );
+    }
+}
+
+#[test]
 fn camera_moves_change_the_frame_and_reset_restores_it() {
     let mut p = demo_3d();
     let before = hash(&p.render(320, 200));

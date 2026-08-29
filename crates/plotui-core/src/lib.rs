@@ -418,16 +418,21 @@ impl Camera {
     }
 
     /// Rotate a normalized point and return (x, y, depth) in view space.
+    ///
+    /// Turntable order: yaw about the world up-axis first, then pitch about
+    /// the screen x-axis — so a vertical drag changes elevation only, with no
+    /// sideways skew. (Pitch-first composition tumbled the scene around the
+    /// data x-axis, which sits diagonally on screen at nonzero yaw.)
     #[inline]
     fn view(&self, p: [f32; 3]) -> (f64, f64, f64) {
         let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
-        let (sp, cp) = self.pitch.sin_cos();
-        let y1 = y * cp - z * sp;
-        let z1 = y * sp + z * cp;
         let (sy, cy) = self.yaw.sin_cos();
-        let x2 = x * cy + z1 * sy;
-        let z2 = -x * sy + z1 * cy;
-        (x2, y1, z2)
+        let x1 = x * cy + z * sy;
+        let z1 = -x * sy + z * cy;
+        let (sp, cp) = self.pitch.sin_cos();
+        let y2 = y * cp - z1 * sp;
+        let z2 = y * sp + z1 * cp;
+        (x1, y2, z2)
     }
 }
 
