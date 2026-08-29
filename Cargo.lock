@@ -1117,7 +1117,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "plotui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "crossterm",
@@ -1129,18 +1129,18 @@ dependencies = [
 
 [[package]]
 name = "plotui-bind"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "plotui-core",
 ]
 
 [[package]]
 name = "plotui-core"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "plotui-ffi"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cbindgen",
  "plotui-bind",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "plotui-protocol"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "flate2",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "plotui-py"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "numpy",
  "plotui-bind",
@@ -1172,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "plotui-ratatui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "crossterm",
  "plotui-core",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "plotui-term"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "plotui-core",
  "plotui-protocol",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "plotui-wasm"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "plotui-bind",
  "plotui-core",
