@@ -517,3 +517,82 @@ def test_streamed_growth_flips_the_large_flag() -> None:
             assert widget._large is True, "streamed growth re-evaluates the load metric"
 
     asyncio.run(drive())
+
+
+# --- the range slider ---
+
+
+class _RangeHarness(App):
+    """A 2D plot with the range slider on and a mid-data window, recording
+    RangeChanged messages."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plot = Plot()
+        xs = [float(i) for i in range(30)]
+        self.plot.add_line(xs, [x * 0.5 for x in xs], name="signal")
+        self.plot.set_x_window((5.0, 15.0))
+        self.ranges: list[tuple[float, float] | None] = []
+
+    def compose(self) -> ComposeResult:
+        yield PlotWidget(
+            self.plot, id="plot", range_slider=True, render_mode="placeholder"
+        )
+
+    def on_plot_widget_range_changed(self, msg: PlotWidget.RangeChanged) -> None:
+        self.ranges.append(msg.window)
+
+
+def _mouse_ev(x: int, y: int):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(x=x, y=y, screen_x=x, screen_y=y, shift=False)
+
+
+def _cell_on_strip(widget: PlotWidget, part: str) -> tuple[int, int]:
+    """Find a cell whose center hit-tests to the given strip part."""
+    w, h = widget.size.width, widget.size.height
+    for y in range(h - 1, -1, -1):
+        for x in range(w):
+            px_w, px_h, px, py, _ = widget._pixel_geometry(x, y)
+            hit = widget.plot.range_slider_hit(px_w, px_h, px, py, float(widget._cell_w))
+            if hit == part:
+                return x, y
+    raise AssertionError(f"no {part} cell found in a {w}x{h} widget")
+
+
+def test_range_slider_drag_posts_range_changed() -> None:
+    async def drive() -> None:
+        app = _RangeHarness()
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            cx, cy = _cell_on_strip(widget, "window")
+            widget.on_mouse_down(_mouse_ev(cx, cy))
+            widget.on_mouse_move(_mouse_ev(cx + 3, cy))
+            widget.on_mouse_up(_mouse_ev(cx + 3, cy))
+            await pilot.pause()
+            assert app.ranges, "a released strip drag posts RangeChanged"
+            lo, hi = app.ranges[-1]
+            assert lo > 5.0 and hi > 15.0, "the window slid right"
+            assert abs((hi - lo) - 10.0) < 1e-6, "span preserved"
+
+    asyncio.run(drive())
+
+
+def test_plot_drag_pans_window_when_set() -> None:
+    async def drive() -> None:
+        app = _RangeHarness()
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            cam = app.plot.camera_state()
+            # A drag in the plot area (top rows), not on the strip.
+            widget.on_mouse_down(_mouse_ev(40, 5))
+            widget.on_mouse_move(_mouse_ev(37, 5))
+            widget.on_mouse_up(_mouse_ev(37, 5))
+            await pilot.pause()
+            lo, hi = app.plot.x_window()
+            assert lo > 5.0, "dragging left slides the view right (grab the data)"
+            assert app.plot.camera_state() == cam, "the camera stays out of it"
+            assert not app.ranges or app.ranges == [], "plain pans post no message"
+
+    asyncio.run(drive())

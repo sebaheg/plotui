@@ -28,15 +28,13 @@ func (m Model) motion(mouse tea.Mouse) (Model, tea.Cmd) {
 		if dx != 0 || dy != 0 {
 			m.moved = true
 		}
-		if mouse.Mod&tea.ModShift != 0 {
-			// Pan in full-resolution image pixels: one dragged cell is one
-			// cell's worth of pixels, so the plot stays under the pointer.
-			m.plot.Pan(dx*float64(m.cellW), dy*float64(m.cellH))
-		} else {
-			// Negated: dragging grabs the camera, not the object — drag
-			// right orbits the view right (website-example feel).
-			m.plot.Rotate(-dx*rotatePerCell, -dy*rotatePerCell)
-		}
+		// Routed through the plot's input map: drag rotates (camera-grab —
+		// drag right orbits the view right), shift-drag pans, unless the
+		// host remapped it via SetInputMap. Pan is in full-resolution image
+		// pixels, so one dragged cell is one cell's worth of pixels and the
+		// plot stays under the pointer.
+		m.plot.ApplyDrag(dx, dy, mouse.Mod&tea.ModShift != 0,
+			rotatePerCell, float64(m.cellW), float64(m.cellH), dragZoomPerCell)
 		m.dirty = true
 		return m, m.refresh()
 	}

@@ -24,7 +24,7 @@ fn make_plot() -> plotui_core::Plot {
             [t.cos() * strand, t / (6.0 * std::f32::consts::PI) * 2.0 - 1.0, t.sin() * strand]
         })
         .collect();
-    plot.add_scatter3d(pts, [230, 60, 120], 2.0);
+    plot.add_scatter3d(pts, [230, 60, 120], 2.0, None);
     plot
 }
 

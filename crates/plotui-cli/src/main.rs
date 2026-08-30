@@ -1,12 +1,14 @@
 //! The plotui CLI: pipe columns of numbers in, get a real-pixel chart out.
 //!
-//!     seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line
+//!     seq 1 100 | LC_ALL=C awk '{print $1, sin($1/10)}' | plotui line
 //!
 //! On a TTY the chart opens interactively (drag to pan, scroll to zoom, hover
 //! for the crosshair, `q` to quit); when stdout is piped, or with `--static`,
 //! one frame of Kitty escapes is printed instead.
 
 mod build;
+mod deps;
+mod examples;
 mod input;
 mod interactive;
 mod render;
@@ -41,6 +43,8 @@ enum Chart {
     Scatter(Args),
     /// Bar chart
     Bar(Args),
+    /// Run a built-in example scene (no input data; lists them when run bare)
+    Example(ExampleArgs),
 }
 
 // `-h` means height here, so clap's short help flag is disabled and `--help`
@@ -65,6 +69,29 @@ struct Args {
     /// Render one frame and exit (default when stdout is not a terminal)
     #[arg(long = "static")]
     static_mode: bool,
+    /// Show a range slider under the chart (drag its handles/window to zoom
+    /// the x axis)
+    #[arg(long)]
+    range_slider: bool,
+}
+
+#[derive(clap::Args)]
+#[command(disable_help_flag = true)]
+pub struct ExampleArgs {
+    /// Example name; omit to list the available examples
+    name: Option<String>,
+    /// List the available examples
+    #[arg(long)]
+    list: bool,
+    /// Plot width in terminal cells (default: terminal width)
+    #[arg(short = 'w', long)]
+    width: Option<u16>,
+    /// Plot height in terminal cells (default: terminal height minus 2)
+    #[arg(short = 'h', long)]
+    height: Option<u16>,
+    /// Render one frame and exit (default when stdout is not a terminal)
+    #[arg(long = "static")]
+    static_mode: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +107,7 @@ fn main() -> ExitCode {
         Chart::Line(a) => (ChartKind::Line, a),
         Chart::Scatter(a) => (ChartKind::Scatter, a),
         Chart::Bar(a) => (ChartKind::Bar, a),
+        Chart::Example(a) => return examples::run(&a),
     };
 
     let table = match input::load(args.file.as_deref(), args.delimiter.as_deref(), args.header) {
@@ -98,7 +126,8 @@ fn main() -> ExitCode {
         return ExitCode::from(3);
     }
 
-    let plot = build::build_plot(kind, &table);
+    let mut plot = build::build_plot(kind, &table);
+    plot.range_slider = args.range_slider;
     let result = if args.static_mode || !std::io::stdout().is_terminal() {
         render::render_static(&plot, mode, args.width, args.height)
     } else {

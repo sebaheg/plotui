@@ -11,23 +11,32 @@ import (
 	"unsafe"
 )
 
-// AddScatter3D adds a 3D scatter series (default color (230, 60, 120),
-// size 3.0 — the Python binding's defaults). xs/ys/zs pair up to the
-// shortest length.
+// AddScatter3D adds a 3D scatter series (default size 3.0; omitted colors
+// take colorway slots in fixed order). xs/ys/zs pair up to the shortest
+// length.
 func (p *Plot) AddScatter3D(xs, ys, zs []float32, opts ...TraceOption) (TraceHandle, error) {
-	o := applyOpts(traceOpts{color: &RGB{230, 60, 120}, size: 3.0}, opts)
+	o, err := applyOpts(traceOpts{size: 3.0}, opts)
+	if err != nil {
+		return 0, err
+	}
 	xp, xn := fptr(xs)
 	yp, yn := fptr(ys)
 	zp, zn := fptr(zs)
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
 	var h C.size_t
-	status := C.plotui_add_scatter3d(p.h, xp, xn, yp, yn, zp, zn, rgbPtr(o.color), C.float(o.size), &h)
+	status := C.plotui_add_scatter3d(p.h, xp, xn, yp, yn, zp, zn, rgbPtr(o.color), C.float(o.size), name, &h)
 	return TraceHandle(h), statusErr(status)
 }
 
 // AddGraph3D adds a 3D graph: nodes at xs/ys/zs, edges as (i, j) index
-// pairs. Defaults: uniform color (120, 180, 230), size 3.5.
+// pairs. Default size 3.5; an omitted uniform color takes the next
+// colorway slot.
 func (p *Plot) AddGraph3D(xs, ys, zs []float32, edges [][2]uint32, opts ...TraceOption) (TraceHandle, error) {
-	o := applyOpts(traceOpts{color: &RGB{120, 180, 230}, size: 3.5}, opts)
+	o, err := applyOpts(traceOpts{size: 3.5}, opts)
+	if err != nil {
+		return 0, err
+	}
 	xp, xn := fptr(xs)
 	yp, yn := fptr(ys)
 	zp, zn := fptr(zs)
@@ -56,6 +65,8 @@ func (p *Plot) AddGraph3D(xs, ys, zs []float32, edges [][2]uint32, opts ...Trace
 		shp = &shapes[0]
 	}
 
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
 	var h C.size_t
 	status := C.plotui_add_graph3d(p.h,
 		xp, xn, yp, yn, zp, zn,
@@ -65,14 +76,18 @@ func (p *Plot) AddGraph3D(xs, ys, zs []float32, edges [][2]uint32, opts ...Trace
 		nsp, nsn,
 		ecp, C.size_t(len(o.edgeColors)),
 		shp, C.size_t(len(shapes)),
+		name,
 		&h)
 	return TraceHandle(h), statusErr(status)
 }
 
 // AddLine3D adds a 3D polyline (default width 2.0; omitted colors take
-// palette slots in fixed order).
+// colorway slots in fixed order).
 func (p *Plot) AddLine3D(xs, ys, zs []float32, opts ...TraceOption) (TraceHandle, error) {
-	o := applyOpts(traceOpts{width: 2.0}, opts)
+	o, err := applyOpts(traceOpts{width: 2.0}, opts)
+	if err != nil {
+		return 0, err
+	}
 	xp, xn := fptr(xs)
 	yp, yn := fptr(ys)
 	zp, zn := fptr(zs)
@@ -88,7 +103,10 @@ func (p *Plot) AddLine3D(xs, ys, zs []float32, opts ...TraceOption) (TraceHandle
 // WithoutColormap says otherwise.
 func (p *Plot) AddSurface3D(xs, ys []float32, zs [][]float32, opts ...TraceOption) (TraceHandle, error) {
 	viridis := "viridis"
-	o := applyOpts(traceOpts{colormap: &viridis}, opts)
+	o, err := applyOpts(traceOpts{colormap: &viridis}, opts)
+	if err != nil {
+		return 0, err
+	}
 	nx, ny := len(xs), len(ys)
 	if len(zs) != ny {
 		return 0, &Error{Code: ErrInvalidArg, Message: fmt.Sprintf(
@@ -130,9 +148,12 @@ func (p *Plot) add2D(xs, ys []float32, o traceOpts,
 }
 
 // AddScatter adds a 2D scatter series (default size 2.5; omitted colors
-// take palette slots in fixed order).
+// take colorway slots in fixed order).
 func (p *Plot) AddScatter(xs, ys []float32, opts ...TraceOption) (TraceHandle, error) {
-	o := applyOpts(traceOpts{size: 2.5, axis: AxisY}, opts)
+	o, err := applyOpts(traceOpts{size: 2.5, axis: AxisY}, opts)
+	if err != nil {
+		return 0, err
+	}
 	return p.add2D(xs, ys, o, func(xp *C.float, xn C.size_t, yp *C.float, yn C.size_t, rgb *C.uint8_t, name, axis *C.char, h *C.size_t) C.int32_t {
 		return C.plotui_add_scatter2d(p.h, xp, xn, yp, yn, rgb, C.float(o.size), name, axis, h)
 	})
@@ -140,7 +161,10 @@ func (p *Plot) AddScatter(xs, ys []float32, opts ...TraceOption) (TraceHandle, e
 
 // AddLine adds a 2D line series (default width 2.0).
 func (p *Plot) AddLine(xs, ys []float32, opts ...TraceOption) (TraceHandle, error) {
-	o := applyOpts(traceOpts{width: 2.0, axis: AxisY}, opts)
+	o, err := applyOpts(traceOpts{width: 2.0, axis: AxisY}, opts)
+	if err != nil {
+		return 0, err
+	}
 	return p.add2D(xs, ys, o, func(xp *C.float, xn C.size_t, yp *C.float, yn C.size_t, rgb *C.uint8_t, name, axis *C.char, h *C.size_t) C.int32_t {
 		return C.plotui_add_line2d(p.h, xp, xn, yp, yn, rgb, C.float(o.width), name, axis, h)
 	})
@@ -148,7 +172,10 @@ func (p *Plot) AddLine(xs, ys []float32, opts ...TraceOption) (TraceHandle, erro
 
 // AddBar adds a 2D bar series: bars at xs rising from zero to heights.
 func (p *Plot) AddBar(xs, heights []float32, opts ...TraceOption) (TraceHandle, error) {
-	o := applyOpts(traceOpts{axis: AxisY}, opts)
+	o, err := applyOpts(traceOpts{axis: AxisY}, opts)
+	if err != nil {
+		return 0, err
+	}
 	return p.add2D(xs, heights, o, func(xp *C.float, xn C.size_t, yp *C.float, yn C.size_t, rgb *C.uint8_t, name, axis *C.char, h *C.size_t) C.int32_t {
 		return C.plotui_add_bar2d(p.h, xp, xn, yp, yn, rgb, name, axis, h)
 	})

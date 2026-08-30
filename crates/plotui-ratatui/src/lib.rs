@@ -11,7 +11,7 @@
 //!
 //! let mut plot = plotui_core::Plot::new();
 //! let color = plot.resolve_color(None);
-//! plot.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], color, 2.0);
+//! plot.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], color, 2.0, None);
 //! let mut state = PlotState::new(plot, PlotOptions::default());
 //!
 //! let mut terminal = ratatui::init();
@@ -52,7 +52,8 @@ pub enum ElementKind {
 
 /// An interaction result from [`PlotState::handle_event`], for the host to
 /// act on (open an inspector, show a status line, …).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// PartialEq only: `RangeChanged` carries f64 bounds, which have no `Eq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlotEvent {
     /// A click resolved against nodes only (`pickable: false`); `None` means
     /// empty space was clicked.
@@ -61,6 +62,10 @@ pub enum PlotEvent {
     ElementPicked(Option<(ElementKind, usize)>),
     /// The hovered element changed (`pickable: true` only).
     ElementHovered(Option<(ElementKind, usize)>),
+    /// The 2D x window changed through a finished gesture (a released strip
+    /// drag, a track jump, a scroll zoom, or an `[`/`]` key), carrying the
+    /// new window (`None` = full extent).
+    RangeChanged(Option<(f64, f64)>),
 }
 
 fn to_kind(el: plotui_core::Element) -> (ElementKind, usize) {

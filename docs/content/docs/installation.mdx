@@ -24,8 +24,19 @@ cargo binstall plotui                # prebuilt, via cargo-binstall
 Then pipe numbers at it:
 
 ```bash
-seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line
+seq 1 100 | LC_ALL=C awk '{print $1, sin($1/10)}' | plotui line
 plotui scatter -H -d, data.csv
+```
+
+(`LC_ALL=C` keeps awk's decimal separator a `.` in every locale — plotui reads
+`0,5` as two CSV fields, not as a number.)
+
+Or run a built-in example — no data needed (`plotui example` lists them):
+
+```bash
+plotui example scatter   # rotating 3D scatter, three clusters — the plotui.xyz hero
+plotui example graph     # interactive 3D graph: hover nodes and edges
+plotui example stream    # live streaming plot, three series appended at 20 Hz
 ```
 
 On a TTY the chart opens interactively (drag to pan, scroll to zoom, hover for

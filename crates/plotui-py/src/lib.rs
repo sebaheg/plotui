@@ -9,7 +9,7 @@ use numpy::{PyArray1, PyArrayMethods};
 use plotui_core::{Element, YAxis};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{IntoPyDict, PyDict};
 
 /// The shared binding semantics (plotui-bind) report errors as `BindError`;
 /// Python surfaces every one as a ValueError with the message verbatim.
@@ -17,9 +17,49 @@ fn to_py(e: plotui_bind::BindError) -> PyErr {
     PyValueError::new_err(e.msg)
 }
 
-/// Explicit color, or the next palette slot (see `Plot::resolve_color`).
-fn resolve_color(plot: &plotui_core::Plot, color: Option<(u8, u8, u8)>) -> [u8; 3] {
-    plot.resolve_color(color.map(|(r, g, b)| [r, g, b]))
+/// Core trace errors (`TraceError`) surface as ValueError with the core's
+/// canonical Display text, identically across bindings.
+fn trace_to_py(e: plotui_core::TraceError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+/// A color from Python: an `(r, g, b)` tuple, or a string shorthand —
+/// `"#rrggbb"` hex or a name like `"red"` (the shared `plotui_bind` rule,
+/// so the accepted names and error messages match every other binding).
+#[derive(FromPyObject)]
+enum ColorArg {
+    Rgb((u8, u8, u8)),
+    Shorthand(String),
+}
+
+impl ColorArg {
+    fn rgb(self) -> PyResult<[u8; 3]> {
+        match self {
+            ColorArg::Rgb((r, g, b)) => Ok([r, g, b]),
+            ColorArg::Shorthand(s) => plotui_bind::parse_color(&s).map_err(to_py),
+        }
+    }
+}
+
+fn opt_rgb(color: Option<ColorArg>) -> PyResult<Option<[u8; 3]>> {
+    color.map(ColorArg::rgb).transpose()
+}
+
+fn rgb_list(colors: Vec<ColorArg>) -> PyResult<Vec<[u8; 3]>> {
+    colors.into_iter().map(ColorArg::rgb).collect()
+}
+
+/// Explicit color, or the next colorway slot (see `Plot::resolve_color`).
+fn resolve_color(plot: &plotui_core::Plot, color: Option<ColorArg>) -> PyResult<[u8; 3]> {
+    Ok(plot.resolve_color(opt_rgb(color)?))
+}
+
+/// A colorway from Python: a built-in name ("plotui", "muted", "vivid") or a
+/// list of colors (tuples or shorthand strings).
+#[derive(FromPyObject)]
+enum ColorwayArg {
+    Name(String),
+    List(Vec<ColorArg>),
 }
 
 /// True when numpy is already imported in this interpreter. Gate for the
@@ -59,6 +99,123 @@ impl<'py> FromPyObject<'py> for Coords {
             }
         }
         Ok(Coords(ob.extract()?))
+    }
+}
+
+const MIXED_X_MSG: &str = "cannot mix datetime and numeric x on one plot";
+
+/// A 2D x column: numbers, or datetimes (a numpy `datetime64` array, a
+/// pandas `DatetimeIndex`, or a list of `datetime.datetime`). Datetimes land
+/// as absolute epoch seconds and are re-based against the plot's `x_epoch`
+/// by `resolve_x`; naive datetimes are read as UTC wall time (matching the
+/// engine's UTC calendar axis), aware ones convert exactly.
+enum XCoords {
+    Numeric(Vec<f32>),
+    Times(Vec<f64>),
+}
+
+impl<'py> FromPyObject<'py> for XCoords {
+    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
+        let py = ob.py();
+        // The numeric fast paths first — a plain series must never pay a
+        // datetime probe.
+        if numpy_loaded(py) {
+            if let Ok(a) = ob.downcast::<PyArray1<f32>>() {
+                return Ok(XCoords::Numeric(a.readonly().as_array().iter().copied().collect()));
+            }
+            if let Ok(a) = ob.downcast::<PyArray1<f64>>() {
+                return Ok(XCoords::Numeric(
+                    a.readonly().as_array().iter().map(|&v| v as f32).collect(),
+                ));
+            }
+        }
+        if let Ok(v) = ob.extract::<Vec<f32>>() {
+            return Ok(XCoords::Numeric(v));
+        }
+        // numpy datetime64 (asarray also lands a pandas DatetimeIndex).
+        if numpy_loaded(py) {
+            if let Ok(arr) = py.import("numpy").and_then(|np| np.call_method1("asarray", (ob,))) {
+                let kind: String = arr
+                    .getattr("dtype")
+                    .and_then(|d| d.getattr("kind"))
+                    .and_then(|k| k.extract())
+                    .unwrap_or_default();
+                if kind == "M" {
+                    let ns = arr
+                        .call_method1("astype", ("datetime64[ns]",))?
+                        .call_method1("astype", ("int64",))?;
+                    let r = ns.downcast::<PyArray1<i64>>().map_err(PyErr::from)?.readonly();
+                    return Ok(XCoords::Times(
+                        r.as_array().iter().map(|&v| v as f64 / 1e9).collect(),
+                    ));
+                }
+            }
+        }
+        // A list of datetime.datetime.
+        if let Ok(items) = ob.extract::<Vec<Bound<'py, PyAny>>>() {
+            let dt = py.import("datetime")?;
+            let dt_type = dt.getattr("datetime")?;
+            if items.first().is_some_and(|i| i.is_instance(&dt_type).unwrap_or(false)) {
+                let utc = dt.getattr("timezone")?.getattr("utc")?;
+                let mut ts = Vec::with_capacity(items.len());
+                for item in &items {
+                    if !item.is_instance(&dt_type)? {
+                        return Err(PyValueError::new_err(MIXED_X_MSG));
+                    }
+                    let aware = if item.getattr("tzinfo")?.is_none() {
+                        item.call_method(
+                            "replace",
+                            (),
+                            Some(&[("tzinfo", &utc)].into_py_dict(py)?),
+                        )?
+                    } else {
+                        item.clone()
+                    };
+                    ts.push(aware.call_method0("timestamp")?.extract::<f64>()?);
+                }
+                return Ok(XCoords::Times(ts));
+            }
+        }
+        // Fall back to the numeric extractor's own error message.
+        Ok(XCoords::Numeric(ob.extract()?))
+    }
+}
+
+/// Land an x column on the plot: datetimes set (or re-use) `x_epoch` and
+/// become f32 offsets; numerics require the plot not to be on a time axis.
+/// The first datetime column pins the epoch to its first timestamp's UTC
+/// midnight.
+fn resolve_x(plot: &mut plotui_core::Plot, xs: XCoords) -> PyResult<Vec<f32>> {
+    match xs {
+        XCoords::Numeric(v) => {
+            if plot.x_epoch.is_some() {
+                return Err(PyValueError::new_err(MIXED_X_MSG));
+            }
+            Ok(v)
+        }
+        XCoords::Times(ts) => {
+            let base = match plot.x_epoch {
+                Some(b) => b,
+                None => {
+                    let has_2d = plot.traces.iter().any(|t| {
+                        matches!(
+                            t,
+                            plotui_core::Trace::Scatter2d { .. }
+                                | plotui_core::Trace::Line2d { .. }
+                                | plotui_core::Trace::Bar2d { .. }
+                        )
+                    });
+                    if has_2d {
+                        return Err(PyValueError::new_err(MIXED_X_MSG));
+                    }
+                    let first = ts.first().copied().unwrap_or(0.0);
+                    let b = (first / 86_400.0).floor() * 86_400.0;
+                    plot.x_epoch = Some(b);
+                    b
+                }
+            };
+            Ok(ts.into_iter().map(|t| (t - base) as f32).collect())
+        }
     }
 }
 
@@ -103,20 +260,38 @@ impl Plot {
         Plot { inner: plotui_core::Plot::new() }
     }
 
+    /// Swap the color sequence assigned to traces added without an explicit
+    /// color: a built-in name — "plotui" (the default), "muted", "vivid" —
+    /// or a list of colors (tuples or shorthand strings). Traces already
+    /// added keep the colors they resolved to.
+    fn set_colorway(&mut self, colorway: ColorwayArg) -> PyResult<()> {
+        let colors = match colorway {
+            ColorwayArg::Name(name) => plotui_bind::colorway(&name).map_err(to_py)?.to_vec(),
+            ColorwayArg::List(colors) => rgb_list(colors)?,
+        };
+        plotui_bind::check_colorway(&colors).map_err(to_py)?;
+        self.inner.set_colorway(colors);
+        Ok(())
+    }
+
     /// Add a 3D scatter series. `xs/ys/zs` accept any float sequence; numpy
     /// float32/float64 arrays are read in one bulk copy. `color` is an
-    /// (r, g, b) tuple. Returns the trace handle for `extend`/`set_visible`.
-    #[pyo3(signature = (xs, ys, zs, color=(230, 60, 120), size=3.0))]
+    /// (r, g, b) tuple or a shorthand string ("#e63c78", "red"); omitted,
+    /// colorway slots are assigned in fixed order. `name` puts the series in
+    /// the legend. Returns the trace handle for `extend`/`set_visible`.
+    #[pyo3(signature = (xs, ys, zs, color=None, size=3.0, name=None))]
     fn add_scatter3d(
         &mut self,
         xs: Coords,
         ys: Coords,
         zs: Coords,
-        color: (u8, u8, u8),
+        color: Option<ColorArg>,
         size: f32,
+        name: Option<String>,
     ) -> PyResult<usize> {
+        let c = resolve_color(&self.inner, color)?;
         let pts = zip3(xs, ys, zs);
-        Ok(self.inner.add_scatter3d(pts, [color.0, color.1, color.2], size))
+        Ok(self.inner.add_scatter3d(pts, c, size, name))
     }
 
     /// Add a 3D graph: nodes at `xs/ys/zs`, `edges` as (i, j) index pairs,
@@ -125,10 +300,11 @@ impl Plot {
     /// default dimmed endpoint-average edge color. `node_shapes` picks a
     /// marker silhouette per node — "disc", "ring", "square", "triangle",
     /// "diamond", "diamond-open", "dot" — so node categories read by
-    /// shape as well as colour; an unknown name is a ValueError.
+    /// shape as well as colour; an unknown name is a ValueError. `name`
+    /// puts the graph in the legend.
     #[pyo3(signature = (
-        xs, ys, zs, edges, node_colors=None, color=(120, 180, 230), size=3.5,
-        node_sizes=None, edge_colors=None, node_shapes=None,
+        xs, ys, zs, edges, node_colors=None, color=None, size=3.5,
+        node_sizes=None, edge_colors=None, node_shapes=None, name=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn add_graph3d(
@@ -137,23 +313,25 @@ impl Plot {
         ys: Coords,
         zs: Coords,
         edges: Vec<(u32, u32)>,
-        node_colors: Option<Vec<(u8, u8, u8)>>,
-        color: (u8, u8, u8),
+        node_colors: Option<Vec<ColorArg>>,
+        color: Option<ColorArg>,
         size: f32,
         node_sizes: Option<Vec<f32>>,
-        edge_colors: Option<Vec<(u8, u8, u8)>>,
+        edge_colors: Option<Vec<ColorArg>>,
         node_shapes: Option<Vec<String>>,
+        name: Option<String>,
     ) -> PyResult<usize> {
+        let uniform = resolve_color(&self.inner, color)?;
         let nodes = zip3(xs, ys, zs);
         let n = nodes.len();
-        let nc = node_colors.map(|v| v.into_iter().map(|(r, g, b)| [r, g, b]).collect());
-        let colors = plotui_bind::graph_node_colors(n, nc, [color.0, color.1, color.2]);
-        let ec = edge_colors.map(|v| v.into_iter().map(|(r, g, b)| [r, g, b]).collect());
+        let nc = node_colors.map(rgb_list).transpose()?;
+        let colors = plotui_bind::graph_node_colors(n, nc, uniform);
+        let ec = edge_colors.map(rgb_list).transpose()?;
         let shapes = match node_shapes {
             Some(names) => Some(plotui_bind::parse_shapes(&names).map_err(to_py)?),
             None => None,
         };
-        Ok(self.inner.add_graph3d(nodes, colors, edges, size, node_sizes, ec, shapes))
+        Ok(self.inner.add_graph3d(nodes, colors, edges, size, node_sizes, ec, shapes, name))
     }
 
     /// Add a 3D polyline through (xs, ys, zs) in order — a trajectory or
@@ -167,12 +345,12 @@ impl Plot {
         xs: Coords,
         ys: Coords,
         zs: Coords,
-        color: Option<(u8, u8, u8)>,
+        color: Option<ColorArg>,
         width: f32,
         name: Option<String>,
     ) -> PyResult<usize> {
         let pts = zip3(xs, ys, zs);
-        let c = resolve_color(&self.inner, color);
+        let c = resolve_color(&self.inner, color)?;
         Ok(self.inner.add_line3d(pts, c, width, name))
     }
 
@@ -190,7 +368,7 @@ impl Plot {
         xs: Coords,
         ys: Coords,
         zs: Vec<Vec<f32>>,
-        color: Option<(u8, u8, u8)>,
+        color: Option<ColorArg>,
         colormap: Option<&str>,
         wireframe: bool,
         name: Option<String>,
@@ -198,7 +376,7 @@ impl Plot {
         let (xs, ys) = (xs.0, ys.0);
         let flat = plotui_bind::flatten_surface_grid(xs.len(), ys.len(), zs).map_err(to_py)?;
         let cm = plotui_bind::parse_colormap(colormap).map_err(to_py)?;
-        let c = resolve_color(&self.inner, color);
+        let c = resolve_color(&self.inner, color)?;
         Ok(self.inner.add_surface3d(xs, ys, flat, c, cm, wireframe, name))
     }
 
@@ -210,16 +388,16 @@ impl Plot {
     #[pyo3(signature = (xs, ys, color=None, size=2.5, name=None, axis="y"))]
     fn add_scatter(
         &mut self,
-        xs: Coords,
+        xs: XCoords,
         ys: Coords,
-        color: Option<(u8, u8, u8)>,
+        color: Option<ColorArg>,
         size: f32,
         name: Option<String>,
         axis: &str,
     ) -> PyResult<usize> {
-        let c = resolve_color(&self.inner, color);
-        let (xs, ys) = (xs.0, ys.0);
-        Ok(self.inner.add_scatter2d(xs, ys, c, size, name, parse_axis(axis)?))
+        let c = resolve_color(&self.inner, color)?;
+        let xs = resolve_x(&mut self.inner, xs)?;
+        Ok(self.inner.add_scatter2d(xs, ys.0, c, size, name, parse_axis(axis)?))
     }
 
     /// Add a 2D line series (2px stroke by default). `axis="y2"`/`"y3"` puts
@@ -227,16 +405,16 @@ impl Plot {
     #[pyo3(signature = (xs, ys, color=None, width=2.0, name=None, axis="y"))]
     fn add_line(
         &mut self,
-        xs: Coords,
+        xs: XCoords,
         ys: Coords,
-        color: Option<(u8, u8, u8)>,
+        color: Option<ColorArg>,
         width: f32,
         name: Option<String>,
         axis: &str,
     ) -> PyResult<usize> {
-        let c = resolve_color(&self.inner, color);
-        let (xs, ys) = (xs.0, ys.0);
-        Ok(self.inner.add_line2d(xs, ys, c, width, name, parse_axis(axis)?))
+        let c = resolve_color(&self.inner, color)?;
+        let xs = resolve_x(&mut self.inner, xs)?;
+        Ok(self.inner.add_line2d(xs, ys.0, c, width, name, parse_axis(axis)?))
     }
 
     /// Add a 2D bar series: bars at `xs` rising (or falling) from zero to
@@ -246,15 +424,15 @@ impl Plot {
     #[pyo3(signature = (xs, heights, color=None, name=None, axis="y"))]
     fn add_bar(
         &mut self,
-        xs: Coords,
+        xs: XCoords,
         heights: Coords,
-        color: Option<(u8, u8, u8)>,
+        color: Option<ColorArg>,
         name: Option<String>,
         axis: &str,
     ) -> PyResult<usize> {
-        let c = resolve_color(&self.inner, color);
-        let (xs, heights) = (xs.0, heights.0);
-        Ok(self.inner.add_bar2d(xs, heights, c, name, parse_axis(axis)?))
+        let c = resolve_color(&self.inner, color)?;
+        let xs = resolve_x(&mut self.inner, xs)?;
+        Ok(self.inner.add_bar2d(xs, heights.0, c, name, parse_axis(axis)?))
     }
 
     /// Append points to an existing trace by handle: `extend(h, xs, ys)` for
@@ -273,12 +451,75 @@ impl Plot {
     fn extend(
         &mut self,
         handle: usize,
-        xs: Coords,
+        xs: XCoords,
         ys: Coords,
         zs: Option<Coords>,
     ) -> PyResult<()> {
-        plotui_bind::extend(&mut self.inner, handle, &xs.0, &ys.0, zs.as_ref().map(|z| &z.0[..]))
+        // Numeric appends pass through untouched — they are offsets in the
+        // trace's own x space, valid on plain and time axes alike (and 3D
+        // extends are always numeric). Datetime appends re-base against the
+        // epoch the add established.
+        let xs = match xs {
+            XCoords::Numeric(v) => v,
+            t @ XCoords::Times(_) => resolve_x(&mut self.inner, t)?,
+        };
+        plotui_bind::extend(&mut self.inner, handle, &xs, &ys.0, zs.as_ref().map(|z| &z.0[..]))
             .map_err(to_py)
+    }
+
+    /// Move every node of a graph trace at once — the per-frame call of a
+    /// force-directed layout (pair with `ForceLayout`). Structure is
+    /// untouched, so node/edge indices, hover, and selection stay valid;
+    /// the point count must match the trace's node count.
+    fn set_graph_positions(
+        &mut self,
+        handle: usize,
+        xs: Coords,
+        ys: Coords,
+        zs: Coords,
+    ) -> PyResult<()> {
+        let pts = zip3(xs, ys, zs);
+        self.inner.set_graph_positions(handle, pts).map_err(trace_to_py)
+    }
+
+    /// Recolor a graph trace in place — the host-side highlight primitive:
+    /// dim everything, brighten a hovered dependency path, restore.
+    /// `node_colors` needs one color per node; `edge_colors`, when given,
+    /// one per edge (`None` restores the default dimmed endpoint blend).
+    /// Colors accept (r, g, b) tuples or shorthand strings.
+    #[pyo3(signature = (handle, node_colors, edge_colors=None))]
+    fn set_graph_colors(
+        &mut self,
+        handle: usize,
+        node_colors: Vec<ColorArg>,
+        edge_colors: Option<Vec<ColorArg>>,
+    ) -> PyResult<()> {
+        let nc = rgb_list(node_colors)?;
+        let ec = edge_colors.map(rgb_list).transpose()?;
+        self.inner.set_graph_colors(handle, nc, ec).map_err(trace_to_py)
+    }
+
+    /// Append nodes and edges to a graph trace — how new nodes arrive in a
+    /// live graph without a rebuild (pair with `ForceLayout.add_node`).
+    /// `edges` may reference old or new node indices; appended nodes take
+    /// the trace's default size and shape. Same flat-index caveat as
+    /// `extend` on a 3D scatter: appending to a graph that is not the last
+    /// node-bearing trace shifts the flat indices of every node (and edge)
+    /// after it — plotui remaps its own selection/hover, hosts holding
+    /// indices must do the same.
+    #[pyo3(signature = (handle, xs, ys, zs, node_colors=None, edges=vec![]))]
+    fn extend_graph(
+        &mut self,
+        handle: usize,
+        xs: Coords,
+        ys: Coords,
+        zs: Coords,
+        node_colors: Option<Vec<ColorArg>>,
+        edges: Vec<(u32, u32)>,
+    ) -> PyResult<()> {
+        let pts = zip3(xs, ys, zs);
+        let colors = node_colors.map(rgb_list).transpose()?.unwrap_or_default();
+        self.inner.extend_graph(handle, &pts, &colors, &edges).map_err(trace_to_py)
     }
 
     /// Show or hide a trace by handle. Returns True when the state changed,
@@ -308,6 +549,103 @@ impl Plot {
     #[pyo3(signature = (px=None))]
     fn set_hover2d(&mut self, px: Option<f32>) -> bool {
         plotui_bind::set_hover2d(&mut self.inner, px)
+    }
+
+    /// Set the explicit 2D x view `(lo, hi)` in data coordinates, or `None`
+    /// for full-extent autoscale. With a window set, the plot maps exactly
+    /// that range, every y axis autoscales from the points inside it, and
+    /// the camera's 2D zoom/pan is superseded. Returns True when the state
+    /// changed (repaint needed). Ignored by 3D plots.
+    #[pyo3(signature = (window))]
+    fn set_x_window(&mut self, window: Option<(f64, f64)>) -> PyResult<bool> {
+        plotui_bind::set_x_window(&mut self.inner, window).map_err(to_py)
+    }
+
+    /// The current x window as `(lo, hi)`, or `None`.
+    fn x_window(&self) -> Option<(f64, f64)> {
+        self.inner.x_window
+    }
+
+    /// Toggle the range-slider strip: a full-extent overview under the plot
+    /// with the x-window selection in full color and grab handles at its
+    /// edges. Silently dropped on frames too short to fit it. Returns True
+    /// when the state changed.
+    fn set_range_slider(&mut self, on: bool) -> bool {
+        plotui_bind::set_range_slider(&mut self.inner, on)
+    }
+
+    /// Whether the range-slider strip is enabled.
+    fn range_slider(&self) -> bool {
+        self.inner.range_slider
+    }
+
+    /// Declare x values as seconds since this UTC epoch base (`None` clears):
+    /// x ticks become calendar dates and the crosshair readout shows
+    /// timestamps. Set automatically when a datetime x column is added.
+    #[pyo3(signature = (epoch))]
+    fn set_x_epoch(&mut self, epoch: Option<f64>) -> PyResult<bool> {
+        plotui_bind::set_x_epoch(&mut self.inner, epoch).map_err(to_py)
+    }
+
+    /// The time-axis epoch base in epoch seconds, or `None`.
+    fn x_epoch(&self) -> Option<f64> {
+        self.inner.x_epoch
+    }
+
+    /// What the range-slider strip has under `(px, py)` framebuffer pixels
+    /// at a `px_w`×`px_h` frame, within `tol_px`: `"left"`, `"right"`,
+    /// `"window"`, `"track"`, or `None` off the strip. Terminal mice report
+    /// per cell, so pass at least one cell width of tolerance.
+    fn range_slider_hit(
+        &self,
+        px_w: usize,
+        px_h: usize,
+        px: f32,
+        py: f32,
+        tol_px: f32,
+    ) -> Option<&'static str> {
+        self.inner.range_slider_hit(px_w, px_h, px, py, tol_px).map(plotui_bind::range_hit_to_parts)
+    }
+
+    /// Drag the grabbed strip `part` (a `range_slider_hit` string) by
+    /// `dx_px` framebuffer pixels: handles resize the window, `"window"`
+    /// (and `"track"`) slides it. With no window set, the drag starts from
+    /// the full extent. Returns True when the window changed.
+    fn drag_x_window(
+        &mut self,
+        px_w: usize,
+        px_h: usize,
+        part: &str,
+        dx_px: f32,
+    ) -> PyResult<bool> {
+        let hit = plotui_bind::range_hit_from_parts(part).map_err(to_py)?;
+        Ok(self.inner.drag_x_window(px_w, px_h, hit, dx_px))
+    }
+
+    /// Center the window on the strip position under `px` (a track click),
+    /// keeping its span. Returns True when the window changed.
+    fn jump_x_window(&mut self, px_w: usize, px_h: usize, px: f32) -> bool {
+        self.inner.jump_x_window(px_w, px_h, px)
+    }
+
+    /// Slide a set window by a plot-area drag of `dx_px` framebuffer pixels
+    /// (grab-the-data sign: drag right, view moves left). Returns True when
+    /// the window changed.
+    fn pan_x_window(&mut self, px_w: usize, px_h: usize, dx_px: f32) -> bool {
+        self.inner.pan_x_window(px_w, px_h, dx_px)
+    }
+
+    /// Zoom the window about the data x under `px` framebuffer pixels
+    /// (`factor > 1` zooms in), starting from the full extent when no window
+    /// is set. Returns True when the window changed.
+    fn zoom_x_window(&mut self, px_w: usize, px_h: usize, px: f32, factor: f64) -> bool {
+        self.inner.zoom_x_window(px_w, px_h, px, factor)
+    }
+
+    /// Slide a set window by `frac` of its own span (positive = later x) —
+    /// the keyboard step. Returns True when the window changed.
+    fn shift_x_window(&mut self, frac: f64) -> bool {
+        self.inner.shift_x_window(frac)
     }
 
     /// Hover an element (same forms as `set_selected`); it lights up white to
@@ -347,6 +685,55 @@ impl Plot {
     // --- interaction: the frontend forwards input to these ---
     fn rotate(&mut self, d_yaw: f64, d_pitch: f64) {
         self.inner.camera.rotate(d_yaw, d_pitch);
+    }
+    /// Remap what drag gestures do. Each argument names the camera control
+    /// that gesture axis drives — "yaw", "pitch", "pan_x", "pan_y", "zoom"
+    /// or "off" — or None to keep its current binding. The default map is
+    /// drag = rotate (yaw/pitch), shift-drag = pan.
+    #[pyo3(signature = (drag_x=None, drag_y=None, shift_drag_x=None, shift_drag_y=None))]
+    fn set_input_map(
+        &mut self,
+        drag_x: Option<&str>,
+        drag_y: Option<&str>,
+        shift_drag_x: Option<&str>,
+        shift_drag_y: Option<&str>,
+    ) -> PyResult<()> {
+        let mut m = self.inner.input_map;
+        for (slot, name) in [
+            (&mut m.drag_x, drag_x),
+            (&mut m.drag_y, drag_y),
+            (&mut m.shift_drag_x, shift_drag_x),
+            (&mut m.shift_drag_y, shift_drag_y),
+        ] {
+            if let Some(name) = name {
+                *slot = plotui_bind::parse_camera_control(name).map_err(to_py)?;
+            }
+        }
+        self.inner.input_map = m;
+        Ok(())
+    }
+    /// Route a drag through the input map (see `set_input_map`): `(dx, dy)`
+    /// pointer deltas in whatever unit the scales are calibrated for —
+    /// `rotate_scale` radians per unit, `pan_*_scale` framebuffer pixels
+    /// per unit, `zoom_scale` log-zoom per unit.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_drag(
+        &mut self,
+        dx: f64,
+        dy: f64,
+        shift: bool,
+        rotate_scale: f64,
+        pan_x_scale: f64,
+        pan_y_scale: f64,
+        zoom_scale: f64,
+    ) {
+        let scales = plotui_core::DragScales {
+            rotate: rotate_scale,
+            pan_x: pan_x_scale,
+            pan_y: pan_y_scale,
+            zoom: zoom_scale,
+        };
+        self.inner.apply_drag(dx, dy, shift, scales);
     }
     fn zoom_by(&mut self, factor: f64) {
         self.inner.camera.zoom_by(factor);
@@ -600,9 +987,56 @@ fn tmux_wrap(escape: &str) -> String {
     plotui_term::tmux_wrap(escape)
 }
 
+/// A 3D force-directed layout: connected nodes attract, all nodes repel, a
+/// cooling temperature settles the motion. Pure math on the host's timer —
+/// call `step()` per tick and hand `positions()` to
+/// `Plot.set_graph_positions`. Deterministic for a given seed.
+#[pyclass]
+struct ForceLayout {
+    inner: plotui_core::ForceLayout,
+}
+
+#[pymethods]
+impl ForceLayout {
+    /// A layout over `n_nodes` with seeded initial positions in the unit
+    /// ball. `edges` are (i, j) index pairs; out-of-range endpoints are
+    /// kept but inert, matching the renderer.
+    #[new]
+    #[pyo3(signature = (n_nodes, edges, seed=0))]
+    fn new(n_nodes: usize, edges: Vec<(u32, u32)>, seed: u32) -> Self {
+        ForceLayout { inner: plotui_core::ForceLayout::new(n_nodes, &edges, seed) }
+    }
+
+    /// One simulation tick. Returns the mean displacement — watch it to
+    /// stop repainting once the layout settles (below ~1e-3 is settled).
+    fn step(&mut self) -> f32 {
+        self.inner.step()
+    }
+
+    /// Current node positions as (xs, ys, zs) lists, in index order — feed
+    /// them straight to `Plot.set_graph_positions`.
+    fn positions(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let pts = self.inner.positions();
+        (
+            pts.iter().map(|p| p[0]).collect(),
+            pts.iter().map(|p| p[1]).collect(),
+            pts.iter().map(|p| p[2]).collect(),
+        )
+    }
+
+    /// Warm insertion of one node connected to `neighbors` (existing
+    /// indices): it spawns beside its first neighbor and re-heats the
+    /// simulation so the neighborhood reorganizes. Returns the new node's
+    /// index; pair with `Plot.extend_graph`.
+    fn add_node(&mut self, neighbors: Vec<u32>) -> usize {
+        self.inner.add_node(&neighbors)
+    }
+}
+
 #[pymodule]
 fn _plotui(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Plot>()?;
+    m.add_class::<ForceLayout>()?;
     m.add_function(pyo3::wrap_pyfunction!(detect_render_mode, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(detect_cell_px, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(cell_px_from_winsize, m)?)?;

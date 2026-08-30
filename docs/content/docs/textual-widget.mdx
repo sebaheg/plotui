@@ -12,6 +12,7 @@ PlotWidget(
     cell_px=None,             # device pixels per cell; None = detect
     pickable=False,           # 3D hover/click picking (posts messages)
     crosshair=True,           # 2D hover crosshair with values
+    range_slider=False,       # 2D range slider strip (posts RangeChanged)
     render_mode="auto",       # "placeholder" | "direct" to force a path
     interactive_scale=0.5,    # resolution while interacting, for large plots
 )
@@ -37,6 +38,16 @@ nearest sample, marks each series, and shows a value readout. Terminal mouse
 events arrive per character cell, which is far finer than typical point
 spacing — snapping makes the granularity invisible. `crosshair=False` opts
 out.
+
+## The range slider
+
+`range_slider=True` gives a 2D chart the
+[range slider](/docs/charts-2d#range-slider): drag its handles or body,
+click the track, scroll over the plot, or press `[` / `]` to move the x
+window; reset (`r`) clears it. A finished gesture posts `RangeChanged` with
+the new `(lo, hi)` window (or `None` for the full extent), and
+`widget.apply_x_window(window)` sets it programmatically. Handle grabs
+tolerate a full cell of slop — terminal mice report per cell.
 
 ## Resolution
 
@@ -68,3 +79,17 @@ Repeated extends between frames coalesce into one repaint, and a plot that
 streams past the large-scene threshold picks up reduced-resolution
 interaction automatically. `examples/textual_stream.py` is a complete
 20 Hz feed with visibility toggles.
+
+Graph traces get the same treatment for force-directed scenes (see
+[Live graphs](/docs/plots-3d#live-graphs)):
+
+```python
+widget.set_graph_positions(handle, xs, ys, zs)        # per-frame layout step
+widget.set_graph_colors(handle, node_colors, edges)   # hover-path highlight
+widget.extend_graph(handle, [x], [y], [z],            # a node flies in
+    node_colors=[(69, 200, 209)], edges=[(0, 9)])
+```
+
+`examples/textual_deps.py` is a complete live dependency graph: a
+`ForceLayout` stepped on `set_interval`, hover recoloring the transitive
+dependency closure, and timed node arrivals.

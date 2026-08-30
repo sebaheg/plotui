@@ -69,6 +69,14 @@ to exact pixel coordinates for overlays and hit-testing:
 positions = plot.project_nodes(px_w, px_h)   # [x_px, y_px, depth] per node
 ```
 
+The single-element hover (white) is the engine's; richer highlights are a
+host-side recolor. The idiom — used by `plotui example deps` — is: on hover,
+compute the related set (say, a node's dependency closure), then
+`plot.set_graph_colors(h, node_colors, edge_colors)` with the set at full
+color and everything else dimmed; on hover-clear, restore. Structure never
+changes, so the indices your app holds stay valid throughout — see
+[Live graphs](/docs/plots-3d#live-graphs).
+
 ## Crosshair (2D)
 
 ```python
@@ -78,3 +86,36 @@ plot.set_hover2d(None)   # clear
 
 Both hover setters return `True` when the state actually changed, so
 frontends know whether a repaint is needed.
+
+## X window (2D)
+
+An explicit x view for 2D plots — the state behind the
+[range slider](/docs/charts-2d#range-slider). With a window set, the plot
+maps exactly that range (no padding), every y axis autoscales from the
+points inside it, and the camera's 2D zoom/pan is superseded: the window
+*is* the view. `None` restores full-extent autoscale.
+
+```python
+plot.set_x_window((lo, hi))   # data coordinates; True if state changed
+plot.set_x_window(None)       # back to full extent
+plot.x_window()               # (lo, hi) | None
+```
+
+Gestures come as pixel-space calls that share the renderer's own geometry,
+so what a frontend forwards always lands where it looks like it should:
+
+```python
+plot.range_slider_hit(px_w, px_h, px, py, tol_px)
+# -> "left" | "right" | "window" | "track" | None
+
+plot.drag_x_window(px_w, px_h, part, dx_px)   # resize / slide the window
+plot.jump_x_window(px_w, px_h, px)            # center it on a track click
+plot.pan_x_window(px_w, px_h, dx_px)          # plot-area drag (grab the data)
+plot.zoom_x_window(px_w, px_h, px, factor)    # scroll about the cursor x
+plot.shift_x_window(frac)                     # keyboard step, no pixels needed
+```
+
+Every mutator clamps to the data extent, keeps the window at least 2% of the
+full span, and returns `True` when the window changed. Appending data through
+`extend` never moves a set window. The rules — and their error messages —
+are identical in Python, Rust, and Go.

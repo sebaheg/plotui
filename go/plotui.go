@@ -50,6 +50,36 @@ func (p *Plot) Close() {
 	}
 }
 
+// ParseColor parses a color shorthand — "#rrggbb" (or bare "rrggbb") hex,
+// or a name like "red" — with the shared engine rule, so the accepted
+// names and the error message match every other binding.
+func ParseColor(s string) (RGB, error) {
+	cs := C.CString(s)
+	defer C.free(unsafe.Pointer(cs))
+	var rgb RGB
+	status := C.plotui_parse_color(cs, (*C.uint8_t)(unsafe.Pointer(&rgb)))
+	return rgb, statusErr(status)
+}
+
+// SetColorway swaps the color sequence assigned to traces added without an
+// explicit color; it must contain at least one color. Traces already added
+// keep the colors they resolved to.
+func (p *Plot) SetColorway(colors []RGB) error {
+	var cp *C.uint8_t
+	if len(colors) > 0 {
+		cp = (*C.uint8_t)(unsafe.Pointer(&colors[0]))
+	}
+	return statusErr(C.plotui_set_colorway(p.h, cp, C.size_t(len(colors))))
+}
+
+// SetColorwayName swaps the color sequence to a built-in colorway:
+// "plotui" (the default), "muted", or "vivid".
+func (p *Plot) SetColorwayName(name string) error {
+	cs := C.CString(name)
+	defer C.free(unsafe.Pointer(cs))
+	return statusErr(C.plotui_set_colorway_name(p.h, cs))
+}
+
 // ---- camera (forward your framework's events to these) ----
 
 func (p *Plot) Rotate(dYaw, dPitch float64) { C.plotui_rotate(p.h, C.double(dYaw), C.double(dPitch)) }
@@ -58,6 +88,41 @@ func (p *Plot) ZoomBy(factor float64)       { C.plotui_zoom_by(p.h, C.double(fac
 // Pan moves the view in framebuffer pixels.
 func (p *Plot) Pan(dx, dy float64) { C.plotui_pan(p.h, C.double(dx), C.double(dy)) }
 func (p *Plot) Reset()             { C.plotui_reset(p.h) }
+
+// SetInputMap remaps what drag gestures do. Each name is a camera control —
+// "yaw", "pitch", "pan_x", "pan_y", "zoom" or "off" — or "" to keep that
+// axis's current binding. The default map is drag = rotate (yaw/pitch),
+// shift-drag = pan.
+func (p *Plot) SetInputMap(dragX, dragY, shiftDragX, shiftDragY string) error {
+	opt := func(s string) *C.char {
+		if s == "" {
+			return nil
+		}
+		return C.CString(s)
+	}
+	cdx, cdy, csx, csy := opt(dragX), opt(dragY), opt(shiftDragX), opt(shiftDragY)
+	defer func() {
+		for _, c := range []*C.char{cdx, cdy, csx, csy} {
+			if c != nil {
+				C.free(unsafe.Pointer(c))
+			}
+		}
+	}()
+	return statusErr(C.plotui_set_input_map(p.h, cdx, cdy, csx, csy))
+}
+
+// ApplyDrag routes a drag through the input map (see SetInputMap): (dx, dy)
+// pointer deltas in whatever unit the scales are calibrated for —
+// rotateScale radians per unit, pan*Scale framebuffer pixels per unit,
+// zoomScale log-zoom per unit.
+func (p *Plot) ApplyDrag(dx, dy float64, shift bool, rotateScale, panXScale, panYScale, zoomScale float64) {
+	s := C.int(0)
+	if shift {
+		s = 1
+	}
+	C.plotui_apply_drag(p.h, C.double(dx), C.double(dy), s,
+		C.double(rotateScale), C.double(panXScale), C.double(panYScale), C.double(zoomScale))
+}
 
 // CameraState returns (yaw, pitch, zoom, panX, panY) — capture it before
 // rebuilding a plot so the restored view is seamless.

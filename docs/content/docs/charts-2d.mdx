@@ -3,8 +3,10 @@ title: 2D charts
 description: Line, scatter, and bar charts with automatic axes, ticks, legends, and secondary y-axes.
 ---
 
-All 2D traces share the same conventions: with `color=None`, palette slots are
-assigned in a fixed, color-vision-safe order; `name` puts the series in the
+All 2D traces share the same conventions: with `color=None`, colorway slots
+are assigned in a fixed, color-vision-safe order; `color` also accepts
+shorthand strings — `"#rrggbb"` hex or a name like `"red"` — next to
+`(r, g, b)` tuples (see [Colors](#colors)); `name` puts the series in the
 legend; non-finite values (NaN) break lines into separate runs instead of
 drawing through the gap. Every `add_*` returns a trace handle for
 `plot.extend(handle, xs, ys)` and `plot.set_visible(handle, ...)` — see
@@ -39,6 +41,24 @@ plot.add_bar(months, [s + w for s, w in zip(solar, wind)], name="wind")
 plot.add_bar(months, solar, name="solar")
 ```
 
+## Colors
+
+`color` takes an `(r, g, b)` tuple or a shorthand string: `"#rrggbb"` hex
+(the `#` is optional) or a name — red, orange, yellow, green, lime, cyan,
+teal, blue, navy, purple, violet, magenta, pink, brown, white, black, gray.
+The rules — and their error messages — are identical in Python, Rust, and Go.
+
+Traces added without a color take slots from the active **colorway** in
+fixed order. `set_colorway` swaps it, for traces added afterwards:
+
+```python
+plot.set_colorway("vivid")                    # built-in: plotui (default),
+                                              # muted, vivid
+plot.set_colorway(["#e63c78", "cyan", (240, 161, 60)])   # or your own
+```
+
+The same conventions apply to 3D traces.
+
 ## Secondary y-axes
 
 `axis="y2"` or `"y3"` binds a series to an independent right-hand axis with
@@ -64,3 +84,50 @@ changed = plot.set_hover2d(px)   # None clears; returns True when state changed
 Series match by exact sample x — series on a shared grid all get a row, while
 series on their own grids only show where they truly have a sample. Nothing
 is interpolated silently.
+
+## Range slider
+
+`plot.set_range_slider(True)` adds a Plotly-style range slider: a full-extent
+overview strip under the chart, with the current x window in full color, the
+rest dimmed, and grab handles on the window edges. Drag a handle to resize
+the window, drag the window body to slide it, click the track to jump. With a
+window set, dragging the plot area pans the window and the scroll wheel zooms
+it about the cursor; `[` / `]` nudge it by a tenth of its span, and reset
+clears it. The strip drops out silently on frames too short to fit it.
+
+```python
+plot.set_range_slider(True)
+plot.set_x_window((lo, hi))       # or let the user drag one out
+```
+
+The engine draws the strip and owns the drag semantics, so the slider looks
+and behaves identically in Textual, Ratatui, Bubble Tea, and the CLI — see
+[X window](/docs/interaction#x-window-2d) for the raw calls, and try it with
+`plotui example timeseries`.
+
+## Time axes
+
+Give a plot `x_epoch` — or just pass datetimes as x — and the x axis becomes
+a UTC calendar axis: ticks land on calendar boundaries (round minutes, hours,
+midnights, month firsts, January firsts) with date-aware labels, and the
+crosshair readout shows timestamps.
+
+```python
+import numpy as np
+
+xs = np.arange("2026-01-01", "2027-01-01", dtype="datetime64[D]")
+plot.add_line(xs, demand, name="demand")   # x_epoch set automatically
+```
+
+Datetime x columns (numpy `datetime64`, pandas `DatetimeIndex`, or lists of
+`datetime.datetime`) are stored as float32 *offsets* from the first
+timestamp's UTC midnight — raw epoch seconds don't fit in f32, offsets stay
+second-accurate for years either side of the epoch. Naive datetimes are read
+as UTC wall time; aware ones convert exactly. Sub-second timestamps are below
+the axis's resolution, and datetime and numeric x cannot mix on one plot.
+
+The CLI detects ISO-8601 dates in the first input column on its own:
+
+```bash
+printf '2026-01-01 1\n2026-01-02 4\n2026-01-03 2\n' | plotui line --range-slider
+```

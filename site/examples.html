@@ -32,7 +32,7 @@
   <div class="wrap nav">
     <a class="wordmark" href="index.html">plo<span class="t1">t</span><span class="t2">u</span><span class="t3">i.</span>xyz</a>
     <nav class="nav-links" aria-label="Main">
-      <a href="index.html#start">get started</a>
+      <a href="index.html#install">install</a>
       <a class="ex" href="examples.html" aria-current="page">examples</a>
       <a href="https://docs.plotui.xyz">docs</a>
       <a class="gh" href="https://github.com/sebaheg/plotui">GitHub ↗</a>
@@ -133,6 +133,33 @@ p.<span class="fn">add_graph3d</span>(xs, ys, zs, edges=[(<span class="str">0</s
              color=(<span class="str">69, 200, 209</span>))
 hit = p.<span class="fn">pick_element_px</span>(w, h, mx, my, node_radius=<span class="str">8</span>)
 <span class="cm"># hit → ("node", i) or ("edge", i); highlight via p.set_hovered(hit)</span></code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="deps" data-dim="3d">
+        <div class="term-bar" aria-hidden="true">
+          <span class="b"></span><span class="b"></span><span class="b"></span>
+          <span class="term-title">deps — force-directed layout, live</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="plotui's dependency graph laying itself out with a live force simulation"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">hover</span>dependency paths</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
+        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> ForceLayout, Plot
+
+lay = <span class="fn">ForceLayout</span>(n, edges, seed=<span class="str">7</span>)
+h = p.<span class="fn">add_graph3d</span>(*lay.<span class="fn">positions</span>(), edges=edges)
+<span class="cm"># per tick: step the physics, move the nodes in place</span>
+<span class="kw">if</span> lay.<span class="fn">step</span>() &gt;= <span class="str">1e-3</span>:
+    p.<span class="fn">set_graph_positions</span>(h, *lay.<span class="fn">positions</span>())
+<span class="cm"># hover: recolor the dependency closure, restore on leave</span>
+p.<span class="fn">set_graph_colors</span>(h, node_colors, edge_colors)</code></pre>
       </figure>
 
       <figure class="term ex-card" data-example="lorenz" data-dim="3d">

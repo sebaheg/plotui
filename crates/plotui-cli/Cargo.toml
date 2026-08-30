@@ -20,5 +20,7 @@ plotui-core = { workspace = true }
 plotui-term = { workspace = true }
 plotui-ratatui = { workspace = true }
 ratatui = { workspace = true, features = ["crossterm"] }
-crossterm = { workspace = true }
+# use-dev-tty: read events from /dev/tty, so `data | plotui line` stays
+# interactive — stdin is the data pipe, not the keyboard.
+crossterm = { workspace = true, features = ["use-dev-tty"] }
 clap = { version = "4", features = ["derive"] }

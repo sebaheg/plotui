@@ -8,7 +8,7 @@
 //! crate is that single home, so Python and Go callers see identical
 //! behavior down to the error text.
 
-use plotui_core::{Colormap, Element, Plot, Rgb, Shape, Trace, YAxis};
+use plotui_core::{Colormap, Element, Plot, RangeHit, Rgb, Shape, Trace, YAxis};
 
 /// Default edge pick radius as a fraction of the node pick radius (the
 /// `pick_element_px` default every binding applies).
@@ -80,6 +80,64 @@ pub fn parse_shapes<S: AsRef<str>>(names: &[S]) -> Result<Vec<Shape>, BindError>
         .collect()
 }
 
+/// Color-name shorthands, CSS values, shared by every binding. Sorted, so
+/// the error message enumerates them stably.
+pub const COLOR_NAMES: [(&str, Rgb); 18] = [
+    ("black", [0, 0, 0]),
+    ("blue", [0, 0, 255]),
+    ("brown", [165, 42, 42]),
+    ("cyan", [0, 255, 255]),
+    ("gray", [128, 128, 128]),
+    ("green", [0, 128, 0]),
+    ("grey", [128, 128, 128]),
+    ("lime", [0, 255, 0]),
+    ("magenta", [255, 0, 255]),
+    ("navy", [0, 0, 128]),
+    ("orange", [255, 165, 0]),
+    ("pink", [255, 192, 203]),
+    ("purple", [128, 0, 128]),
+    ("red", [255, 0, 0]),
+    ("teal", [0, 128, 128]),
+    ("violet", [238, 130, 238]),
+    ("white", [255, 255, 255]),
+    ("yellow", [255, 255, 0]),
+];
+
+/// A color shorthand: `"#rrggbb"` (or bare `"rrggbb"`) hex, or a name from
+/// [`COLOR_NAMES`]. The shared rule — and the exact error message — every
+/// binding applies to a string color.
+pub fn parse_color(s: &str) -> Result<Rgb, BindError> {
+    if let Some((_, rgb)) = COLOR_NAMES.iter().find(|(n, _)| *n == s) {
+        return Ok(*rgb);
+    }
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
+        return Ok([byte(0), byte(2), byte(4)]);
+    }
+    Err(BindError::invalid(format!(
+        "unknown color {s:?}; expected \"#rrggbb\" hex or one of {}",
+        COLOR_NAMES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+    )))
+}
+
+/// A built-in colorway by name; an unknown name is an error.
+pub fn colorway(name: &str) -> Result<&'static [Rgb; 8], BindError> {
+    plotui_core::colorway_by_name(name).ok_or_else(|| {
+        BindError::invalid(format!(
+            "unknown colorway {name:?}; expected one of plotui, muted, vivid",
+        ))
+    })
+}
+
+/// The shared rule for a custom colorway list: it must not be empty.
+pub fn check_colorway(colors: &[Rgb]) -> Result<(), BindError> {
+    if colors.is_empty() {
+        return Err(BindError::invalid("colorway must contain at least one color".to_string()));
+    }
+    Ok(())
+}
+
 /// A colormap by name; an unknown name is an error (`None` means a solid
 /// color, so it maps through).
 pub fn parse_colormap(name: Option<&str>) -> Result<Option<Colormap>, BindError> {
@@ -91,6 +149,23 @@ pub fn parse_colormap(name: Option<&str>) -> Result<Option<Colormap>, BindError>
                 Colormap::NAMES.join(", ")
             ))
         }),
+    }
+}
+
+/// A camera control by name, for [`plotui_core::InputMap`] remapping — the
+/// shared rule every binding applies to gesture-map strings.
+pub fn parse_camera_control(name: &str) -> Result<plotui_core::CameraControl, BindError> {
+    use plotui_core::CameraControl as C;
+    match name {
+        "yaw" => Ok(C::Yaw),
+        "pitch" => Ok(C::Pitch),
+        "pan_x" => Ok(C::PanX),
+        "pan_y" => Ok(C::PanY),
+        "zoom" => Ok(C::Zoom),
+        "off" => Ok(C::Off),
+        _ => Err(BindError::invalid(format!(
+            "camera control must be 'yaw', 'pitch', 'pan_x', 'pan_y', 'zoom' or 'off', got {name:?}"
+        ))),
     }
 }
 
@@ -164,6 +239,65 @@ pub fn set_hover2d(plot: &mut Plot, px: Option<f32>) -> bool {
     let changed = plot.hover2d_px != px;
     plot.hover2d_px = px;
     changed
+}
+
+/// Set (or clear) the explicit 2D x window with validation and change
+/// detection; the returned bool tells the frontend whether a repaint is
+/// needed.
+pub fn set_x_window(plot: &mut Plot, w: Option<(f64, f64)>) -> Result<bool, BindError> {
+    if let Some((lo, hi)) = w {
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return Err(BindError::invalid(format!(
+                "x_window needs finite lo < hi, got ({lo}, {hi})"
+            )));
+        }
+    }
+    let changed = plot.x_window != w;
+    plot.x_window = w;
+    Ok(changed)
+}
+
+/// Toggle the range-slider strip with change detection.
+pub fn set_range_slider(plot: &mut Plot, on: bool) -> bool {
+    let changed = plot.range_slider != on;
+    plot.range_slider = on;
+    changed
+}
+
+/// Set (or clear) the time-axis epoch base (seconds, UTC) with validation
+/// and change detection.
+pub fn set_x_epoch(plot: &mut Plot, epoch: Option<f64>) -> Result<bool, BindError> {
+    if let Some(e) = epoch {
+        if !e.is_finite() {
+            return Err(BindError::invalid(format!("x_epoch must be finite, got {e}")));
+        }
+    }
+    let changed = plot.x_epoch != epoch;
+    plot.x_epoch = epoch;
+    Ok(changed)
+}
+
+/// A range-slider hit's string kind, for bindings whose hosts speak strings.
+pub fn range_hit_to_parts(hit: RangeHit) -> &'static str {
+    match hit {
+        RangeHit::LeftHandle => "left",
+        RangeHit::RightHandle => "right",
+        RangeHit::Window => "window",
+        RangeHit::Track => "track",
+    }
+}
+
+/// A range-slider hit from its string kind.
+pub fn range_hit_from_parts(kind: &str) -> Result<RangeHit, BindError> {
+    match kind {
+        "left" => Ok(RangeHit::LeftHandle),
+        "right" => Ok(RangeHit::RightHandle),
+        "window" => Ok(RangeHit::Window),
+        "track" => Ok(RangeHit::Track),
+        _ => Err(BindError::invalid(format!(
+            "range part must be 'left', 'right', 'window' or 'track', got {kind:?}"
+        ))),
+    }
 }
 
 /// Pick under `(px, py)`, nodes before edges, with the shared default edge
@@ -249,10 +383,25 @@ mod tests {
     }
 
     #[test]
+    fn color_shorthands_parse_names_and_hex() {
+        assert_eq!(parse_color("red").unwrap(), [255, 0, 0]);
+        assert_eq!(parse_color("grey").unwrap(), parse_color("gray").unwrap());
+        assert_eq!(parse_color("#e63c78").unwrap(), [230, 60, 120]);
+        assert_eq!(parse_color("45C8D1").unwrap(), [69, 200, 209]);
+        assert_eq!(colorway("plotui").unwrap()[0], [230, 60, 120]);
+    }
+
+    #[test]
     fn parse_errors_carry_the_canonical_messages() {
         assert_eq!(parse_axis("y4").unwrap_err().msg, "axis must be 'y', 'y2' or 'y3', got \"y4\"");
         assert!(parse_shapes(&["blob"]).unwrap_err().msg.starts_with("unknown node shape"));
         assert!(parse_colormap(Some("heat")).unwrap_err().msg.starts_with("unknown colormap"));
+        assert!(parse_color("blurple").unwrap_err().msg.starts_with("unknown color"));
+        assert!(colorway("neon").unwrap_err().msg.starts_with("unknown colorway"));
+        assert_eq!(
+            check_colorway(&[]).unwrap_err().msg,
+            "colorway must contain at least one color"
+        );
         assert_eq!(
             element_from_parts("face", 0).unwrap_err().msg,
             "element kind must be 'node' or 'edge', got \"face\""
@@ -272,8 +421,9 @@ mod tests {
     fn extend_dispatches_on_trace_kind() {
         let mut p = Plot::new();
         let h2 = p.add_line2d(vec![0.0], vec![0.0], [1, 2, 3], 1.0, None, YAxis::Primary);
-        let h3 = p.add_scatter3d(vec![[0.0; 3]], [1, 2, 3], 1.0);
-        let hg = p.add_graph3d(vec![[0.0; 3]], vec![[1, 2, 3]], vec![], 1.0, None, None, None);
+        let h3 = p.add_scatter3d(vec![[0.0; 3]], [1, 2, 3], 1.0, None);
+        let hg =
+            p.add_graph3d(vec![[0.0; 3]], vec![[1, 2, 3]], vec![], 1.0, None, None, None, None);
 
         assert!(extend(&mut p, h2, &[1.0], &[1.0], None).is_ok());
         assert!(extend(&mut p, h3, &[1.0], &[1.0], Some(&[1.0])).is_ok());
@@ -300,5 +450,38 @@ mod tests {
         assert!(!set_hovered(&mut p, Some(Element::Node(1))));
         assert!(set_hover2d(&mut p, Some(4.0)));
         assert!(!set_hover2d(&mut p, Some(4.0)));
+    }
+
+    #[test]
+    fn x_window_helpers_detect_change_and_validate() {
+        let mut p = Plot::new();
+        assert!(set_x_window(&mut p, Some((0.0, 10.0))).unwrap());
+        assert!(!set_x_window(&mut p, Some((0.0, 10.0))).unwrap());
+        assert!(set_x_window(&mut p, None).unwrap());
+        assert_eq!(
+            set_x_window(&mut p, Some((5.0, 5.0))).unwrap_err().to_string(),
+            "x_window needs finite lo < hi, got (5, 5)"
+        );
+        assert!(set_x_window(&mut p, Some((f64::NAN, 1.0))).is_err());
+        assert!(set_range_slider(&mut p, true));
+        assert!(!set_range_slider(&mut p, true));
+        assert!(set_x_epoch(&mut p, Some(1.7e9)).unwrap());
+        assert!(!set_x_epoch(&mut p, Some(1.7e9)).unwrap());
+        assert_eq!(
+            set_x_epoch(&mut p, Some(f64::INFINITY)).unwrap_err().to_string(),
+            "x_epoch must be finite, got inf"
+        );
+    }
+
+    #[test]
+    fn range_hit_parts_roundtrip() {
+        for hit in [RangeHit::LeftHandle, RangeHit::RightHandle, RangeHit::Window, RangeHit::Track]
+        {
+            assert_eq!(range_hit_from_parts(range_hit_to_parts(hit)).unwrap(), hit);
+        }
+        assert_eq!(
+            range_hit_from_parts("middle").unwrap_err().to_string(),
+            "range part must be 'left', 'right', 'window' or 'track', got \"middle\""
+        );
     }
 }

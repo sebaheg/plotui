@@ -7,6 +7,7 @@ use crate::ChartKind;
 
 pub fn build_plot(kind: ChartKind, t: &Table) -> Plot {
     let mut plot = Plot::new();
+    plot.x_epoch = t.x_epoch; // ISO-date x column → calendar axis
     for (i, ys) in t.series.iter().enumerate() {
         let color = plot.resolve_color(None);
         let name = t.names.get(i).cloned().flatten();

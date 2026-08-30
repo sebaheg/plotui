@@ -36,6 +36,7 @@ import (
 // (they live canonically in the Rust plotui-term crate).
 const (
 	rotatePerCell   = 0.03
+	dragZoomPerCell = 0.15
 	keyRotateStep   = 0.1
 	keyPanCells     = 2.0
 	zoomIn          = 1.1

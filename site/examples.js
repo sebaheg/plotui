@@ -9,6 +9,7 @@
 // Loaded dynamically in boot() so a missing/failed wasm module still runs
 // the fallback path (a static import would abort this whole module).
 let Plot = null;
+let ForceLayout = null;
 let memory = null;
 const DPR_MAX = 2;
 const T1 = '#ec4c86', T2 = '#45c8d1', T3 = '#f0a13c', INK = '#676f76';
@@ -70,6 +71,47 @@ function sphereGraph(n) {
   for (let k = 0; k < 6; k++) edges.push((rand() * n) | 0, (rand() * n) | 0);
   return { xs, ys, zs, edges };
 }
+
+// plotui's crate graph, snapshotted from `cargo metadata` — the same scene
+// as `plotui example deps`. Groups: w(orkspace), e(xternal), t(ransitive);
+// an edge (a, b) means a depends on b. The last DEPS_FLY_IN nodes arrive
+// live; their edges only reference earlier indices.
+const DEPS_NODES = [
+  ['plotui', 'w'], ['plotui-bind', 'w'], ['plotui-core', 'w'],
+  ['plotui-ffi', 'w'], ['plotui-protocol', 'w'], ['plotui-py', 'w'],
+  ['plotui-ratatui', 'w'], ['plotui-term', 'w'], ['plotui-wasm', 'w'],
+  ['base64', 'e'], ['clap', 'e'], ['crossterm', 'e'], ['flate2', 'e'],
+  ['numpy', 'e'], ['pyo3', 'e'], ['ratatui', 'e'], ['rustix', 'e'],
+  ['wasm-bindgen', 'e'],
+  ['bitflags', 't'], ['cfg-if', 't'], ['clap_builder', 't'],
+  ['clap_derive', 't'], ['crc32fast', 't'], ['crossterm_winapi', 't'],
+  ['derive_more', 't'], ['document-features', 't'], ['errno', 't'],
+  ['filedescriptor', 't'], ['indoc', 't'], ['instability', 't'],
+  ['libc', 't'], ['linux-raw-sys', 't'], ['memoffset', 't'],
+  ['miniz_oxide', 't'], ['mio', 't'], ['ndarray', 't'],
+  ['num-complex', 't'], ['num-integer', 't'], ['num-traits', 't'],
+  ['once_cell', 't'], ['parking_lot', 't'], ['portable-atomic', 't'],
+  ['pyo3-ffi', 't'], ['pyo3-macros', 't'], ['ratatui-core', 't'],
+  ['ratatui-crossterm', 't'], ['ratatui-macros', 't'],
+  ['ratatui-termina', 't'], ['ratatui-termwiz', 't'],
+  ['ratatui-widgets', 't'], ['rustc-hash', 't'], ['serde', 't'],
+  ['signal-hook', 't'], ['signal-hook-mio', 't'], ['unindent', 't'],
+  ['wasm-bindgen-macro', 't'], ['wasm-bindgen-shared', 't'],
+  ['winapi', 't'], ['windows-sys', 't'],
+];
+const DEPS_EDGES = [
+  [0, 2], [0, 6], [0, 7], [0, 10], [0, 11], [0, 15], [1, 2], [3, 1], [3, 2],
+  [3, 4], [3, 7], [4, 2], [4, 9], [4, 12], [5, 1], [5, 2], [5, 4], [5, 7],
+  [5, 13], [5, 14], [6, 2], [6, 4], [6, 7], [6, 11], [7, 2], [7, 4], [7, 16],
+  [8, 1], [8, 2], [8, 17], [10, 20], [10, 21], [11, 16], [11, 18], [11, 23],
+  [11, 24], [11, 25], [11, 27], [11, 34], [11, 40], [11, 52], [11, 53],
+  [11, 57], [12, 22], [12, 33], [13, 14], [13, 30], [13, 35], [13, 36],
+  [13, 37], [13, 38], [13, 50], [14, 28], [14, 30], [14, 32], [14, 39],
+  [14, 41], [14, 42], [14, 43], [14, 54], [15, 29], [15, 44], [15, 45],
+  [15, 46], [15, 47], [15, 48], [15, 49], [15, 51], [16, 18], [16, 26],
+  [16, 30], [16, 31], [16, 58], [17, 19], [17, 39], [17, 55], [17, 56],
+];
+const DEPS_FLY_IN = 8;
 
 function lorenz(steps) {
   const xs = [], ys = [], zs = [];
@@ -143,6 +185,110 @@ const EXAMPLES = {
           const i = hit.index;
           return `<span class="sw" style="background:${T2}"></span>node ${i}`
             + `<br>x ${fmt(g.xs[i])}<br>y ${fmt(g.ys[i])}<br>z ${fmt(g.zs[i])}`;
+        },
+      };
+    },
+  },
+
+  deps: {
+    is3d: true, pick: 'element',
+    setup(plot, ui) {
+      const GROUP = { w: T1, e: T2, t: T3 };
+      const GROUP_NAME = { w: 'workspace crate', e: 'direct dependency', t: 'transitive dependency' };
+      const dimHex = (hex) => {
+        const v = parseInt(hex.slice(1), 16);
+        const q = (x) => x >> 2;
+        return '#' + ((q(v >> 16 & 255) << 16) | (q(v >> 8 & 255) << 8) | q(v & 255))
+          .toString(16).padStart(6, '0');
+      };
+      const flat = (es) => new Uint32Array(es.flat());
+
+      let n = DEPS_NODES.length - DEPS_FLY_IN;
+      let edges = DEPS_EDGES.filter(([a, b]) => a < n && b < n);
+      const base = DEPS_NODES.slice(0, n).map(([, g]) => GROUP[g]);
+      const lay = new ForceLayout(n, flat(edges), 20260830);
+      for (let i = 0; i < 30; i++) lay.step(); // past the initial explosion
+      let energy = Infinity;
+
+      const posArrays = () => {
+        const p = lay.positions();
+        const m = p.length / 3;
+        const xs = new Float32Array(m), ys = new Float32Array(m), zs = new Float32Array(m);
+        for (let i = 0; i < m; i++) {
+          xs[i] = p[i * 3]; ys[i] = p[i * 3 + 1]; zs[i] = p[i * 3 + 2];
+        }
+        return [xs, ys, zs];
+      };
+
+      const [xs, ys, zs] = posArrays();
+      const h = plot.add_graph3d(xs, ys, zs, flat(edges), T2, 3.2, undefined);
+      plot.set_graph_colors(h, base, undefined);
+      plot.set_show_box(false);
+      plot.set_bounds(-1.45, -1.45, -1.45, 1.45, 1.45, 1.45);
+
+      // The transitive-dependency closure of node i over the current edges.
+      const reach = (i) => {
+        const seen = new Set([i]);
+        const stack = [i];
+        while (stack.length) {
+          const a = stack.pop();
+          for (const [x, y] of edges) {
+            if (x === a && !seen.has(y)) { seen.add(y); stack.push(y); }
+          }
+        }
+        return seen;
+      };
+
+      let lastSpawn = performance.now();
+      return {
+        tick() {
+          if (energy >= 1e-3) {
+            energy = lay.step();
+            plot.set_graph_positions(h, ...posArrays());
+            ui.markDirty();
+          }
+          if (n < DEPS_NODES.length && performance.now() - lastSpawn > 2500) {
+            lastSpawn = performance.now();
+            const idx = n;
+            const newEdges = DEPS_EDGES.filter(([a, b]) => a === idx || b === idx);
+            lay.add_node(new Uint32Array(newEdges.map(([a, b]) => (a === idx ? b : a))));
+            const p = lay.positions();
+            plot.extend_graph(
+              h,
+              [p[idx * 3]], [p[idx * 3 + 1]], [p[idx * 3 + 2]],
+              [GROUP[DEPS_NODES[idx][1]]],
+              flat(newEdges),
+            );
+            base.push(GROUP[DEPS_NODES[idx][1]]);
+            edges = edges.concat(newEdges);
+            n += 1;
+            energy = Infinity; // re-heated: keep animating
+            ui.markDirty();
+          }
+        },
+        hover(hit) {
+          if (hit && !hit.isEdge && hit.index < n) {
+            const on = reach(hit.index);
+            plot.set_graph_colors(
+              h,
+              base.map((c, j) => (on.has(j) ? c : dimHex(c))),
+              edges.map(([a, b]) => (on.has(a) && on.has(b) ? '#aab0b8' : '#222630')),
+            );
+          } else {
+            plot.set_graph_colors(h, base, undefined);
+          }
+          ui.markDirty();
+        },
+        tooltip(hit) {
+          if (hit.isEdge) {
+            const [a, b] = edges[hit.index];
+            return `<span class="sw" style="background:${T2}"></span>`
+              + `${DEPS_NODES[a][0]} → ${DEPS_NODES[b][0]}`;
+          }
+          const [nm, g] = DEPS_NODES[hit.index];
+          const deps = reach(hit.index).size - 1;
+          return `<span class="sw" style="background:${GROUP[g]}"></span>${nm}`
+            + `<br>${GROUP_NAME[g]}<br>${deps} deps`;
         },
       };
     },
@@ -243,7 +389,9 @@ function mountExample(card) {
   io.observe(canvas);
 
   function frame() {
-    if (!visible || !dirty) return;
+    if (!visible) return;
+    if (api.tick) api.tick(); // a live scene may markDirty per frame
+    if (!dirty) return;
     dirty = false;
     if (dragging && heavy) {
       const hw = Math.max(1, Math.round(w / 2)), hh = Math.max(1, Math.round(h / 2));
@@ -341,6 +489,7 @@ function mountExample(card) {
       else if (hit.isEdge) changed = plot.set_hovered_edge(hit.index);
       else changed = plot.set_hovered_node(hit.index);
       if (changed) dirty = true;
+      if (api.hover) api.hover(hit); // scene-level highlight (may markDirty)
     }
     if (hit && api.tooltip) {
       tip.innerHTML = api.tooltip(hit);
@@ -404,6 +553,7 @@ function showFallback() {
     const mod = await import('./pkg/plotui_wasm.js');
     const wasm = await mod.default();
     Plot = mod.Plot;
+    ForceLayout = mod.ForceLayout;
     memory = wasm.memory;
   } catch (e) {
     console.error('plotui wasm failed to load:', e);

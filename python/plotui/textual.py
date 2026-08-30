@@ -154,6 +154,21 @@ class PlotWidget(Widget, can_focus=True):
             self.plot_widget = plot_widget
             self.element = element
 
+    class RangeChanged(Message):
+        """Posted when the x window changes through a finished gesture (a
+        released range-slider drag, a scroll zoom, or an ``[``/``]`` key).
+
+        `window` is the new ``(lo, hi)`` in data coordinates, or `None` for
+        the full extent.
+        """
+
+        def __init__(
+            self, plot_widget: "PlotWidget", window: tuple[float, float] | None
+        ) -> None:
+            super().__init__()
+            self.plot_widget = plot_widget
+            self.window = window
+
     def __init__(
         self,
         plot: Plot,
@@ -162,6 +177,7 @@ class PlotWidget(Widget, can_focus=True):
         cell_px: tuple[int, int] | None = None,
         pickable: bool = False,
         crosshair: bool = True,
+        range_slider: bool = False,
         render_mode: str = "auto",
         interactive_scale: float = 0.5,
         **kwargs,
@@ -175,6 +191,12 @@ class PlotWidget(Widget, can_focus=True):
         vertical guide snapped to the nearest sample x, a marker per series,
         and a value readout. 2D renders are cheap enough to repaint per
         mouse-move. 3D plots are unaffected.
+
+        ``range_slider`` gives 2D plots a Plotly-style range slider: a
+        full-extent overview strip under the plot whose window (drag its
+        handles or body, click the track, scroll over the plot, ``[``/``]``)
+        sets the plot's x view; gestures post :class:`RangeChanged`. It also
+        works when the wrapped plot already has ``range_slider`` enabled.
 
         ``render_mode`` is ``"auto"`` (detect, honoring ``PLOTUI_RENDER``) or
         ``"placeholder"`` / ``"direct"`` to force a path — see
@@ -190,9 +212,14 @@ class PlotWidget(Widget, can_focus=True):
         """
         super().__init__(**kwargs)
         self._plot = plot
+        if range_slider:
+            plot.set_range_slider(True)
         self._dragging = False
         self._moved = False
         self._last_pos = (0, 0)
+        # The strip part grabbed by the active drag ("left"/"right"/"window"),
+        # if the drag started on the range slider.
+        self._range_drag: str | None = None
         self._auto = auto_rotate
         self._cell_w, self._cell_h = cell_px if cell_px is not None else detect_cell_px()
         self._pickable = pickable
@@ -286,7 +313,15 @@ class PlotWidget(Widget, can_focus=True):
 
     def apply_reset(self) -> None:
         self._plot.reset()
+        if self._plot.set_x_window(None):
+            self.post_message(self.RangeChanged(self, None))
         self.invalidate()
+
+    def apply_x_window(self, window: tuple[float, float] | None) -> None:
+        """Set (or clear) the 2D x view programmatically; repaints on change.
+        Interactive changes post :class:`RangeChanged` instead."""
+        if self._plot.set_x_window(window):
+            self.invalidate()
 
     def on_click_at(self, event: events.MouseUp) -> None:
         """Click semantics (a press-and-release without movement). The default
@@ -331,6 +366,30 @@ class PlotWidget(Widget, can_focus=True):
         if changed:
             self.invalidate()
         return changed
+
+    def set_graph_positions(self, handle: int, xs, ys, zs) -> None:
+        """Move every node of a graph trace at once and repaint — the
+        per-frame call of a force-directed layout (see
+        :meth:`Plot.set_graph_positions`, pair with ``ForceLayout``)."""
+        self._plot.set_graph_positions(handle, xs, ys, zs)
+        self.invalidate()
+
+    def set_graph_colors(self, handle: int, node_colors, edge_colors=None) -> None:
+        """Recolor a graph trace in place and repaint — dim everything,
+        brighten a hovered dependency path, restore (see
+        :meth:`Plot.set_graph_colors`)."""
+        self._plot.set_graph_colors(handle, node_colors, edge_colors)
+        self.invalidate()
+
+    def extend_graph(
+        self, handle: int, xs, ys, zs, node_colors=None, edges=()
+    ) -> None:
+        """Append nodes and edges to a graph trace and repaint (see
+        :meth:`Plot.extend_graph`, pair with ``ForceLayout.add_node``)."""
+        self._plot.extend_graph(
+            handle, xs, ys, zs, node_colors=node_colors, edges=list(edges)
+        )
+        self.invalidate()
 
     def set_overlay(self, spans: list[OverlaySpan]) -> None:
         """Draw text over the plot: each span is `(row, col, text, style)` in
@@ -500,6 +559,17 @@ class PlotWidget(Widget, can_focus=True):
         self._dragging = True
         self._moved = False
         self._last_pos = (event.screen_x, event.screen_y)
+        # A press on the range-slider strip grabs it instead of the camera; a
+        # track press jumps the window there and then drags it as the body.
+        if not self._plot.is_3d() and self._plot.range_slider():
+            px_w, px_h, px, py, _ = self._pixel_geometry(event.x, event.y)
+            hit = self._plot.range_slider_hit(px_w, px_h, px, py, float(self._cell_w))
+            if hit is not None:
+                if hit == "track":
+                    if self._plot.jump_x_window(px_w, px_h, px):
+                        self.invalidate()
+                    hit = "window"
+                self._range_drag = hit
         self.capture_mouse()
         self.focus()
 
@@ -514,15 +584,33 @@ class PlotWidget(Widget, can_focus=True):
             self._last_pos = (event.screen_x, event.screen_y)
             if dx or dy:
                 self._moved = True
-            if event.shift:
-                # Pan is in full-resolution image pixels, so one dragged cell
-                # is one cell's worth of pixels: the plot stays under the
-                # pointer instead of lagging it.
-                self.apply_pan(dx * self._cell_w, dy * self._cell_h)
+            if self._range_drag is not None:
+                px_w, px_h, *_ = self._pixel_geometry(event.x, event.y)
+                if self._plot.drag_x_window(
+                    px_w, px_h, self._range_drag, dx * self._cell_w
+                ):
+                    self.invalidate()
+            elif (
+                not event.shift
+                and not self._plot.is_3d()
+                and self._plot.x_window() is not None
+            ):
+                # With a window set, a plain plot-area drag slides the window
+                # (the camera is superseded).
+                px_w, px_h, *_ = self._pixel_geometry(event.x, event.y)
+                if self._plot.pan_x_window(px_w, px_h, dx * self._cell_w):
+                    self.invalidate()
             else:
-                # Negated: dragging grabs the camera, not the object — drag
-                # right orbits the view right (matches the website examples).
-                self.apply_rotate(-dx * 0.03, -dy * 0.03)
+                # Routed through the plot's input map: drag rotates
+                # (camera-grab — drag right orbits the view right),
+                # shift-drag pans, unless remapped via plot.set_input_map.
+                # Pan is in full-resolution image pixels, so one dragged
+                # cell is one cell's worth of pixels and the plot stays
+                # under the pointer.
+                self._plot.apply_drag(
+                    dx, dy, event.shift, 0.03, self._cell_w, self._cell_h, 0.15
+                )
+                self.invalidate()
         elif not self._plot.is_3d():
             if self._crosshair:
                 px_w, px_h, px, py, _ = self._pixel_geometry(event.x, event.y)
@@ -540,24 +628,41 @@ class PlotWidget(Widget, can_focus=True):
     def on_mouse_up(self, event: events.MouseUp) -> None:
         was_click = self._dragging and not self._moved
         was_drag = self._dragging and self._moved
+        was_range = self._dragging and self._range_drag is not None
         self._dragging = False
+        self._range_drag = None
         self.release_mouse()
-        if was_click:
+        if was_range:
+            # The strip gesture ended: one message with the result.
+            self.invalidate()
+            self.post_message(self.RangeChanged(self, self._plot.x_window()))
+        elif was_click:
             self.on_click_at(event)
         elif was_drag:
             # The gesture ended: repaint so a half-res interaction frame is
             # replaced by a crisp full-res one.
             self.invalidate()
 
+    def _scroll(self, event, factor: float) -> None:
+        # With an x window set on a 2D plot the wheel zooms the window about
+        # the cursor; otherwise it zooms the camera.
+        if not self._plot.is_3d() and self._plot.x_window() is not None:
+            px_w, px_h, px, *_ = self._pixel_geometry(event.x, event.y)
+            if self._plot.zoom_x_window(px_w, px_h, px, factor):
+                self.invalidate()
+                self.post_message(self.RangeChanged(self, self._plot.x_window()))
+            return
+        self.apply_zoom(factor)
+
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self._mode == "unsupported":
             return
-        self.apply_zoom(0.9)
+        self._scroll(event, 0.9)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         if self._mode == "unsupported":
             return
-        self.apply_zoom(1.1)
+        self._scroll(event, 1.1)
 
     def on_key(self, event: events.Key) -> None:
         if self._mode == "unsupported":
@@ -583,6 +688,13 @@ class PlotWidget(Widget, can_focus=True):
             self.apply_pan(0.0, -2.0 * self._cell_h)
         elif key == "shift+down":
             self.apply_pan(0.0, 2.0 * self._cell_h)
+        elif key in ("left_square_bracket", "right_square_bracket", "[", "]"):
+            if self._plot.x_window() is None:
+                return
+            frac = -0.1 if key in ("left_square_bracket", "[") else 0.1
+            if self._plot.shift_x_window(frac):
+                self.invalidate()
+                self.post_message(self.RangeChanged(self, self._plot.x_window()))
         elif key == "r":
             self.apply_reset()
         else:

@@ -300,3 +300,104 @@ func TestTmuxWrapOutsideTmux(t *testing.T) {
 		t.Fatalf("outside tmux must be a no-op, got %q", got)
 	}
 }
+
+func TestXWindowRoundtripAndValidation(t *testing.T) {
+	p := plot2D(t)
+	if _, _, ok := p.XWindow(); ok {
+		t.Fatal("fresh plot must have no x window")
+	}
+	changed, err := p.SetXWindow(0.5, 1.5)
+	if err != nil || !changed {
+		t.Fatalf("set: changed=%v err=%v", changed, err)
+	}
+	if changed, _ := p.SetXWindow(0.5, 1.5); changed {
+		t.Fatal("same window must not report a change")
+	}
+	lo, hi, ok := p.XWindow()
+	if !ok || lo != 0.5 || hi != 1.5 {
+		t.Fatalf("read back (%v, %v, %v)", lo, hi, ok)
+	}
+	if _, err := p.SetXWindow(2, 2); err == nil ||
+		!strings.Contains(err.Error(), "x_window needs finite lo < hi") {
+		t.Fatalf("degenerate window error: %v", err)
+	}
+	if !p.ClearXWindow() {
+		t.Fatal("clear must report a change")
+	}
+	if changed, err := p.SetXEpoch(1.7e9); err != nil || !changed {
+		t.Fatalf("epoch set: %v %v", changed, err)
+	}
+	if e, ok := p.XEpoch(); !ok || e != 1.7e9 {
+		t.Fatalf("epoch read back (%v, %v)", e, ok)
+	}
+}
+
+func TestRangeSliderHitAndDrag(t *testing.T) {
+	p := plot2D(t)
+	if !p.SetRangeSlider(true) {
+		t.Fatal("enabling the strip must report a change")
+	}
+	// 400x240: the strip hugs the bottom rows; mid-strip must hit something.
+	if hit := p.RangeSliderHit(400, 240, 200, 224, 4); hit == RangeNone {
+		t.Fatal("mid-strip point must hit the slider")
+	}
+	if hit := p.RangeSliderHit(400, 240, 200, 100, 4); hit != RangeNone {
+		t.Fatalf("plot-area point must miss the slider, got %v", hit)
+	}
+	// Shrink from the full extent, then slide.
+	if changed, err := p.DragXWindow(400, 240, RangeRight, -120); err != nil || !changed {
+		t.Fatalf("handle drag: %v %v", changed, err)
+	}
+	if _, _, ok := p.XWindow(); !ok {
+		t.Fatal("a drag must materialize a window")
+	}
+	if _, err := p.DragXWindow(400, 240, RangeHit(9), 1); err == nil {
+		t.Fatal("invalid part must error")
+	}
+	if !p.JumpXWindow(400, 240, 300) {
+		t.Fatal("track jump must move the shrunken window")
+	}
+	if !p.PanXWindow(400, 240, 25) {
+		t.Fatal("pan must slide the window")
+	}
+	if !p.ZoomXWindow(400, 240, 200, 2) {
+		t.Fatal("zoom must narrow the window")
+	}
+}
+
+func TestInputMapRemapAndSharedError(t *testing.T) {
+	p := New()
+	t.Cleanup(p.Close)
+	if _, err := p.AddScatter3D([]float32{0, 1}, []float32{0, 1}, []float32{0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	// Default map: a plain drag rotates and never pans.
+	before := p.CameraState()
+	p.ApplyDrag(10, 5, false, 0.03, 1, 1, 0.15)
+	after := p.CameraState()
+	if after[0] == before[0] || after[1] == before[1] {
+		t.Fatal("default drag must rotate both axes")
+	}
+	if after[3] != before[3] || after[4] != before[4] {
+		t.Fatal("default drag must not pan")
+	}
+	// Remapped: a plain drag pans exactly and never rotates.
+	if err := p.SetInputMap("pan_x", "pan_y", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	before = p.CameraState()
+	p.ApplyDrag(10, 5, false, 0.03, 1, 1, 0.15)
+	after = p.CameraState()
+	if after[0] != before[0] || after[1] != before[1] {
+		t.Fatal("remapped drag must not rotate")
+	}
+	if after[3]-before[3] != 10 || after[4]-before[4] != 5 {
+		t.Fatalf("remapped drag must pan exactly, got (%v, %v)", after[3]-before[3], after[4]-before[4])
+	}
+	// The shared bind error string, byte-identical across bindings.
+	err := p.SetInputMap("bogus", "", "", "")
+	want := `camera control must be 'yaw', 'pitch', 'pan_x', 'pan_y', 'zoom' or 'off', got "bogus"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %s", err, want)
+	}
+}

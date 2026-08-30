@@ -42,6 +42,14 @@ escape, _ := p.RenderKitty(cols, rows, cellW, cellH, plotui.RenderOpts{})
 // …emit with the cursor at the region's top-left; p.KittyCleanup() on exit.
 ```
 
+2D x-window / range-slider / time-axis state mirrors the other bindings:
+`SetXWindow`/`ClearXWindow`/`XWindow`, `SetRangeSlider`,
+`SetXEpoch`/`ClearXEpoch`/`XEpoch` (x values as seconds since a UTC epoch
+base → calendar ticks), and the gesture calls `RangeSliderHit`,
+`DragXWindow`, `JumpXWindow`, `PanXWindow`, `ZoomXWindow`, `ShiftXWindow`
+(see `window.go`). Interactive teaplot wiring is not built in yet — forward
+mouse events to these calls from your `Update`.
+
 Zero-option calls reproduce the Python binding's defaults exactly (palette
 auto-assignment included), and error messages are byte-identical across
 bindings.

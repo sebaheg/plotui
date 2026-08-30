@@ -40,6 +40,7 @@ fn demo_3d() -> Plot {
         vec![[0.0, 0.0, 0.0], [1.0, 2.0, 3.0], [-2.0, 1.0, -1.0], [3.0, -1.0, 2.0]],
         [230, 60, 120],
         3.0,
+        None,
     );
     p
 }
@@ -117,7 +118,12 @@ fn pitch_is_a_turntable_orbit_never_a_sideways_tumble() {
     // rotation order used to tumble the scene around the data x-axis, which
     // skewed vertical drags sideways at nonzero yaw.)
     let mut p = Plot::new();
-    p.add_scatter3d(vec![[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [1.0, 0.0, 1.0]], [255, 0, 0], 2.0);
+    p.add_scatter3d(
+        vec![[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [1.0, 0.0, 1.0]],
+        [255, 0, 0],
+        2.0,
+        None,
+    );
     for yaw in [-0.9, 0.0, 0.6, 2.3] {
         p.camera.reset();
         p.camera.rotate(yaw - p.camera.yaw, 0.0);
@@ -476,7 +482,16 @@ fn demo_graph() -> (Plot, Vec<[f32; 3]>, Vec<(u32, u32)>) {
     let nodes = vec![[0.0, 0.0, 0.0], [5.0, 5.0, 5.0], [-5.0, -5.0, -5.0], [5.0, -5.0, 0.0]];
     let edges = vec![(0u32, 1u32), (1, 2), (0, 3)];
     let mut p = Plot::new();
-    p.add_graph3d(nodes.clone(), vec![[200, 100, 100]; 4], edges.clone(), 3.0, None, None, None);
+    p.add_graph3d(
+        nodes.clone(),
+        vec![[200, 100, 100]; 4],
+        edges.clone(),
+        3.0,
+        None,
+        None,
+        None,
+        None,
+    );
     (p, nodes, edges)
 }
 
@@ -562,6 +577,7 @@ fn edge_flat_index_counts_invalid_edges_too() {
         None,
         None,
         None,
+        None,
     );
     let found = scan_elements(&p, 300, 200);
     let edge_hits: Vec<usize> = found
@@ -592,7 +608,7 @@ fn pan_scale_keeps_a_panned_view_centered_across_resolutions() {
     // between full-res and half-res-with-pan_scale (that's what stops the
     // plot from jumping when interaction toggles resolution).
     let mut p = Plot::new();
-    p.add_scatter3d(vec![[0.0, 0.0, 0.0]], [255, 0, 0], 3.0);
+    p.add_scatter3d(vec![[0.0, 0.0, 0.0]], [255, 0, 0], 3.0, None);
     p.camera.pan(40.0, -25.0);
 
     let centroid = |fb: &Framebuffer| -> (f64, f64) {
@@ -615,8 +631,8 @@ fn pan_scale_keeps_a_panned_view_centered_across_resolutions() {
 fn node_count_spans_all_traces() {
     let mut p = Plot::new();
     assert_eq!(p.node_count(), 0);
-    p.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [1, 2, 3], 1.0);
-    p.add_graph3d(vec![[0.0; 3]; 3], vec![[9, 9, 9]; 3], vec![(0, 1)], 1.0, None, None, None);
+    p.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [1, 2, 3], 1.0, None);
+    p.add_graph3d(vec![[0.0; 3]; 3], vec![[9, 9, 9]; 3], vec![(0, 1)], 1.0, None, None, None, None);
     assert_eq!(p.node_count(), 5);
 }
 
@@ -667,11 +683,11 @@ fn incremental_build_hash_equals_one_shot_3d() {
         .collect();
 
     let mut whole = Plot::new();
-    whole.add_scatter3d(pts.clone(), [230, 60, 120], 3.0);
+    whole.add_scatter3d(pts.clone(), [230, 60, 120], 3.0, None);
     whole.add_line3d(pts.clone(), [69, 200, 209], 2.0, Some("path".into()));
 
     let mut inc = Plot::new();
-    let s = inc.add_scatter3d(pts[..10].to_vec(), [230, 60, 120], 3.0);
+    let s = inc.add_scatter3d(pts[..10].to_vec(), [230, 60, 120], 3.0, None);
     let l = inc.add_line3d(pts[..4].to_vec(), [69, 200, 209], 2.0, Some("path".into()));
     inc.extend_pts(s, &pts[10..]).unwrap();
     inc.extend_pts(l, &pts[4..20]).unwrap();
@@ -755,11 +771,11 @@ fn hidden_trace_renders_like_never_added_3d() {
     let far: Vec<[f32; 3]> = vec![[8.0, 8.0, 8.0], [-8.0, -8.0, -8.0]];
 
     let mut bare = Plot::new();
-    bare.add_scatter3d(near.clone(), [230, 60, 120], 3.0);
+    bare.add_scatter3d(near.clone(), [230, 60, 120], 3.0, None);
 
     let mut toggled = Plot::new();
-    toggled.add_scatter3d(near.clone(), [230, 60, 120], 3.0);
-    let h = toggled.add_scatter3d(far.clone(), [69, 200, 209], 3.0);
+    toggled.add_scatter3d(near.clone(), [230, 60, 120], 3.0, None);
+    let h = toggled.add_scatter3d(far.clone(), [69, 200, 209], 3.0, None);
     toggled.set_visible(h, false).unwrap();
     assert_eq!(hash(&toggled.render(200, 140)), hash(&bare.render(200, 140)));
 }
@@ -769,8 +785,8 @@ fn hidden_trace_keeps_flat_slots() {
     let a_pts: Vec<[f32; 3]> = vec![[-4.0, 0.0, 0.0], [-4.0, 2.0, 0.0]];
     let b_nodes: Vec<[f32; 3]> = vec![[4.0, 0.0, 0.0], [4.0, 2.0, 0.0]];
     let mut p = Plot::new();
-    let a = p.add_scatter3d(a_pts, [230, 60, 120], 3.0);
-    p.add_graph3d(b_nodes, vec![[69, 200, 209]; 2], vec![(0, 1)], 3.0, None, None, None);
+    let a = p.add_scatter3d(a_pts, [230, 60, 120], 3.0, None);
+    p.add_graph3d(b_nodes, vec![[69, 200, 209]; 2], vec![(0, 1)], 3.0, None, None, None, None);
     // Pin the projection so hiding A cannot move B's nodes on screen.
     p.bounds_override = Some(([-5.0, -1.0, -1.0], [5.0, 3.0, 1.0]));
 
@@ -792,15 +808,15 @@ fn extend_remaps_selection() {
     let extra = [[0.5, 1.0, 0.5]];
 
     let mut inc = Plot::new();
-    let ha = inc.add_scatter3d(a.clone(), [230, 60, 120], 3.0);
-    inc.add_scatter3d(b.clone(), [69, 200, 209], 3.0);
+    let ha = inc.add_scatter3d(a.clone(), [230, 60, 120], 3.0, None);
+    inc.add_scatter3d(b.clone(), [69, 200, 209], 3.0, None);
     inc.selected = Some(Element::Node(2)); // first node of B
     inc.extend_pts(ha, &extra).unwrap();
     assert_eq!(inc.selected, Some(Element::Node(3)), "selection follows the shifted flat index");
 
     let mut whole = Plot::new();
-    whole.add_scatter3d([a.as_slice(), &extra].concat(), [230, 60, 120], 3.0);
-    whole.add_scatter3d(b, [69, 200, 209], 3.0);
+    whole.add_scatter3d([a.as_slice(), &extra].concat(), [230, 60, 120], 3.0, None);
+    whole.add_scatter3d(b, [69, 200, 209], 3.0, None);
     whole.selected = Some(Element::Node(3));
     assert_eq!(hash(&whole.render(200, 140)), hash(&inc.render(200, 140)));
 }
@@ -808,9 +824,17 @@ fn extend_remaps_selection() {
 #[test]
 fn extend_and_visibility_error_paths() {
     let mut p = Plot::new();
-    let s3 = p.add_scatter3d(vec![[0.0, 0.0, 0.0]], [230, 60, 120], 3.0);
-    let g =
-        p.add_graph3d(vec![[1.0, 1.0, 1.0]], vec![[69, 200, 209]], vec![], 3.0, None, None, None);
+    let s3 = p.add_scatter3d(vec![[0.0, 0.0, 0.0]], [230, 60, 120], 3.0, None);
+    let g = p.add_graph3d(
+        vec![[1.0, 1.0, 1.0]],
+        vec![[69, 200, 209]],
+        vec![],
+        3.0,
+        None,
+        None,
+        None,
+        None,
+    );
     let sf =
         p.add_surface3d(vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0; 4], [1, 2, 3], None, false, None);
     let l2 = p.add_line2d(vec![0.0], vec![0.0], PALETTE[0], 2.0, None, YAxis::Primary);
@@ -833,7 +857,7 @@ fn extend_survives_degenerate_frames() {
     p.render(120, 80);
 
     let mut q = Plot::new();
-    let s = q.add_scatter3d(vec![], [230, 60, 120], 3.0);
+    let s = q.add_scatter3d(vec![], [230, 60, 120], 3.0, None);
     q.extend_pts(s, &[[f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]]).unwrap();
     q.render(1, 1);
     q.render(120, 80);
@@ -857,4 +881,466 @@ fn direct_trace_push_falls_back_without_panicking() {
     let fb = p.render(160, 120);
     assert!(has_color(&fb, [1, 2, 3]), "directly pushed trace still draws");
     assert_eq!(p.node_count(), 0);
+}
+
+// --- the 2D x window ---
+
+/// A quiet sine over x 0..=10, then a 1000-scale burst over 11..=20: windowed
+/// to the quiet stretch, y must rescale to it or the sine is a flat sliver.
+fn quiet_then_burst() -> Plot {
+    let xs: Vec<f32> = (0..=20).map(|i| i as f32).collect();
+    let ys: Vec<f32> =
+        xs.iter().map(|x| if *x <= 10.0 { (x * 0.9).sin() } else { 1000.0 }).collect();
+    let mut p = Plot::new();
+    p.add_line2d(xs, ys, PALETTE[0], 2.0, Some("signal".into()), YAxis::Primary);
+    p
+}
+
+#[test]
+fn x_window_changes_the_2d_frame() {
+    let mut p = demo_2d();
+    let before = hash(&p.render(400, 240));
+    p.x_window = Some((5.0, 12.0));
+    assert_ne!(hash(&p.render(400, 240)), before);
+    p.x_window = None;
+    assert_eq!(hash(&p.render(400, 240)), before, "clearing the window restores the frame");
+}
+
+#[test]
+fn x_window_autoscales_y_to_visible_points() {
+    let mut p = quiet_then_burst();
+    p.x_window = Some((0.0, 10.0));
+    let fb = p.render(400, 240);
+    let ys: Vec<usize> = drawn_pixels(&fb)
+        .into_iter()
+        .filter(|(_, _, c)| *c == PALETTE[0])
+        .map(|(_, y, _)| y)
+        .collect();
+    let extent = ys.iter().max().unwrap() - ys.iter().min().unwrap();
+    assert!(extent > fb.h / 3, "windowed sine spans only {extent}px — y did not rescale");
+}
+
+#[test]
+fn x_window_supersedes_camera() {
+    let mut p = demo_2d();
+    p.x_window = Some((3.0, 15.0));
+    let windowed = hash(&p.render(400, 240));
+    p.camera.zoom_by(2.5);
+    p.camera.pan(80.0, -40.0);
+    assert_eq!(hash(&p.render(400, 240)), windowed, "camera must not move a windowed view");
+}
+
+#[test]
+fn x_window_right_axes_scale_independently() {
+    let mut p = demo_2r();
+    p.x_window = Some((0.0, 10.0));
+    let fb = p.render(400, 240);
+    let x1 = frame_x1(&fb);
+    for color in [PALETTE[0], PALETTE[1], PALETTE[2]] {
+        let ys: Vec<usize> = drawn_pixels(&fb)
+            .into_iter()
+            .filter(|(x, _, c)| *x < x1 && *c == color)
+            .map(|(_, y, _)| y)
+            .collect();
+        let extent = ys.iter().max().unwrap() - ys.iter().min().unwrap();
+        assert!(extent > fb.h / 3, "windowed series {color:?} spans only {extent}px");
+    }
+}
+
+#[test]
+fn x_window_never_bleeds_into_the_margins() {
+    // An extreme ratio: 10k points, a window covering one thousandth of them.
+    // Guards both the gutters and the pre-clip draw cost (unclipped, this
+    // render would stamp millions of rejected pixels).
+    let xs: Vec<f32> = (0..=10_000).map(|i| i as f32).collect();
+    let ys: Vec<f32> = xs.iter().map(|x| (x * 0.01).sin() * 5.0).collect();
+    let bh: Vec<f32> = xs.iter().map(|x| (x * 0.003).cos().abs()).collect();
+    let mut p = Plot::new();
+    p.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, None, YAxis::Primary);
+    p.add_scatter2d(xs.clone(), ys, PALETTE[1], 2.5, None, YAxis::Primary);
+    p.add_bar2d(xs, bh, PALETTE[2], None, YAxis::Y2);
+    p.x_window = Some((5000.0, 5010.0));
+    let fb = p.render(400, 240);
+    let x1 = frame_x1(&fb);
+    for (x, _, c) in drawn_pixels(&fb) {
+        // Y2's tick labels are tinted PALETTE[2] and live beyond the rule by
+        // design, so only its left-margin side is asserted.
+        if c == PALETTE[0] || c == PALETTE[1] {
+            assert!(x > 20 && x <= x1 + 1, "series pixel leaked to x={x} (rule at {x1})");
+        } else if c == PALETTE[2] {
+            assert!(x > 20, "bar pixel leaked into the left margin at x={x}");
+        }
+    }
+}
+
+#[test]
+fn x_window_with_no_visible_points_falls_back() {
+    // Unnamed trace: a legend swatch would otherwise count as a data pixel.
+    let xs: Vec<f32> = (0..=20).map(|i| i as f32).collect();
+    let ys: Vec<f32> = xs.iter().map(|x| (x * 0.5).sin()).collect();
+    let mut p = Plot::new();
+    p.add_line2d(xs, ys, PALETTE[0], 2.0, None, YAxis::Primary);
+    p.x_window = Some((100.0, 101.0)); // beyond every sample
+    let fb = p.render(400, 240);
+    assert!(has_color(&fb, [70, 78, 96]), "axes still draw over an empty window");
+    assert!(!has_color(&fb, PALETTE[0]), "no data pixels for an empty window");
+}
+
+#[test]
+fn bars_straddling_the_window_keep_their_baseline() {
+    let xs: Vec<f32> = (0..10).map(|i| i as f32).collect();
+    let hs: Vec<f32> = xs.iter().map(|x| x + 1.0).collect();
+    let mut p = Plot::new();
+    p.add_bar2d(xs, hs, PALETTE[3], None, YAxis::Primary);
+    p.x_window = Some((2.5, 4.5)); // cuts through the bars at 2, 3, 4, 5
+    let fb = p.render(400, 240);
+    let cols: Vec<usize> = drawn_pixels(&fb)
+        .into_iter()
+        .filter(|(_, _, c)| *c == PALETTE[3])
+        .map(|(x, _, _)| x)
+        .collect();
+    assert!(!cols.is_empty(), "straddling bars still draw");
+    for x in cols {
+        assert!(x > 20, "bar pixel leaked into the margin at x={x}");
+    }
+}
+
+#[test]
+fn extend_does_not_move_x_window() {
+    let mut p = demo_2d();
+    p.x_window = Some((0.0, 10.0));
+    let before = hash(&p.render(400, 240));
+    p.extend_xy(0, &[30.0, 31.0], &[900.0, 901.0]).unwrap();
+    assert_eq!(
+        hash(&p.render(400, 240)),
+        before,
+        "appending off-window points must not change a windowed frame"
+    );
+}
+
+// --- the range-slider strip ---
+
+/// A trace color at 40% — must mirror `shade(c, 0.4)` in the engine.
+fn dim(c: [u8; 3]) -> [u8; 3] {
+    c.map(|v| (v as f32 * 0.4).clamp(0.0, 255.0) as u8)
+}
+
+/// Rows in the frame's bottom half whose frame-colored pixels span most of
+/// the width — the x-axis rule, plus the strip's top and bottom borders when
+/// the range slider is active. The structural sibling of `frame_x1`.
+fn long_frame_rows(fb: &Framebuffer) -> Vec<usize> {
+    let mut runs = vec![0usize; fb.h];
+    for (_, y, c) in drawn_pixels(fb) {
+        if c == [70, 78, 96] {
+            runs[y] += 1;
+        }
+    }
+    (fb.h / 2..fb.h).filter(|y| runs[*y] > fb.w / 3).collect()
+}
+
+#[test]
+fn range_slider_reserves_a_bottom_strip() {
+    let mut p = demo_2d();
+    let plain_rows = long_frame_rows(&p.render(400, 240));
+    p.range_slider = true;
+    let fb = p.render(400, 240);
+    let rows = long_frame_rows(&fb);
+    assert!(
+        rows.len() >= plain_rows.len() + 2,
+        "expected the strip's two borders below the axis, got rows {rows:?} vs {plain_rows:?}"
+    );
+    // The strip sits below the x-axis rule, near the frame's bottom edge.
+    assert!(*rows.last().unwrap() > fb.h - 10, "strip must hug the bottom edge");
+}
+
+#[test]
+fn range_slider_dims_outside_the_window() {
+    let mut p = demo_2d();
+    p.range_slider = true;
+    // No window: the full-color pass repaints the whole strip, no dim shows.
+    let fb = p.render(400, 240);
+    assert!(!has_color(&fb, dim(PALETTE[0])), "windowless strip must be full-color");
+    // Windowed: outside the selection stays dim, inside is full color.
+    p.x_window = Some((5.0, 10.0));
+    let fb = p.render(400, 240);
+    assert!(has_color(&fb, dim(PALETTE[0])), "off-window overview must be dimmed");
+    assert!(has_color(&fb, PALETTE[0]), "in-window overview keeps the trace color");
+}
+
+#[test]
+fn no_range_slider_is_byte_identical() {
+    let mut p = demo_2d();
+    let before = hash(&p.render(400, 240));
+    p.range_slider = true;
+    assert_ne!(hash(&p.render(400, 240)), before, "the strip must change pixels");
+    p.range_slider = false;
+    assert_eq!(hash(&p.render(400, 240)), before, "disabling must restore the frame");
+}
+
+#[test]
+fn range_slider_ignored_by_3d_plots() {
+    let mut p = demo_3d();
+    let before = hash(&p.render(320, 200));
+    p.range_slider = true;
+    p.x_window = Some((0.0, 1.0));
+    assert_eq!(hash(&p.render(320, 200)), before);
+    assert_eq!(p.range_slider_hit(320, 200, 160.0, 190.0, 8.0), None);
+    assert!(!p.drag_x_window(320, 200, plotui_core::RangeHit::Window, 10.0));
+}
+
+#[test]
+fn range_slider_drops_on_short_frames() {
+    let mut p = demo_2d();
+    let before = hash(&p.render(400, 120));
+    p.range_slider = true;
+    assert_eq!(hash(&p.render(400, 120)), before, "short frames must drop the strip");
+    assert_eq!(p.range_slider_hit(400, 120, 200.0, 110.0, 8.0), None);
+}
+
+#[test]
+fn hidden_traces_absent_from_strip() {
+    let mut p = Plot::new();
+    let xs: Vec<f32> = (0..=20).map(|i| i as f32).collect();
+    p.add_line2d(xs.clone(), xs.clone(), PALETTE[0], 2.0, None, YAxis::Primary);
+    let h = p.add_line2d(
+        xs.iter().map(|x| x + 0.5).collect(),
+        xs,
+        PALETTE[1],
+        2.0,
+        None,
+        YAxis::Primary,
+    );
+    p.range_slider = true;
+    p.x_window = Some((5.0, 10.0));
+    p.set_visible(h, false).unwrap();
+    let fb = p.render(400, 240);
+    assert!(!has_color(&fb, PALETTE[1]), "hidden trace in the strip");
+    assert!(!has_color(&fb, dim(PALETTE[1])), "hidden trace in the dim pass");
+}
+
+// --- range-slider hit testing and drags ---
+
+use plotui_core::{RangeHit, MIN_WINDOW_FRAC};
+
+/// demo_2d with the slider on, at 400x240 (s = 1): strip rows ~212..236.
+fn slider_plot() -> Plot {
+    let mut p = demo_2d();
+    p.range_slider = true;
+    p
+}
+
+#[test]
+fn range_hit_zones_prioritize_handles() {
+    let mut p = slider_plot();
+    p.x_window = Some((5.0, 15.0)); // data 0..=20: window in the middle
+    let sy = 224.0; // inside the strip
+                    // Way off the strip: nothing.
+    assert_eq!(p.range_slider_hit(400, 240, 200.0, 100.0, 4.0), None);
+    // The window body sits between the handles.
+    let mid = p.range_slider_hit(400, 240, 200.0, sy, 4.0);
+    assert_eq!(mid, Some(RangeHit::Window));
+    // Left of the window: track; and hugging the frame's left rule: still on it.
+    assert_eq!(p.range_slider_hit(400, 240, 60.0, sy, 4.0), Some(RangeHit::Track));
+    // Sweep to find the handle columns, and check they beat Window/Track.
+    let hits: Vec<Option<RangeHit>> =
+        (40..390).map(|x| p.range_slider_hit(400, 240, x as f32, sy, 4.0)).collect();
+    assert!(hits.contains(&Some(RangeHit::LeftHandle)));
+    assert!(hits.contains(&Some(RangeHit::RightHandle)));
+    let order: Vec<RangeHit> = hits.into_iter().flatten().collect();
+    let first_left = order.iter().position(|h| *h == RangeHit::LeftHandle).unwrap();
+    let first_right = order.iter().position(|h| *h == RangeHit::RightHandle).unwrap();
+    assert!(first_left < first_right, "left handle must come before right");
+}
+
+#[test]
+fn drag_clamps_to_extent_and_min_width() {
+    let mut p = slider_plot();
+    p.x_window = Some((5.0, 15.0));
+    // Slam the left handle far right: it stops at min width from the right edge.
+    assert!(p.drag_x_window(400, 240, RangeHit::LeftHandle, 10_000.0));
+    let (lo, hi) = p.x_window.unwrap();
+    assert_eq!(hi, 15.0, "right edge must not move under a left-handle drag");
+    let full_span = {
+        let mut q = slider_plot();
+        assert!(q.drag_x_window(400, 240, RangeHit::RightHandle, 0.0) || q.x_window.is_some());
+        let (flo, fhi) = q.x_window.unwrap();
+        fhi - flo
+    };
+    assert!(hi - lo >= full_span * MIN_WINDOW_FRAC * 0.999, "window collapsed below min width");
+    // Slam the whole window far left: span preserved, pinned to the extent.
+    let mut p = slider_plot();
+    p.x_window = Some((5.0, 15.0));
+    assert!(p.drag_x_window(400, 240, RangeHit::Window, -10_000.0));
+    let (lo2, hi2) = p.x_window.unwrap();
+    assert!((hi2 - lo2 - 10.0).abs() < 1e-6, "span must be preserved");
+    assert!(lo2 < 5.0, "window must have slid left");
+}
+
+#[test]
+fn drag_with_no_window_starts_from_full_extent() {
+    let mut p = slider_plot();
+    assert_eq!(p.x_window, None);
+    // Dragging the right handle inward from "everything" starts windowing.
+    assert!(p.drag_x_window(400, 240, RangeHit::RightHandle, -60.0));
+    let (lo, hi) = p.x_window.unwrap();
+    assert!(lo < 0.0, "left edge stays at the padded full extent");
+    assert!(hi < 20.0, "right edge must have moved in");
+}
+
+#[test]
+fn jump_centers_the_window() {
+    let mut p = slider_plot();
+    p.x_window = Some((0.0, 4.0));
+    // Click the track around the strip's midpoint: window keeps its span and
+    // re-centers near the middle of the data.
+    assert!(p.jump_x_window(400, 240, 220.0));
+    let (lo, hi) = p.x_window.unwrap();
+    assert!((hi - lo - 4.0).abs() < 1e-6, "span must be preserved");
+    assert!(lo > 4.0 && hi < 20.0, "window must have jumped toward the click, got ({lo}, {hi})");
+}
+
+#[test]
+fn zoom_x_window_pins_the_cursor_x() {
+    let mut p = slider_plot();
+    p.x_window = Some((0.0, 20.0));
+    // The data x under the cursor before the zoom is still under it after.
+    let px = 250.0f32;
+    let (lo0, hi0) = p.x_window.unwrap();
+    assert!(p.zoom_x_window(400, 240, px, 2.0));
+    let (lo1, hi1) = p.x_window.unwrap();
+    assert!(hi1 - lo1 < (hi0 - lo0) * 0.75, "zoom in must shrink the span");
+    assert!(lo1 > lo0 && hi1 < hi0, "new window must nest inside the old one");
+}
+
+#[test]
+fn pan_x_window_requires_a_window() {
+    let mut p = slider_plot();
+    assert!(!p.pan_x_window(400, 240, 50.0), "no window, nothing to pan");
+    p.x_window = Some((5.0, 15.0));
+    assert!(p.pan_x_window(400, 240, 50.0));
+    let (lo, _) = p.x_window.unwrap();
+    assert!(lo < 5.0, "dragging right must move the view left (grab the data)");
+}
+
+// --- the time axis ---
+
+#[test]
+fn epoch_axis_labels_are_dates_not_scientific() {
+    // A week of daily samples, x as offsets from a midnight base. Without
+    // x_epoch these xs would label numerically; with it, calendar dates.
+    let base = plotui_core::days_from_civil(2026, 3, 10) as f64 * 86_400.0;
+    let xs: Vec<f32> = (0..=7).map(|d| (d * 86_400) as f32).collect();
+    let ys: Vec<f32> = xs.iter().map(|x| (x / 40_000.0).sin()).collect();
+    let mut p = Plot::new();
+    p.add_line2d(xs, ys, PALETTE[0], 2.0, None, YAxis::Primary);
+    let plain = hash(&p.render(400, 240));
+    p.x_epoch = Some(base);
+    let dated = p.render(400, 240);
+    assert_ne!(hash(&dated), plain, "date labels must change the frame");
+    assert!(has_color(&dated, [150, 156, 170]), "tick labels still present");
+    // The crosshair header formats a date on time axes (drawing must not panic
+    // and must change pixels vs. the un-hovered dated frame).
+    p.hover2d_px = Some(200.0);
+    assert_ne!(hash(&p.render(400, 240)), hash(&dated));
+}
+
+// --- graph mutators: set_graph_positions / set_graph_colors / extend_graph ---
+
+fn graph_at(pts: &[[f32; 3]], edges: &[(u32, u32)]) -> (Plot, usize) {
+    let mut p = Plot::new();
+    let h = p.add_graph3d(
+        pts.to_vec(),
+        vec![[200, 120, 90]; pts.len()],
+        edges.to_vec(),
+        3.0,
+        None,
+        None,
+        None,
+        None,
+    );
+    (p, h)
+}
+
+#[test]
+fn set_graph_positions_renders_like_one_shot() {
+    let edges = [(0u32, 1), (1, 2)];
+    let target = [[0.5, 0.0, -0.5], [-0.5, 0.5, 0.0], [0.0, -0.5, 0.5]];
+    // Start WIDER than the target, so a stale (widen-only) bounds cache
+    // would keep the old frame and the hashes would differ.
+    let wide = [[5.0, 0.0, -5.0], [-5.0, 5.0, 0.0], [0.0, -5.0, 5.0]];
+    let (oneshot, _) = graph_at(&target, &edges);
+    let (mut moved, h) = graph_at(&wide, &edges);
+    moved.set_graph_positions(h, target.to_vec()).unwrap();
+    assert_eq!(
+        hash(&moved.render(300, 200)),
+        hash(&oneshot.render(300, 200)),
+        "moved graph must render exactly like one built in place (bounds must shrink)"
+    );
+}
+
+#[test]
+fn set_graph_colors_recolors_and_restores() {
+    let pts = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
+    let (mut p, h) = graph_at(&pts, &[(0, 1)]);
+    p.show_box = false;
+    let before = hash(&p.render(200, 150));
+    p.set_graph_colors(h, vec![[9, 250, 9]; 2], Some(vec![[250, 9, 9]])).unwrap();
+    let lit = p.render(200, 150);
+    assert!(has_color(&lit, [9, 250, 9]), "new node color must reach the pixels");
+    assert_ne!(hash(&lit), before);
+    p.set_graph_colors(h, vec![[200, 120, 90]; 2], None).unwrap();
+    assert_eq!(hash(&p.render(200, 150)), before, "restore must be exact");
+}
+
+#[test]
+fn extend_graph_renders_like_one_shot_and_keeps_flat_slots() {
+    let base = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let extra = [[0.0, 1.0, 0.0]];
+    let all: Vec<[f32; 3]> = base.iter().chain(&extra).copied().collect();
+    let (oneshot, _) = graph_at(&all, &[(0, 1), (1, 2)]);
+    let (mut inc, h) = graph_at(&base, &[(0, 1)]);
+    inc.extend_graph(h, &extra, &[[200, 120, 90]], &[(1, 2)]).unwrap();
+    assert_eq!(
+        hash(&inc.render(300, 200)),
+        hash(&oneshot.render(300, 200)),
+        "append must render exactly like a one-shot build"
+    );
+    // Selection on a LATER trace's node survives the append: a graph that is
+    // not the last node-bearing trace shifts downstream flat indices, and
+    // the plot remaps its own selection.
+    let mut p = Plot::new();
+    let g = p.add_graph3d(
+        base.to_vec(),
+        vec![[200, 120, 90]; 2],
+        vec![(0, 1)],
+        3.0,
+        None,
+        None,
+        None,
+        None,
+    );
+    p.add_scatter3d(vec![[2.0, 2.0, 2.0]], [50, 60, 70], 3.0, None);
+    p.bounds_override = Some(([-1.0; 3], [3.0; 3]));
+    p.selected = Some(Element::Node(2)); // the scatter's point
+    p.hovered = Some(Element::Edge(0));
+    p.extend_graph(g, &extra, &[[200, 120, 90]], &[(1, 2)]).unwrap();
+    assert_eq!(p.selected, Some(Element::Node(3)), "downstream node index remapped");
+    assert_eq!(p.hovered, Some(Element::Edge(0)), "edge before the append keeps its index");
+}
+
+#[test]
+fn graph_mutator_error_paths() {
+    let (mut p, h) = graph_at(&[[0.0; 3], [1.0; 3]], &[(0, 1)]);
+    let s = p.add_scatter3d(vec![[0.0; 3]], [1, 2, 3], 1.0, None);
+    assert_eq!(p.set_graph_positions(99, vec![]), Err(TraceError::UnknownTrace));
+    assert_eq!(p.set_graph_positions(s, vec![[0.0; 3]]), Err(TraceError::WrongKind));
+    assert_eq!(p.set_graph_positions(h, vec![[0.0; 3]]), Err(TraceError::LengthMismatch));
+    assert_eq!(p.set_graph_colors(h, vec![[0; 3]], None), Err(TraceError::LengthMismatch));
+    assert_eq!(
+        p.set_graph_colors(h, vec![[0; 3]; 2], Some(vec![])),
+        Err(TraceError::LengthMismatch)
+    );
+    assert_eq!(p.extend_graph(s, &[], &[], &[]), Err(TraceError::WrongKind));
+    // The failed calls must not have desynced anything: a good call still works.
+    assert!(p.set_graph_positions(h, vec![[0.5; 3], [1.5; 3]]).is_ok());
 }

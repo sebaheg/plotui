@@ -7,12 +7,14 @@ Any 3D trace switches the whole plot to the orbit camera: drag rotates,
 shift-drag pans, scroll zooms, double-click resets. All 3D traces share one
 (x, y, z) space — no axis is special — with a bounding-box wireframe for
 orientation (`set_show_box(False)` hides it) and depth fog for distance
-cueing. Named 3D traces get the same legend as 2D charts.
+cueing. Named 3D traces get the same legend as 2D charts, and colors follow
+the same rules — omitted colors take colorway slots, and shorthand strings
+work everywhere (see [Colors](/docs/charts-2d#colors)).
 
 ## Scatter
 
 ```python
-plot.add_scatter3d(xs, ys, zs, color=(230, 60, 120), size=3.0)
+plot.add_scatter3d(xs, ys, zs, color=None, size=3.0, name="Cluster A")
 ```
 
 ## Graphs
@@ -28,11 +30,54 @@ plot.add_graph3d(
     edge_colors=[...],          # per edge, else dimmed endpoint blend
     node_shapes=["disc", "ring", "square", "triangle", "diamond",
                  "diamond-open", "dot"],
+    name="mesh",                # optional: puts the graph in the legend
 )
 ```
 
 Hovered nodes and edges light up white; clicks select. See
 [Interaction](/docs/interaction).
+
+### Live graphs
+
+Graphs are mutable in place, without rebuilds:
+
+```python
+plot.set_graph_positions(h, xs, ys, zs)   # move every node (per-frame call)
+plot.set_graph_colors(h, node_colors, edge_colors)  # recolor; edge_colors=None
+                                          # restores the default edge blend
+plot.extend_graph(h, xs, ys, zs,          # append nodes + edges — new nodes
+    node_colors=[...], edges=[(0, 9)])    # arrive without a rebuild
+```
+
+Structure is untouched by `set_graph_positions`/`set_graph_colors`, so node
+and edge indices — and with them hover and selection — stay valid across
+every frame. The recolor call is the highlight primitive: on hover, dim
+everything and brighten the hovered node's dependency closure, then restore.
+
+### Force-directed layout
+
+`ForceLayout` is the motion half: connected nodes attract like springs, all
+nodes repel, and a cooling temperature settles the layout. It's pure math —
+the host owns the timer:
+
+```python
+from plotui import ForceLayout, Plot
+
+lay = ForceLayout(n, edges, seed=7)       # deterministic per seed
+h = plot.add_graph3d(*lay.positions(), edges=edges)
+
+def tick():                               # ~30 Hz host timer
+    if lay.step() >= 1e-3:                # returns mean displacement;
+        plot.set_graph_positions(h, *lay.positions())  # below 1e-3 = settled
+
+idx = lay.add_node([2, 3])                # a new node flies in beside its
+plot.extend_graph(h, ...,                 # first neighbor, and the sim
+    edges=[(2, idx), (3, idx)])           # re-heats locally
+```
+
+Pin `plot.set_bounds(lo, hi)` once the rough extent is known so the frame
+doesn't re-center while the simulation runs. `plotui example deps` and
+`examples/textual_deps.py` are complete versions of this recipe.
 
 ## Lines
 

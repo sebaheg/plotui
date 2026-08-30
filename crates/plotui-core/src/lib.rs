@@ -13,11 +13,15 @@
 
 mod font;
 mod hershey;
+mod layout;
 mod ticks;
 
 pub use font::{draw_text, draw_text_aa, text_width, CHAR_H, CHAR_W};
 pub use hershey::{draw_text_hershey, hershey_text_width};
-pub use ticks::{format_tick, nice_ticks};
+pub use layout::ForceLayout;
+pub use ticks::{
+    civil_from_days, date_ticks, days_from_civil, format_datetime, format_tick, nice_ticks,
+};
 
 pub type Rgb = [u8; 3];
 
@@ -112,19 +116,60 @@ impl Colormap {
     }
 }
 
-/// Default per-trace colors, assigned in fixed order to 2D traces added without
-/// an explicit color. Stepped for dark surfaces and ordered so adjacent slots
-/// stay distinguishable under color-vision deficiency.
-pub const PALETTE: [Rgb; 8] = [
-    [57, 135, 229],  // blue
-    [25, 158, 112],  // aqua
-    [201, 133, 0],   // yellow
-    [0, 131, 0],     // green
+/// Built-in colorways: per-trace color sequences assigned in fixed order to
+/// traces added without an explicit color (`set_colorway` swaps the active
+/// one). Each is tuned for dark surfaces and ordered so adjacent slots stay
+/// distinguishable under color-vision deficiency.
+///
+/// "plotui" — the default, leading with the brand trio from every demo.
+pub const COLORWAY_PLOTUI: [Rgb; 8] = [
+    [230, 60, 120],  // pink
+    [69, 200, 209],  // cyan
+    [240, 161, 60],  // orange
     [144, 133, 233], // violet
+    [25, 158, 112],  // green
+    [201, 133, 0],   // gold
+    [57, 135, 229],  // blue
     [230, 103, 103], // red
-    [213, 81, 129],  // magenta
-    [217, 89, 38],   // orange
 ];
+
+/// "muted" — desaturated, for plots that sit behind busy chrome.
+pub const COLORWAY_MUTED: [Rgb; 8] = [
+    [196, 110, 140], // rose
+    [110, 175, 180], // teal
+    [206, 162, 110], // sand
+    [150, 143, 202], // lavender
+    [110, 160, 125], // sage
+    [172, 150, 90],  // khaki
+    [105, 140, 190], // steel
+    [150, 150, 160], // slate
+];
+
+/// "vivid" — saturated, for plots that must carry the screen.
+pub const COLORWAY_VIVID: [Rgb; 8] = [
+    [255, 30, 120],  // magenta
+    [0, 220, 230],   // aqua
+    [255, 170, 0],   // amber
+    [165, 100, 255], // purple
+    [30, 210, 90],   // green
+    [240, 220, 0],   // yellow
+    [0, 140, 255],   // azure
+    [255, 70, 60],   // red
+];
+
+/// Default per-trace colors — the "plotui" colorway.
+pub const PALETTE: [Rgb; 8] = COLORWAY_PLOTUI;
+
+/// A built-in colorway by name, or `None` for an unknown one. The valid
+/// names are "plotui", "muted", and "vivid".
+pub fn colorway_by_name(name: &str) -> Option<&'static [Rgb; 8]> {
+    match name {
+        "plotui" => Some(&COLORWAY_PLOTUI),
+        "muted" => Some(&COLORWAY_MUTED),
+        "vivid" => Some(&COLORWAY_VIVID),
+        _ => None,
+    }
+}
 
 // Chrome colors shared by the 2D and 3D paths: the frame/grid recede, ink is
 // neutral (identity lives in the marks, never in the text).
@@ -419,21 +464,83 @@ impl Camera {
 
     /// Rotate a normalized point and return (x, y, depth) in view space.
     ///
-    /// Turntable order: yaw about the world up-axis first, then pitch about
-    /// the screen x-axis — so a vertical drag changes elevation only, with no
-    /// sideways skew. (Pitch-first composition tumbled the scene around the
-    /// data x-axis, which sits diagonally on screen at nonzero yaw.)
+    /// The data frame is z-up (the scientific-plotting convention: surface
+    /// heights and scatter elevations live in z), matching the website's
+    /// hand-drawn hero. Turntable order: yaw about the data z-axis first —
+    /// a horizontal drag spins the scene like a turntable around what the
+    /// viewer sees as vertical — then pitch about the screen x-axis, so a
+    /// vertical drag changes elevation only, with no sideways skew.
+    /// (Pitch-first composition tumbled the scene around an axis that sits
+    /// diagonally on screen at nonzero yaw.)
     #[inline]
     fn view(&self, p: [f32; 3]) -> (f64, f64, f64) {
-        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+        let (x, up, depth) = (p[0] as f64, p[2] as f64, p[1] as f64);
         let (sy, cy) = self.yaw.sin_cos();
-        let x1 = x * cy + z * sy;
-        let z1 = -x * sy + z * cy;
+        let x1 = x * cy + depth * sy;
+        let z1 = -x * sy + depth * cy;
         let (sp, cp) = self.pitch.sin_cos();
-        let y2 = y * cp - z1 * sp;
-        let z2 = y * sp + z1 * cp;
+        let y2 = up * cp - z1 * sp;
+        let z2 = up * sp + z1 * cp;
         (x1, y2, z2)
     }
+}
+
+/// One camera degree of freedom a drag-gesture axis can drive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CameraControl {
+    /// Turntable spin about the data z-axis (what the viewer sees as
+    /// vertical).
+    Yaw,
+    /// Elevation tilt about the screen x-axis.
+    Pitch,
+    /// Screen-space pan, horizontal.
+    PanX,
+    /// Screen-space pan, vertical.
+    PanY,
+    /// Exponential zoom about the view center.
+    Zoom,
+    /// The gesture axis does nothing.
+    Off,
+}
+
+/// Which camera control each drag-gesture axis drives — hosts override
+/// fields on [`Plot::input_map`] to remap gestures in code. The default is
+/// the house feel: dragging rotates (horizontal orbits, vertical tilts),
+/// shift-dragging pans. A pan-first UI would set
+/// `drag_x: PanX, drag_y: PanY`; axis-swapped rotation is
+/// `drag_x: Pitch, drag_y: Yaw`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InputMap {
+    pub drag_x: CameraControl,
+    pub drag_y: CameraControl,
+    pub shift_drag_x: CameraControl,
+    pub shift_drag_y: CameraControl,
+}
+
+impl Default for InputMap {
+    fn default() -> Self {
+        Self {
+            drag_x: CameraControl::Yaw,
+            drag_y: CameraControl::Pitch,
+            shift_drag_x: CameraControl::PanX,
+            shift_drag_y: CameraControl::PanY,
+        }
+    }
+}
+
+/// Per-frontend gesture sensitivity for [`Plot::apply_drag`]: how much of
+/// each camera control one dragged input unit (a pixel, a terminal cell)
+/// applies. Pan is split per axis because terminal cells are not square.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DragScales {
+    /// Radians per unit.
+    pub rotate: f64,
+    /// Framebuffer pixels per horizontal unit.
+    pub pan_x: f64,
+    /// Framebuffer pixels per vertical unit.
+    pub pan_y: f64,
+    /// Log-zoom per unit.
+    pub zoom: f64,
 }
 
 /// Projects data points to screen space. Built once per frame (or per pick) so
@@ -520,6 +627,65 @@ impl Map2d {
     }
 }
 
+/// The solved 2D frame geometry: plot rect, per-axis maps, and ticks with
+/// their rendered labels. Produced by `Plot::layout_2d` and consumed by the
+/// renderer, so anything that must agree with what is on screen (hit tests,
+/// future overlays) derives from the same solve instead of re-deriving it.
+struct Layout2d {
+    s: i32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    map: Map2d,
+    maps_r: [Map2d; RIGHT_AXES],
+    xticks: Vec<f64>,
+    xlabels: Vec<String>,
+    yticks: Vec<f64>,
+    ystep: f64,
+    rticks: [Vec<f64>; RIGHT_AXES],
+    rsteps: [f64; RIGHT_AXES],
+    col_x: [i32; RIGHT_AXES], // label column offset from x1
+    has_right: [bool; RIGHT_AXES],
+    strip: Option<StripLayout>,
+}
+
+/// The range-slider strip's solved geometry: its rect, the full-extent
+/// overview maps (one per axis), the full x domain they cover, and the
+/// window edges in strip pixels.
+struct StripLayout {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    map: Map2d,
+    maps_r: [Map2d; RIGHT_AXES],
+    full: (f64, f64),
+    wx0: f64,
+    wx1: f64,
+}
+
+/// What `range_slider_hit` found under the pointer: a window-edge handle, the
+/// window body (drag to slide), or the track outside it (click to jump).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RangeHit {
+    LeftHandle,
+    RightHandle,
+    Window,
+    Track,
+}
+
+/// The narrowest `x_window` the drag/zoom mutators allow, as a fraction of
+/// the full x extent — a window can shrink this far and no further, so a
+/// handle drag can never collapse it into an unrecoverable sliver.
+pub const MIN_WINDOW_FRAC: f64 = 0.02;
+
+/// Range-slider strip height and activation floor, in `s`-scaled pixels: the
+/// strip drops out silently below `STRIP_MIN_H` frame height, where it would
+/// crush the plot area.
+const STRIP_H_S: i32 = 24;
+const STRIP_MIN_H: i32 = 160;
+
 /// Squared distance from screen point `(px, py)` to the segment `a`–`b`,
 /// using only the projected x/y (depth is ignored for hit testing).
 fn point_segment_d2(px: f32, py: f32, a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -594,6 +760,37 @@ fn stroke(fb: &mut Framebuffer, a: (f64, f64), b: (f64, f64), r: f32, c: Rgb) {
     }
 }
 
+/// Liang–Barsky clip of segment `a`–`b` to the box `(x0, y0, x1, y1)`;
+/// `None` when it lies fully outside. `stroke` costs a disc per pixel of
+/// projected length, so an x-windowed plot must clip segments that shoot far
+/// off screen before drawing, not after.
+fn clip_segment(
+    a: (f64, f64),
+    b: (f64, f64),
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+) -> Option<((f64, f64), (f64, f64))> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [(-dx, a.0 - x0), (dx, x1 - a.0), (-dy, a.1 - y0), (dy, y1 - a.1)] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None; // parallel and outside this edge
+            }
+            continue;
+        }
+        let t = q / p;
+        if p < 0.0 {
+            t0 = t0.max(t);
+        } else {
+            t1 = t1.min(t);
+        }
+        if t0 > t1 {
+            return None;
+        }
+    }
+    Some(((a.0 + dx * t0, a.1 + dy * t0), (a.0 + dx * t1, a.1 + dy * t1)))
+}
+
 /// Which y scale a 2D series is measured against. `Y2` and `Y3` are
 /// independent right-hand axes: each autoscales from its own traces and gets
 /// its own tick-label column (Y2 innermost, Y3 outermost). The grid always
@@ -627,6 +824,7 @@ pub enum Trace {
         pts: Vec<[f32; 3]>,
         color: Rgb,
         size: f32,
+        name: Option<String>,
     },
     Graph3d {
         nodes: Vec<[f32; 3]>,
@@ -640,6 +838,7 @@ pub enum Trace {
         edge_colors: Option<Vec<Rgb>>,
         /// Per-node marker silhouette; discs where absent.
         node_shapes: Option<Vec<Shape>>,
+        name: Option<String>,
     },
     Line3d {
         pts: Vec<[f32; 3]>,
@@ -699,12 +898,13 @@ impl Trace {
 
     fn name(&self) -> Option<&str> {
         match self {
-            Trace::Line3d { name, .. }
+            Trace::Scatter3d { name, .. }
+            | Trace::Graph3d { name, .. }
+            | Trace::Line3d { name, .. }
             | Trace::Surface3d { name, .. }
             | Trace::Scatter2d { name, .. }
             | Trace::Line2d { name, .. }
             | Trace::Bar2d { name, .. } => name.as_deref(),
-            _ => None,
         }
     }
 
@@ -781,6 +981,15 @@ pub enum Element {
     Edge(usize),
 }
 
+/// A [`Plot::pick_surface`] hit: the grid vertex's data coordinates and its
+/// projected screen position (`[x_px, y_px, depth]`, the
+/// [`Plot::project_nodes`] convention).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SurfaceHit {
+    pub data: [f32; 3],
+    pub screen: [f32; 3],
+}
+
 /// A trace's stable identity: its index in [`Plot::traces`]. Traces are never
 /// removed, so a handle can't dangle for the lifetime of its plot.
 pub type TraceId = usize;
@@ -796,6 +1005,9 @@ pub enum TraceError {
     /// The trace's shape is structural (graph edges, surface grid) and cannot
     /// be appended to; rebuild the plot instead.
     Structural,
+    /// A per-node or per-edge array does not match the trace's node/edge
+    /// count (`set_graph_positions`, `set_graph_colors`).
+    LengthMismatch,
 }
 
 impl std::fmt::Display for TraceError {
@@ -805,6 +1017,9 @@ impl std::fmt::Display for TraceError {
             TraceError::WrongKind => write!(f, "wrong trace kind for this operation"),
             TraceError::Structural => {
                 write!(f, "structural trace (graph/surface) cannot be extended")
+            }
+            TraceError::LengthMismatch => {
+                write!(f, "per-node/per-edge array length must match the trace's node/edge count")
             }
         }
     }
@@ -974,6 +1189,39 @@ pub struct Plot {
     /// with a marker per series sampled there, and a value readout box.
     /// Ignored by 3D plots.
     pub hover2d_px: Option<f32>,
+    /// Hovered surface point in data coordinates (a [`Self::pick_surface`]
+    /// hit's `data`). When set, `render_3d` draws the hover guides: a ring at
+    /// the point, its shadow on the box floor, axis-parallel guide lines from
+    /// the walls to the shadow, and a drop line connecting point to shadow.
+    /// Drawn on top of the scene (hover feedback stays visible behind
+    /// geometry). Ignored by 2D plots.
+    pub surface_hover: Option<[f32; 3]>,
+    /// Pinned surface point (click): same guides as [`Self::surface_hover`]
+    /// with the selection treatment on the ring. Survives camera changes —
+    /// hosts reproject it per frame (see [`Self::project_point`]) to anchor
+    /// a tooltip. Ignored by 2D plots.
+    pub surface_selected: Option<[f32; 3]>,
+    /// Gesture routing for [`Self::apply_drag`]: which camera control each
+    /// drag axis drives. Defaults to drag = rotate, shift-drag = pan.
+    pub input_map: InputMap,
+    /// Explicit 2D x view `(lo, hi)` in data coordinates. When set, the main
+    /// plot maps exactly this range (unpadded) to the plot area, every y axis
+    /// autoscales from the points inside it, and the camera's 2D zoom/pan is
+    /// superseded — the window *is* the view. `None` restores full-extent
+    /// autoscale. Ignored by 3D plots.
+    pub x_window: Option<(f64, f64)>,
+    /// Draw the range-slider strip: a full-extent overview under the plot
+    /// with the `x_window` selection in full color and grab handles at its
+    /// edges. Silently dropped on frames too short to fit it, and ignored by
+    /// 3D plots.
+    pub range_slider: bool,
+    /// When set, x values are seconds since this UTC epoch base: x ticks
+    /// become calendar dates ([`date_ticks`]) and the crosshair readout shows
+    /// a timestamp. The offset never enters the coordinate math — it exists
+    /// because f32 xs can't hold raw epoch seconds (a 2026 timestamp
+    /// quantizes to ~2 minutes), while offsets from a nearby base stay
+    /// second-accurate for years.
+    pub x_epoch: Option<f64>,
     /// Axis/grid/legend colours; see [`Chrome`].
     pub chrome: Chrome,
     /// Per-trace visibility + incremental bounds cache, parallel to `traces`.
@@ -982,6 +1230,9 @@ pub struct Plot {
     /// `traces` field has left it behind. Equal-length in-place mutation of
     /// `traces` is the one thing this cannot detect and is unsupported.
     meta: Vec<TraceMeta>,
+    /// Active color sequence for traces added without an explicit color.
+    /// Never empty; swapped by `set_colorway`, read by `next_color`.
+    colorway: Vec<Rgb>,
 }
 
 impl Default for Plot {
@@ -994,8 +1245,15 @@ impl Default for Plot {
             selected: None,
             hovered: None,
             hover2d_px: None,
+            surface_hover: None,
+            surface_selected: None,
+            input_map: InputMap::default(),
+            x_window: None,
+            range_slider: false,
+            x_epoch: None,
             chrome: Chrome::default(),
             meta: Vec::new(),
+            colorway: COLORWAY_PLOTUI.to_vec(),
         }
     }
 }
@@ -1034,8 +1292,14 @@ impl Plot {
         self.meta.get(i).is_none_or(|m| m.visible)
     }
 
-    pub fn add_scatter3d(&mut self, pts: Vec<[f32; 3]>, color: Rgb, size: f32) -> TraceId {
-        self.push_trace(Trace::Scatter3d { pts, color, size })
+    pub fn add_scatter3d(
+        &mut self,
+        pts: Vec<[f32; 3]>,
+        color: Rgb,
+        size: f32,
+        name: Option<String>,
+    ) -> TraceId {
+        self.push_trace(Trace::Scatter3d { pts, color, size, name })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1048,6 +1312,7 @@ impl Plot {
         node_sizes: Option<Vec<f32>>,
         edge_colors: Option<Vec<Rgb>>,
         node_shapes: Option<Vec<Shape>>,
+        name: Option<String>,
     ) -> TraceId {
         self.push_trace(Trace::Graph3d {
             nodes,
@@ -1057,6 +1322,7 @@ impl Plot {
             node_sizes,
             edge_colors,
             node_shapes,
+            name,
         })
     }
 
@@ -1163,6 +1429,121 @@ impl Plot {
         }
     }
 
+    /// Move every node of a graph trace at once — the per-frame call of a
+    /// force-directed layout. Structure is untouched, so flat node/edge
+    /// indices (and with them `selected`/`hovered` and any host-held
+    /// indices) stay valid. `positions.len()` must equal the node count.
+    /// O(n): bounds recompute in full, because moving nodes can shrink the
+    /// box and the incremental union only widens.
+    pub fn set_graph_positions(
+        &mut self,
+        id: TraceId,
+        positions: Vec<[f32; 3]>,
+    ) -> Result<(), TraceError> {
+        self.resync_meta();
+        let t = self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        match t {
+            Trace::Graph3d { nodes, .. } => {
+                if positions.len() != nodes.len() {
+                    return Err(TraceError::LengthMismatch);
+                }
+                *nodes = positions;
+                let visible = self.meta[id].visible;
+                self.meta[id] = compute_meta(&self.traces[id]);
+                self.meta[id].visible = visible;
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
+    /// Recolor a graph trace in place — the host-side highlight primitive
+    /// (dim everything, brighten a hovered dependency path, restore).
+    /// `node_colors.len()` must equal the node count; `edge_colors`, when
+    /// given, must have one color per edge, and `None` restores the default
+    /// dimmed endpoint-average edge color. Geometry is untouched, so no
+    /// bounds work happens.
+    pub fn set_graph_colors(
+        &mut self,
+        id: TraceId,
+        colors: Vec<Rgb>,
+        new_edge_colors: Option<Vec<Rgb>>,
+    ) -> Result<(), TraceError> {
+        self.resync_meta();
+        let t = self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        match t {
+            Trace::Graph3d { nodes, edges, node_colors, edge_colors, .. } => {
+                if colors.len() != nodes.len() {
+                    return Err(TraceError::LengthMismatch);
+                }
+                if let Some(ec) = &new_edge_colors {
+                    if ec.len() != edges.len() {
+                        return Err(TraceError::LengthMismatch);
+                    }
+                }
+                *node_colors = colors;
+                *edge_colors = new_edge_colors;
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
+    /// Append nodes and edges to a graph trace — how new nodes arrive in a
+    /// live graph without a rebuild. `new_colors` colors the appended nodes
+    /// (renderer default where missing); `new_edges` may reference old or
+    /// new node indices. Per-node `node_sizes`/`node_shapes` overrides are
+    /// not extended — appended nodes take the trace defaults. O(delta), and
+    /// the same flat-index caveat as [`Self::extend_pts`]: appending to a
+    /// graph that is not the last node-bearing trace shifts the flat indices
+    /// of every node after it (edge indices likewise); `selected`/`hovered`
+    /// are remapped here, hosts holding indices must do the same.
+    pub fn extend_graph(
+        &mut self,
+        id: TraceId,
+        new_nodes: &[[f32; 3]],
+        new_colors: &[Rgb],
+        new_edges: &[(u32, u32)],
+    ) -> Result<(), TraceError> {
+        self.resync_meta();
+        // Flat boundaries computed pre-extend: nodes at/after the end of this
+        // trace's node block move up by the node delta, edges likewise.
+        let node_boundary: usize = self.meta[..=id.min(self.meta.len().saturating_sub(1))]
+            .iter()
+            .map(|m| m.node_len)
+            .sum();
+        let edge_boundary: usize = self
+            .traces
+            .iter()
+            .take(id + 1)
+            .map(|t| match t {
+                Trace::Graph3d { edges, .. } => edges.len(),
+                _ => 0,
+            })
+            .sum();
+        let t = self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        match t {
+            Trace::Graph3d { nodes, node_colors, edges, .. } => {
+                nodes.extend_from_slice(new_nodes);
+                node_colors.extend_from_slice(new_colors);
+                edges.extend_from_slice(new_edges);
+                for el in [&mut self.selected, &mut self.hovered] {
+                    match el {
+                        Some(Element::Node(n)) if *n >= node_boundary => *n += new_nodes.len(),
+                        Some(Element::Edge(e)) if *e >= edge_boundary => *e += new_edges.len(),
+                        _ => {}
+                    }
+                }
+                let m = &mut self.meta[id];
+                b3_seen_all(&mut m.bounds, new_nodes);
+                m.node_len += new_nodes.len();
+                m.vert_len += new_nodes.len();
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
     /// Show or hide a trace. Returns whether anything changed. A hidden trace
     /// keeps everything structural — its handle, its palette slot, its flat
     /// node/edge index block, its place in `node_count`/`vertex_count` — and
@@ -1185,10 +1566,20 @@ impl Plot {
         self.node_points().iter().map(|p| pr.project(*p)).collect()
     }
 
-    /// The next default trace color: palette slots assigned in fixed order by
-    /// the number of traces already added.
+    /// The next default trace color: colorway slots assigned in fixed order
+    /// by the number of traces already added.
     pub fn next_color(&self) -> Rgb {
-        PALETTE[self.traces.len() % PALETTE.len()]
+        self.colorway[self.traces.len() % self.colorway.len()]
+    }
+
+    /// Swap the color sequence used for traces added without an explicit
+    /// color from here on; colors already resolved onto existing traces keep
+    /// their values. An empty list is ignored (the sequence must never be
+    /// empty); bindings reject it with a shared error message first.
+    pub fn set_colorway(&mut self, colors: Vec<Rgb>) {
+        if !colors.is_empty() {
+            self.colorway = colors;
+        }
     }
 
     /// Explicit color, or the next palette slot in fixed order — the shared
@@ -1482,6 +1873,101 @@ impl Plot {
         best
     }
 
+    /// The surface-grid vertex nearest to screen pixel `(px, py)` within
+    /// `radius` pixels, or `None`. Surface vertices are not node-pick targets
+    /// (their indices would shift the flat node order — see
+    /// [`Self::pick`]), so surfaces get their own hover query returning the
+    /// vertex's data coordinates instead of an index. On a near-tie between
+    /// overlapping sheets the frontmost vertex wins.
+    pub fn pick_surface(
+        &self,
+        px_w: usize,
+        px_h: usize,
+        px: f32,
+        py: f32,
+        radius: f32,
+    ) -> Option<SurfaceHit> {
+        let (pr, _, _) = self.projector(px_w, px_h, 1.0);
+        let r2 = radius * radius;
+        let mut best: Option<SurfaceHit> = None;
+        let (mut best_d2, mut best_depth) = (f32::INFINITY, f32::INFINITY);
+        for (ti, t) in self.traces.iter().enumerate() {
+            let Trace::Surface3d { xs, ys, zs, .. } = t else { continue };
+            if !self.is_visible(ti) {
+                continue;
+            }
+            for (j, &y) in ys.iter().enumerate() {
+                for (i, &x) in xs.iter().enumerate() {
+                    let Some(&z) = zs.get(j * xs.len() + i) else { continue };
+                    if !z.is_finite() {
+                        continue;
+                    }
+                    let p = [x, y, z];
+                    let s = pr.project(p);
+                    let dx = s[0] - px;
+                    let dy = s[1] - py;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 > r2 {
+                        continue;
+                    }
+                    // Nearer in 2D wins; within a pixel of a tie, nearer to
+                    // the camera wins, so a fold picks its visible sheet.
+                    if d2 + 1.0 < best_d2 || (d2 <= best_d2 + 1.0 && s[2] < best_depth) {
+                        best = Some(SurfaceHit { data: p, screen: s });
+                        best_d2 = d2;
+                        best_depth = s[2];
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Set (or clear) the hovered surface point — pass a
+    /// [`Self::pick_surface`] hit's `data`. Returns whether the value
+    /// changed, as a repaint hint.
+    pub fn set_surface_hover(&mut self, p: Option<[f32; 3]>) -> bool {
+        let changed = self.surface_hover != p;
+        self.surface_hover = p;
+        changed
+    }
+
+    /// Pin (or clear) a surface point — the click counterpart of
+    /// [`Self::set_surface_hover`]. Returns whether the value changed.
+    pub fn set_surface_selected(&mut self, p: Option<[f32; 3]>) -> bool {
+        let changed = self.surface_selected != p;
+        self.surface_selected = p;
+        changed
+    }
+
+    /// Project a data-space point with the exact projection `render` uses:
+    /// `[x_px, y_px, depth]`. Hosts anchor overlays (a pinned tooltip) with
+    /// this after camera changes.
+    pub fn project_point(&self, px_w: usize, px_h: usize, p: [f32; 3]) -> [f32; 3] {
+        let (pr, _, _) = self.projector(px_w, px_h, 1.0);
+        pr.project(p)
+    }
+
+    /// Route a drag gesture through [`Self::input_map`]. `(dx, dy)` are
+    /// pointer deltas in whatever unit `scales` is calibrated for (pixels,
+    /// cells). Sign conventions are the house defaults — dragging grabs the
+    /// camera (drag right orbits the view right), panning follows the
+    /// pointer, dragging up or left zooms in.
+    pub fn apply_drag(&mut self, dx: f64, dy: f64, shift: bool, scales: DragScales) {
+        let m = self.input_map;
+        let (cx, cy) = if shift { (m.shift_drag_x, m.shift_drag_y) } else { (m.drag_x, m.drag_y) };
+        for (control, d) in [(cx, dx), (cy, dy)] {
+            match control {
+                CameraControl::Yaw => self.camera.rotate(-d * scales.rotate, 0.0),
+                CameraControl::Pitch => self.camera.rotate(0.0, -d * scales.rotate),
+                CameraControl::PanX => self.camera.pan(d * scales.pan_x, 0.0),
+                CameraControl::PanY => self.camera.pan(0.0, d * scales.pan_y),
+                CameraControl::Zoom => self.camera.zoom_by((-d * scales.zoom).exp()),
+                CameraControl::Off => {}
+            }
+        }
+    }
+
     /// Pick whatever is under the cursor, nodes taking priority over edges
     /// (nodes are drawn on top, so this matches what the user sees).
     pub fn pick_element(
@@ -1590,7 +2076,7 @@ impl Plot {
                 continue;
             }
             match t {
-                Trace::Scatter3d { pts, color, size } => {
+                Trace::Scatter3d { pts, color, size, .. } => {
                     for p in pts {
                         let s = pr.project(*p);
                         self.draw_node(
@@ -1614,6 +2100,7 @@ impl Plot {
                     node_sizes,
                     edge_colors,
                     node_shapes,
+                    ..
                 } => {
                     // Edges first, so nodes sit on top.
                     for (k, &(a, b)) in edges.iter().enumerate() {
@@ -1778,6 +2265,75 @@ impl Plot {
                 _ => {}
             }
         }
+        // Surface plots hang a floor plane below the data box: a permanent
+        // frame outlining the x-y plane the hover/selection shadow projects
+        // onto — offset downward so the projection is visible beside the
+        // surface, never hidden under its base. A flat surface has no z-span
+        // to hang the plane from; fall back to a fraction of the wider
+        // ground extent.
+        let surface_floor = self
+            .traces
+            .iter()
+            .enumerate()
+            .any(|(ti, t)| matches!(t, Trace::Surface3d { .. }) && self.is_visible(ti))
+            .then(|| {
+                let zspan_d = hi[2] - lo[2];
+                let gap = if zspan_d > 1e-9 {
+                    0.5 * zspan_d
+                } else {
+                    0.15 * (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1e-9)
+                };
+                lo[2] - gap
+            });
+        if let Some(floor) = surface_floor {
+            if self.show_box {
+                // Scene chrome like the box wireframe: z-buffered, so the
+                // surface occludes it naturally.
+                let c00 = pr.project([lo[0], lo[1], floor]);
+                let c10 = pr.project([hi[0], lo[1], floor]);
+                let c11 = pr.project([hi[0], hi[1], floor]);
+                let c01 = pr.project([lo[0], hi[1], floor]);
+                for (a, b) in [(c00, c10), (c10, c11), (c11, c01), (c01, c00)] {
+                    fb.line(a, b, [70, 78, 96]);
+                }
+            }
+            // Hover and pinned-point guides: a ring at the point, its x-y
+            // shadow on the floor plane, guide lines from the plane's edges
+            // to the shadow parallel to the x and y axes, and the drop line
+            // connecting point to shadow. Drawn on top of the scene (the
+            // legend's trick) — transient feedback should never disappear
+            // behind a hill. The pinned point gets the selection treatment:
+            // a filled center inside the ring.
+            const GUIDE_Z: f32 = -0.9e9; // near everything, behind the legend
+            let guides = |fb: &mut Framebuffer, p: [f32; 3], selected: bool| {
+                let flat = |q: [f32; 3]| {
+                    let s = pr.project(q);
+                    [s[0], s[1], GUIDE_Z]
+                };
+                let guide: Rgb = [96, 106, 130];
+                let link: Rgb = [150, 158, 178];
+                let shadow = [p[0], p[1], floor];
+                fb.line(flat([lo[0], p[1], floor]), flat(shadow), guide);
+                fb.line(flat([p[0], lo[1], floor]), flat(shadow), guide);
+                fb.line(flat(shadow), flat(p), link);
+                let sh = flat(shadow);
+                fb.disc(sh[0], sh[1], GUIDE_Z, 2.0 * ts, link);
+                let sp = flat(p);
+                fb.mark(sp[0], sp[1], GUIDE_Z, 4.0 * ts, Shape::Ring, [245, 248, 255]);
+                if selected {
+                    fb.disc(sp[0], sp[1], GUIDE_Z, 1.6 * ts, [245, 248, 255]);
+                }
+            };
+            let finite = |p: &[f32; 3]| p.iter().all(|v| v.is_finite());
+            if let Some(p) = self.surface_selected.filter(finite) {
+                guides(&mut fb, p, true);
+            }
+            if let Some(p) = self.surface_hover.filter(finite) {
+                if Some(p) != self.surface_selected {
+                    guides(&mut fb, p, false);
+                }
+            }
+        }
         // Named 3D traces get the same legend as 2D, pulled to the front so
         // rotating geometry never cuts through it.
         let s = ((px_h as f32) / 240.0).round().clamp(1.0, 4.0) as i32;
@@ -1785,17 +2341,82 @@ impl Plot {
         fb
     }
 
+    /// A bar trace's drawn halfwidth: the cached value when the meta cache is
+    /// live (the one bounds already used, so drawn bars and ranges can never
+    /// disagree), else recomputed from the data.
+    fn bar_hw(&self, ti: usize, xs: &[f32]) -> f64 {
+        match self.meta.get(ti).map(|tm| &tm.bounds) {
+            Some(&CachedBounds::B2 { hw: Some(hw), .. }) if self.meta_synced() => hw,
+            _ => bar_halfwidth(xs) as f64,
+        }
+    }
+
     /// Data bounds over 2D traces, padded 5% per side. Bars widen the x range
     /// by their drawn width and pull their y range to the zero baseline. The x
     /// range unions every trace; each y range covers only its own axis's
-    /// traces — primary first, then one `(lo, hi)` per right axis. A future
-    /// explicit-2D-bounds API would override here, the way the 3D
-    /// `bounds_override` short-circuits `bounds`.
+    /// traces — primary first, then one `(lo, hi)` per right axis. The plot's
+    /// `x_window` overrides here, the way the 3D `bounds_override`
+    /// short-circuits `bounds`.
     #[allow(clippy::type_complexity)]
     fn bounds_2d(&self) -> (f64, f64, f64, f64, [(f64, f64); RIGHT_AXES]) {
+        self.bounds_2d_in(self.x_window)
+    }
+
+    /// `bounds_2d` over an optional explicit x range. With `xr` set, x is
+    /// returned exactly as given (the window is explicit, so no padding) and
+    /// each y axis autoscales from the points whose x falls inside it — bars
+    /// count when their drawn `[x-hw, x+hw]` span touches the window. The
+    /// per-trace bounds cache covers whole traces only, so a windowed y is
+    /// always a full scan of the visible points.
+    #[allow(clippy::type_complexity)]
+    fn bounds_2d_in(
+        &self,
+        xr: Option<(f64, f64)>,
+    ) -> (f64, f64, f64, f64, [(f64, f64); RIGHT_AXES]) {
         let (mut xlo, mut xhi) = (f64::INFINITY, f64::NEG_INFINITY);
         // Index 0 is the primary axis, then the right axes in YAxis order.
         let mut ys = [(f64::INFINITY, f64::NEG_INFINITY); 1 + RIGHT_AXES];
+        if let Some((wlo, whi)) = xr {
+            let mut seen = |lo: f64, hi: f64, y: f64, slot: usize| {
+                if lo.is_finite() && y.is_finite() && hi >= wlo && lo <= whi {
+                    ys[slot].0 = ys[slot].0.min(y);
+                    ys[slot].1 = ys[slot].1.max(y);
+                }
+            };
+            for (ti, t) in self.traces.iter().enumerate() {
+                if !self.is_visible(ti) {
+                    continue;
+                }
+                let slot = t.axis().right_index().map_or(0, |k| k + 1);
+                match t {
+                    Trace::Scatter2d { xs, ys, .. } | Trace::Line2d { xs, ys, .. } => {
+                        for i in 0..xs.len().min(ys.len()) {
+                            let x = xs[i] as f64;
+                            seen(x, x, ys[i] as f64, slot);
+                        }
+                    }
+                    Trace::Bar2d { xs, heights, .. } => {
+                        let hw = self.bar_hw(ti, xs);
+                        for i in 0..xs.len().min(heights.len()) {
+                            let (x, h) = (xs[i] as f64, heights[i] as f64);
+                            seen(x - hw, x + hw, h.min(0.0), slot);
+                            seen(x - hw, x + hw, h.max(0.0), slot);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let pad = |lo: f64, hi: f64| -> (f64, f64) {
+                if !lo.is_finite() {
+                    return (-1.0, 1.0);
+                }
+                let span = hi - lo;
+                let p = if span > 0.0 { span * 0.05 } else { 1.0 };
+                (lo - p, hi + p)
+            };
+            let (ylo, yhi) = pad(ys[0].0, ys[0].1);
+            return (wlo, whi, ylo, yhi, [pad(ys[1].0, ys[1].1), pad(ys[2].0, ys[2].1)]);
+        }
         if self.meta_synced() {
             // Union of the per-trace cached boxes — min/max is order-blind,
             // so this is bit-identical to the full scan below.
@@ -1855,15 +2476,25 @@ impl Plot {
         (xlo, xhi, ylo, yhi, [pad(ys[1].0, ys[1].1), pad(ys[2].0, ys[2].1)])
     }
 
-    fn render_2d(&self, px_w: usize, px_h: usize) -> Framebuffer {
-        let mut fb = Framebuffer::new(px_w, px_h);
-        let (w, h) = (fb.w as i32, fb.h as i32);
+    /// Solve the 2D frame: margins, plot rect, per-axis maps, ticks and their
+    /// labels. Pure with respect to the frame size, so the renderer and any
+    /// geometry consumer agree by construction.
+    fn layout_2d(&self, px_w: usize, px_h: usize) -> Layout2d {
+        // Match Framebuffer::new's 1-pixel floor so degenerate frames solve
+        // the same geometry the renderer draws into.
+        let (w, h) = (px_w.max(1) as i32, px_h.max(1) as i32);
         let s = ((h as f32) / 240.0).round().clamp(1.0, 4.0) as i32;
         let (cw, ch) = (CHAR_W * s, CHAR_H * s);
         let tick_len = 2 * s;
         let pad = 3 * s;
 
         let (dxlo, dxhi, dylo, dyhi, dright) = self.bounds_2d();
+        // The window is the view: an explicit x range and the pixel-space
+        // camera transform would fight over what `inv_x` means (a handle drag
+        // through a zoomed map lands somewhere else), so a set window
+        // supersedes the camera's 2D zoom/pan entirely.
+        let flat = Camera::default();
+        let cam = if self.x_window.is_some() { &flat } else { &self.camera };
         // A right axis exists only where a trace declared it; per-axis flags
         // drive the column layout below (y2 innermost, y3 outermost,
         // compacting so a y3-only plot uses the inner slot).
@@ -1878,11 +2509,17 @@ impl Plot {
         // depend on the visible ranges, which depend on the margins.
         let top = 2 * pad;
         let bottom = ch + tick_len + 2 * pad;
+        // The strip reserve is a pure function of `s` and `h`, decided before
+        // the margin fixed-point below — a reserve that changed inside the
+        // loop could keep it from settling in two passes.
+        let strip_on = self.range_slider && h >= STRIP_MIN_H * s;
+        let strip_h = STRIP_H_S * s;
+        let strip_reserve = if strip_on { strip_h + pad } else { 0 };
         let mut left = (8 * cw).min(w / 3);
         let mut right = 2 * pad;
         let (mut x0, mut y0, mut x1, mut y1) = (0, 0, 0, 0);
         let mut map = Map2d::default();
-        let (mut xticks, mut xstep) = (Vec::new(), 1.0);
+        let (mut xticks, mut xlabels) = (Vec::new(), Vec::<String>::new());
         let (mut yticks, mut ystep) = (Vec::new(), 1.0);
         let mut maps_r = [Map2d::default(); RIGHT_AXES];
         let mut rticks: [Vec<f64>; RIGHT_AXES] = [Vec::new(), Vec::new()];
@@ -1892,15 +2529,25 @@ impl Plot {
             x0 = left;
             y0 = top;
             x1 = (w - 1 - right).max(x0 + 4);
-            y1 = (h - 1 - bottom.min(h / 3)).max(y0 + 4);
+            y1 = (h - 1 - (bottom.min(h / 3) + strip_reserve)).max(y0 + 4);
             let rect = (x0 as f64, y0 as f64, x1 as f64, y1 as f64);
-            map = Map2d::new((dxlo, dxhi, dylo, dyhi), rect, &self.camera);
+            map = Map2d::new((dxlo, dxhi, dylo, dyhi), rect, cam);
             // Ticks cover what is actually visible after zoom/pan.
             let (vxlo, vxhi) = (map.inv_x(x0 as f64), map.inv_x(x1 as f64));
             let (vylo, vyhi) = (map.inv_y(y1 as f64), map.inv_y(y0 as f64));
             let tx = (((x1 - x0) / (10 * cw)) as usize).clamp(2, 12);
             let ty = (((y1 - y0) / (3 * ch)) as usize).clamp(2, 10);
-            (xticks, xstep) = nice_ticks(vxlo, vxhi, tx);
+            // A time axis ticks on calendar boundaries in absolute epoch
+            // seconds; positions come back to offset space for the map.
+            if let Some(base) = self.x_epoch {
+                let (abs, labels) = date_ticks(base + vxlo, base + vxhi, tx);
+                xticks = abs.into_iter().map(|t| t - base).collect();
+                xlabels = labels;
+            } else {
+                let (t, step) = nice_ticks(vxlo, vxhi, tx);
+                xlabels = t.iter().map(|v| format_tick(*v, step)).collect();
+                xticks = t;
+            }
             (yticks, ystep) = nice_ticks(vylo, vyhi, ty);
             let label_w =
                 yticks.iter().map(|v| text_width(&format_tick(*v, ystep), s)).max().unwrap_or(cw);
@@ -1912,7 +2559,7 @@ impl Plot {
                         continue;
                     }
                     let (rlo, rhi) = dright[k];
-                    maps_r[k] = Map2d::new((dxlo, dxhi, rlo, rhi), rect, &self.camera);
+                    maps_r[k] = Map2d::new((dxlo, dxhi, rlo, rhi), rect, cam);
                     let (vlo, vhi) = (maps_r[k].inv_y(y1 as f64), maps_r[k].inv_y(y0 as f64));
                     (rticks[k], rsteps[k]) = nice_ticks(vlo, vhi, ty);
                     let wk = rticks[k]
@@ -1926,12 +2573,74 @@ impl Plot {
                 right = (off - pad).min(w / 3);
             }
         }
+        // The strip sits at the very bottom, below the x tick labels, and
+        // shows the full extent whatever the window — its maps never depend
+        // on `x_window`, so drags read a stable pixel↔data scale from it.
+        let strip = if strip_on {
+            let (flo, fhi, fylo, fyhi, fright) = self.bounds_2d_in(None);
+            let sy1 = h - 1 - pad;
+            let sy0 = sy1 - strip_h;
+            let rect = (x0 as f64, sy0 as f64, x1 as f64, sy1 as f64);
+            let smap = Map2d::new((flo, fhi, fylo, fyhi), rect, &flat);
+            let mut smaps_r = [Map2d::default(); RIGHT_AXES];
+            for (k, sm) in smaps_r.iter_mut().enumerate() {
+                if has_right[k] {
+                    *sm = Map2d::new((flo, fhi, fright[k].0, fright[k].1), rect, &flat);
+                }
+            }
+            let (wx0, wx1) = match self.x_window {
+                Some((lo, hi)) => (smap.sx(lo), smap.sx(hi)),
+                None => (x0 as f64, x1 as f64),
+            };
+            Some(StripLayout {
+                x0,
+                y0: sy0,
+                x1,
+                y1: sy1,
+                map: smap,
+                maps_r: smaps_r,
+                full: (flo, fhi),
+                wx0,
+                wx1,
+            })
+        } else {
+            None
+        };
+        Layout2d {
+            s,
+            x0,
+            y0,
+            x1,
+            y1,
+            map,
+            maps_r,
+            xticks,
+            xlabels,
+            yticks,
+            ystep,
+            rticks,
+            rsteps,
+            col_x,
+            has_right,
+            strip,
+        }
+    }
+
+    fn render_2d(&self, px_w: usize, px_h: usize) -> Framebuffer {
+        let mut fb = Framebuffer::new(px_w, px_h);
+        let w = fb.w as i32;
+        let l = self.layout_2d(px_w, px_h);
+        let (s, x0, y0, x1, y1) = (l.s, l.x0, l.y0, l.x1, l.y1);
+        let (map, maps_r) = (l.map, l.maps_r);
+        let ch = CHAR_H * s;
+        let tick_len = 2 * s;
+        let pad = 3 * s;
 
         // Grid first, then data (clipped), then frame/labels, then legend:
         // ties in the z-buffer resolve to the later draw, so order is layering.
         // Horizontal lines only: the reader compares values, so y levels get
         // guides; x positions are carried by the tick labels alone.
-        for v in &yticks {
+        for v in &l.yticks {
             let py = map.sy(*v).round() as i32;
             if py > y0 && py < y1 {
                 fb.rect_fill(x0, py, x1, py, 0.0, self.chrome.grid);
@@ -1939,6 +2648,13 @@ impl Plot {
         }
 
         fb.set_clip(x0 + 1, y0 + 1, x1 - 1, y1 - 1);
+        // With an x window, the maps can throw off-window geometry thousands
+        // of pixels out; primitives iterate their pixel span before the clip
+        // rejects each write, so windowed draws pre-clip in pixel space. The
+        // box is padded by the mark radius: a mark centered just outside can
+        // still touch the plot area.
+        let win = self.x_window.is_some();
+        let pix_box = |m: f64| (x0 as f64 - m, y0 as f64 - m, x1 as f64 + m, y1 as f64 + m);
         for (ti, t) in self.traces.iter().enumerate() {
             if !self.is_visible(ti) {
                 continue;
@@ -1950,10 +2666,15 @@ impl Plot {
             };
             match t {
                 Trace::Scatter2d { xs, ys, color, size, .. } => {
+                    let r = size * s as f32;
+                    let (bx0, by0, bx1, by1) = pix_box(r as f64 + 1.0);
                     for i in 0..xs.len().min(ys.len()) {
                         let (px, py) = (m.sx(xs[i] as f64), m.sy(ys[i] as f64));
-                        if px.is_finite() && py.is_finite() {
-                            fb.disc(px as f32, py as f32, 0.0, size * s as f32, *color);
+                        if px.is_finite()
+                            && py.is_finite()
+                            && !(win && (px < bx0 || px > bx1 || py < by0 || py > by1))
+                        {
+                            fb.disc(px as f32, py as f32, 0.0, r, *color);
                         }
                     }
                 }
@@ -1966,29 +2687,41 @@ impl Plot {
                         })
                         .collect();
                     let r = (width * s as f32 * 0.5).max(0.5);
+                    let clip_box = pix_box(r as f64 + 1.0);
                     for pair in pts.windows(2) {
                         if let [Some(a), Some(b)] = pair {
-                            stroke(&mut fb, *a, *b, r, *color);
+                            if win {
+                                if let Some((ca, cb)) = clip_segment(*a, *b, clip_box) {
+                                    stroke(&mut fb, ca, cb, r, *color);
+                                }
+                            } else {
+                                stroke(&mut fb, *a, *b, r, *color);
+                            }
                         }
                     }
                 }
                 Trace::Bar2d { xs, heights, color, .. } => {
-                    // The cached width is the one bounds already used, so the
-                    // drawn bars and the padded range can never disagree.
-                    let hw = match self.meta.get(ti).map(|tm| &tm.bounds) {
-                        Some(&CachedBounds::B2 { hw: Some(hw), .. }) if self.meta_synced() => hw,
-                        _ => bar_halfwidth(xs) as f64,
-                    };
+                    let hw = self.bar_hw(ti, xs);
                     let base = m.sy(0.0);
+                    let (cx0, cy0, cx1, cy1) = pix_box(1.0);
                     for i in 0..xs.len().min(heights.len()) {
                         let (x, hgt) = (xs[i] as f64, heights[i] as f64);
                         if !x.is_finite() || !hgt.is_finite() {
                             continue;
                         }
-                        let bx0 = m.sx(x - hw).round() as i32;
-                        let bx1 = m.sx(x + hw).round() as i32;
-                        let by = m.sy(hgt).round() as i32;
-                        fb.rect_fill(bx0, by, bx1, base.round() as i32, 0.0, *color);
+                        let (mut fx0, mut fx1) = (m.sx(x - hw), m.sx(x + hw));
+                        let (mut fy0, mut fy1) = (m.sy(hgt), base);
+                        if win {
+                            if fx1 < cx0 || fx0 > cx1 {
+                                continue;
+                            }
+                            (fx0, fx1) = (fx0.max(cx0), fx1.min(cx1));
+                            (fy0, fy1) = (fy0.clamp(cy0, cy1), fy1.clamp(cy0, cy1));
+                        }
+                        let bx0 = fx0.round() as i32;
+                        let bx1 = fx1.round() as i32;
+                        let by = fy0.round() as i32;
+                        fb.rect_fill(bx0, by, bx1, fy1.round() as i32, 0.0, *color);
                     }
                 }
                 _ => {}
@@ -2003,25 +2736,24 @@ impl Plot {
         // box and anchor nothing); each column's tint says who owns it.
         fb.rect_fill(x0, y1, x1, y1, 0.0, self.chrome.frame);
         fb.rect_fill(x0, y0, x0, y1, 0.0, self.chrome.frame);
-        if has_right.iter().any(|b| *b) {
+        if l.has_right.iter().any(|b| *b) {
             fb.rect_fill(x1, y0, x1, y1, 0.0, self.chrome.frame);
         }
-        for v in &xticks {
+        for (v, label) in l.xticks.iter().zip(&l.xlabels) {
             let px = map.sx(*v).round() as i32;
             if px < x0 || px > x1 {
                 continue;
             }
-            let label = format_tick(*v, xstep);
-            let lw = text_width(&label, s);
+            let lw = text_width(label, s);
             let lx = (px - lw / 2).clamp(0, (w - lw).max(0));
-            draw_text(&mut fb, lx, y1 + tick_len + pad, &label, s, 0.0, self.chrome.ink);
+            draw_text(&mut fb, lx, y1 + tick_len + pad, label, s, 0.0, self.chrome.ink);
         }
-        for v in &yticks {
+        for v in &l.yticks {
             let py = map.sy(*v).round() as i32;
             if py < y0 || py > y1 {
                 continue;
             }
-            let label = format_tick(*v, ystep);
+            let label = format_tick(*v, l.ystep);
             let lw = text_width(&label, s);
             draw_text(
                 &mut fb,
@@ -2036,21 +2768,21 @@ impl Plot {
         // Right-axis tick labels, one column per axis, tinted to the first
         // trace on that axis — two unlabeled number columns are otherwise
         // unattributable.
-        for k in 0..RIGHT_AXES {
-            if !has_right[k] {
+        for (k, mr) in maps_r.iter().enumerate() {
+            if !l.has_right[k] {
                 continue;
             }
             let ink = self.right_axis_color(k);
-            for v in &rticks[k] {
-                let py = maps_r[k].sy(*v).round() as i32;
+            for v in &l.rticks[k] {
+                let py = mr.sy(*v).round() as i32;
                 if py < y0 || py > y1 {
                     continue;
                 }
                 draw_text(
                     &mut fb,
-                    x1 + col_x[k],
+                    x1 + l.col_x[k],
                     py - ch / 2,
-                    &format_tick(*v, rsteps[k]),
+                    &format_tick(*v, l.rsteps[k]),
                     s,
                     0.0,
                     ink,
@@ -2059,10 +2791,267 @@ impl Plot {
         }
 
         self.draw_legend(&mut fb, x0, y0, x1, s, 0.0, false);
+        if let Some(st) = &l.strip {
+            self.draw_range_slider(&mut fb, st, s);
+        }
         if let Some(hover_px) = self.hover2d_px {
             self.draw_crosshair(&mut fb, hover_px, (x0, y0, x1, y1), s, &map, &maps_r);
         }
         fb
+    }
+
+    /// The range-slider strip: a bordered full-extent overview of every
+    /// visible 2D trace, dimmed outside the `x_window` selection (no alpha in
+    /// the framebuffer, so "dim" is a solid dark repaint: one dim pass over
+    /// the whole strip, then a full-color pass clipped to the window), with
+    /// bright grab handles on the window edges.
+    fn draw_range_slider(&self, fb: &mut Framebuffer, st: &StripLayout, s: i32) {
+        let (sx0, sy0, sx1, sy1) = (st.x0, st.y0, st.x1, st.y1);
+        fb.rect_fill(sx0, sy0, sx1, sy0, 0.0, self.chrome.frame);
+        fb.rect_fill(sx0, sy1, sx1, sy1, 0.0, self.chrome.frame);
+        fb.rect_fill(sx0, sy0, sx0, sy1, 0.0, self.chrome.frame);
+        fb.rect_fill(sx1, sy0, sx1, sy1, 0.0, self.chrome.frame);
+
+        let wx0 = st.wx0.round() as i32;
+        let wx1 = st.wx1.round() as i32;
+        for pass in 0..2 {
+            if pass == 0 {
+                fb.set_clip(sx0 + 1, sy0 + 1, sx1 - 1, sy1 - 1);
+            } else {
+                let (cx0, cx1) = (wx0.max(sx0 + 1), wx1.min(sx1 - 1));
+                if cx1 < cx0 {
+                    break; // window narrower than a pixel: dim pass stands
+                }
+                fb.set_clip(cx0, sy0 + 1, cx1, sy1 - 1);
+            }
+            for (ti, t) in self.traces.iter().enumerate() {
+                if !self.is_visible(ti) {
+                    continue;
+                }
+                let m = match t.axis().right_index() {
+                    Some(k) => &st.maps_r[k],
+                    None => &st.map,
+                };
+                let tint = |c: &Rgb| if pass == 0 { shade(*c, 0.4) } else { *c };
+                match t {
+                    Trace::Scatter2d { xs, ys, color, .. } => {
+                        for i in 0..xs.len().min(ys.len()) {
+                            let (px, py) = (m.sx(xs[i] as f64), m.sy(ys[i] as f64));
+                            if px.is_finite() && py.is_finite() {
+                                fb.disc(px as f32, py as f32, 0.0, s as f32, tint(color));
+                            }
+                        }
+                    }
+                    Trace::Line2d { xs, ys, color, .. } => {
+                        let n = xs.len().min(ys.len());
+                        let mut prev: Option<(f64, f64)> = None;
+                        for i in 0..n {
+                            let (px, py) = (m.sx(xs[i] as f64), m.sy(ys[i] as f64));
+                            let cur = (px.is_finite() && py.is_finite()).then_some((px, py));
+                            if let (Some(a), Some(b)) = (prev, cur) {
+                                stroke(fb, a, b, 0.5, tint(color));
+                            }
+                            prev = cur;
+                        }
+                    }
+                    Trace::Bar2d { xs, heights, color, .. } => {
+                        let hw = self.bar_hw(ti, xs);
+                        let base = m.sy(0.0).round() as i32;
+                        for i in 0..xs.len().min(heights.len()) {
+                            let (x, hgt) = (xs[i] as f64, heights[i] as f64);
+                            if !x.is_finite() || !hgt.is_finite() {
+                                continue;
+                            }
+                            let bx0 = m.sx(x - hw).round() as i32;
+                            let bx1 = m.sx(x + hw).round() as i32;
+                            let by = m.sy(hgt).round() as i32;
+                            fb.rect_fill(bx0, by, bx1, base, 0.0, tint(color));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            fb.clear_clip();
+        }
+
+        // Handles last, so they read over both passes.
+        for wx in [wx0, wx1] {
+            let hx0 = (wx - s).max(sx0);
+            let hx1 = (wx + s - 1).min(sx1);
+            fb.rect_fill(hx0, sy0, hx1, sy1, 0.0, self.chrome.ink_bright);
+        }
+    }
+
+    /// What the range-slider strip has under `(px, py)` framebuffer pixels at
+    /// a `w`×`h` frame, within `tol_px` (handles win over the window body, the
+    /// nearer handle wins over the farther). `None` off the strip, when the
+    /// strip is inactive, and always for 3D plots. Terminal mice report per
+    /// cell, so pass at least one cell width of tolerance.
+    pub fn range_slider_hit(
+        &self,
+        px_w: usize,
+        px_h: usize,
+        px: f32,
+        py: f32,
+        tol_px: f32,
+    ) -> Option<RangeHit> {
+        if self.is_3d() {
+            return None;
+        }
+        let l = self.layout_2d(px_w, px_h);
+        let st = l.strip?;
+        let (px, py, tol) = (px as f64, py as f64, tol_px.max(0.0) as f64);
+        if py < st.y0 as f64 - tol
+            || py > st.y1 as f64 + tol
+            || px < st.x0 as f64 - tol
+            || px > st.x1 as f64 + tol
+        {
+            return None;
+        }
+        let (dl, dr) = ((px - st.wx0).abs(), (px - st.wx1).abs());
+        if dl <= tol || dr <= tol {
+            return Some(if dl <= dr { RangeHit::LeftHandle } else { RangeHit::RightHandle });
+        }
+        if px > st.wx0 && px < st.wx1 {
+            return Some(RangeHit::Window);
+        }
+        Some(RangeHit::Track)
+    }
+
+    /// Drag the grabbed strip `part` by `dx_px` framebuffer pixels: handles
+    /// resize the window (never below [`MIN_WINDOW_FRAC`] of the full
+    /// extent), the window body slides it span-preserving. A `Track` grab
+    /// slides like the body. With no window set, the drag starts from the
+    /// full extent. Returns whether the window changed (repaint needed);
+    /// `false` when the strip is inactive or the plot is 3D.
+    pub fn drag_x_window(&mut self, px_w: usize, px_h: usize, part: RangeHit, dx_px: f32) -> bool {
+        if self.is_3d() {
+            return false;
+        }
+        let l = self.layout_2d(px_w, px_h);
+        let Some(st) = l.strip else { return false };
+        let (dom_lo, dom_hi) = st.full;
+        let dx = dx_px as f64 / st.map.ax;
+        if !dx.is_finite() {
+            return false;
+        }
+        let min_w = (dom_hi - dom_lo) * MIN_WINDOW_FRAC;
+        let (lo, hi) = self.x_window.unwrap_or((dom_lo, dom_hi));
+        let new = match part {
+            RangeHit::LeftHandle => {
+                let cap = (hi - min_w).max(dom_lo);
+                ((lo + dx).clamp(dom_lo, cap), hi)
+            }
+            RangeHit::RightHandle => {
+                let floor = (lo + min_w).min(dom_hi);
+                (lo, (hi + dx).clamp(floor, dom_hi))
+            }
+            RangeHit::Window | RangeHit::Track => {
+                let (lo_d, hi_d) = (dom_lo - lo, dom_hi - hi);
+                let d = if lo_d > hi_d { 0.0 } else { dx.clamp(lo_d, hi_d) };
+                (lo + d, hi + d)
+            }
+        };
+        let changed = self.x_window != Some(new);
+        self.x_window = Some(new);
+        changed
+    }
+
+    /// Center the window on the strip position under `px` framebuffer pixels
+    /// (a click on the track), keeping its span — or a tenth of the full
+    /// extent when no window is set. Returns whether the window changed.
+    pub fn jump_x_window(&mut self, px_w: usize, px_h: usize, px: f32) -> bool {
+        if self.is_3d() {
+            return false;
+        }
+        let l = self.layout_2d(px_w, px_h);
+        let Some(st) = l.strip else { return false };
+        let (dom_lo, dom_hi) = st.full;
+        let span = match self.x_window {
+            Some((lo, hi)) => hi - lo,
+            None => (dom_hi - dom_lo) * 0.1,
+        };
+        let c = st.map.inv_x(px as f64);
+        if !c.is_finite() {
+            return false;
+        }
+        let lo = (c - span * 0.5).clamp(dom_lo, (dom_hi - span).max(dom_lo));
+        let new = Some((lo, lo + span));
+        let changed = self.x_window != new;
+        self.x_window = new;
+        changed
+    }
+
+    /// Slide a set window by a plot-area drag of `dx_px` framebuffer pixels,
+    /// at the main map's scale and grab-the-data sign (drag right, view moves
+    /// left). No-op without a window — an unwindowed 2D drag stays a camera
+    /// pan. Returns whether the window changed.
+    pub fn pan_x_window(&mut self, px_w: usize, px_h: usize, dx_px: f32) -> bool {
+        if self.is_3d() {
+            return false;
+        }
+        let Some((lo, hi)) = self.x_window else { return false };
+        let l = self.layout_2d(px_w, px_h);
+        let (dom_lo, dom_hi, ..) = self.bounds_2d_in(None);
+        let dx = -(dx_px as f64) / l.map.ax;
+        if !dx.is_finite() {
+            return false;
+        }
+        let (lo_d, hi_d) = (dom_lo - lo, dom_hi - hi);
+        let d = if lo_d > hi_d { 0.0 } else { dx.clamp(lo_d, hi_d) };
+        let new = Some((lo + d, hi + d));
+        let changed = self.x_window != new;
+        self.x_window = new;
+        changed
+    }
+
+    /// Zoom the window about the data x under `px` framebuffer pixels
+    /// (`factor > 1` narrows it — zooms in), clamped to the full extent and
+    /// [`MIN_WINDOW_FRAC`]. Starts from the full extent when no window is
+    /// set, so a scroll on an unwindowed plot begins windowing it. Returns
+    /// whether the window changed.
+    pub fn zoom_x_window(&mut self, px_w: usize, px_h: usize, px: f32, factor: f64) -> bool {
+        if self.is_3d() || !factor.is_finite() || factor <= 0.0 {
+            return false;
+        }
+        let l = self.layout_2d(px_w, px_h);
+        let (dom_lo, dom_hi, ..) = self.bounds_2d_in(None);
+        let (lo, hi) = self.x_window.unwrap_or((dom_lo, dom_hi));
+        let a = l.map.inv_x(px as f64).clamp(lo, hi);
+        if !a.is_finite() {
+            return false;
+        }
+        let min_w = (dom_hi - dom_lo) * MIN_WINDOW_FRAC;
+        let (mut nlo, mut nhi) = (a + (lo - a) / factor, a + (hi - a) / factor);
+        if nhi - nlo < min_w {
+            // Re-widen to the floor around the anchor, preserving its ratio.
+            let t = if hi > lo { (a - lo) / (hi - lo) } else { 0.5 };
+            nlo = a - min_w * t;
+            nhi = nlo + min_w;
+        }
+        nlo = nlo.max(dom_lo);
+        nhi = nhi.min(dom_hi).max((nlo + min_w).min(dom_hi));
+        let new = Some((nlo, nhi));
+        let changed = self.x_window != new;
+        self.x_window = new;
+        changed
+    }
+
+    /// Slide a set window by `frac` of its own span (positive = later x),
+    /// clamped to the full extent — the keyboard's window step, needing no
+    /// pixel geometry. No-op without a window. Returns whether it changed.
+    pub fn shift_x_window(&mut self, frac: f64) -> bool {
+        if self.is_3d() || !frac.is_finite() {
+            return false;
+        }
+        let Some((lo, hi)) = self.x_window else { return false };
+        let (dom_lo, dom_hi, ..) = self.bounds_2d_in(None);
+        let (lo_d, hi_d) = (dom_lo - lo, dom_hi - hi);
+        let d = if lo_d > hi_d { 0.0 } else { ((hi - lo) * frac).clamp(lo_d, hi_d) };
+        let new = Some((lo + d, hi + d));
+        let changed = self.x_window != new;
+        self.x_window = new;
+        changed
     }
 
     /// The 2D hover crosshair: a vertical guide at the sample x nearest the
@@ -2082,6 +3071,10 @@ impl Plot {
     ) {
         let (x0, y0, x1, y1) = rect;
         let cursor_x = map.inv_x(hover_px as f64);
+        // With an x window the nearest sample overall may sit outside it;
+        // snapping there would silently drop the crosshair (the guide bails
+        // off-rect below), so windowed snapping only considers visible xs.
+        let vis = self.x_window;
         let mut snap: Option<f32> = None;
         let mut best = f64::INFINITY;
         for (ti, t) in self.traces.iter().enumerate() {
@@ -2095,6 +3088,11 @@ impl Plot {
                 _ => continue,
             };
             for &x in xs {
+                if let Some((wlo, whi)) = vis {
+                    if (x as f64) < wlo || (x as f64) > whi {
+                        continue;
+                    }
+                }
                 let d = (x as f64 - cursor_x).abs();
                 if x.is_finite() && d < best {
                     best = d;
@@ -2153,7 +3151,10 @@ impl Plot {
                 text_width(n, s)
             }
         };
-        let header = format!("x  {}", format_value(snap as f64));
+        let header = match self.x_epoch {
+            Some(base) => format!("x  {}", format_datetime(base + snap as f64)),
+            None => format!("x  {}", format_value(snap as f64)),
+        };
         let text_w =
             rows.iter().map(|(l, _)| measure(l)).chain([measure(&header)]).max().unwrap_or(cw);
         let entry_h = ch + pad;
@@ -2328,6 +3329,7 @@ mod tests {
             vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [-1.0, 0.5, -1.0]],
             [230, 60, 120],
             3.0,
+            None,
         );
         let fb = plot.render(200, 120);
         let rgba = fb.rgba();
@@ -2347,6 +3349,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         // Project node 1 and click exactly there — pick must return index 1.
         let (pr, _, _) = plot.projector(300, 200, 1.0);
@@ -2359,7 +3362,16 @@ mod tests {
     fn project_nodes_matches_pick_geometry() {
         let mut plot = Plot::new();
         let nodes = vec![[0.0, 0.0, 0.0], [5.0, 5.0, 5.0], [-5.0, -5.0, -5.0]];
-        plot.add_graph3d(nodes, vec![[200, 100, 100]; 3], vec![(0, 1)], 3.0, None, None, None);
+        plot.add_graph3d(
+            nodes,
+            vec![[200, 100, 100]; 3],
+            vec![(0, 1)],
+            3.0,
+            None,
+            None,
+            None,
+            None,
+        );
         plot.camera.rotate(0.3, -0.2);
         plot.camera.zoom_by(1.7);
         plot.camera.pan(11.0, -6.0);
@@ -2391,6 +3403,7 @@ mod tests {
                 node_sizes,
                 None,
                 None,
+                None,
             );
             plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count()
         };
@@ -2411,6 +3424,7 @@ mod tests {
             None,
             None,
             Some(vec![shape]),
+            None,
         );
         plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count()
     }
@@ -2441,6 +3455,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             );
             plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count()
         });
@@ -2462,6 +3477,7 @@ mod tests {
                 None,
                 None,
                 Some(vec![shape]),
+                None,
             );
             plot.hovered = Some(Element::Node(0));
             let lit = plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count();
@@ -2486,7 +3502,7 @@ mod tests {
         let project = |pts: Vec<[f32; 3]>, pin: bool| {
             let mut plot = Plot::new();
             plot.show_box = false;
-            plot.add_graph3d(pts, vec![[255, 255, 255]; 2], vec![], 2.0, None, None, None);
+            plot.add_graph3d(pts, vec![[255, 255, 255]; 2], vec![], 2.0, None, None, None, None);
             plot.bounds_override = pin.then_some(frame);
             plot.project_nodes(200, 200)[0]
         };
@@ -2516,7 +3532,7 @@ mod tests {
     fn line3d_extends_bounds() {
         let project_node0 = |with_line: bool| {
             let mut plot = Plot::new();
-            plot.add_scatter3d(vec![[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]], [255, 255, 255], 2.0);
+            plot.add_scatter3d(vec![[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]], [255, 255, 255], 2.0, None);
             if with_line {
                 plot.add_line3d(vec![[8.0, 0.0, 0.0], [9.0, 0.0, 0.0]], [255, 0, 0], 1.0, None);
             }
@@ -2718,6 +3734,36 @@ mod tests {
         assert_eq!(lit(None, true), unnamed);
     }
 
+    /// `name` on scatter3d and graph3d reaches the legend the same way as
+    /// the other named traces.
+    #[test]
+    fn named_scatter3d_and_graph3d_draw_a_legend() {
+        let lit_scatter = |name: Option<String>| -> usize {
+            let mut plot = Plot::new();
+            plot.show_box = false;
+            plot.add_scatter3d(vec![[0.0, 0.0, 0.0]], [255, 0, 0], 2.0, name);
+            plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count()
+        };
+        assert!(lit_scatter(Some("clusters".into())) > lit_scatter(None));
+
+        let lit_graph = |name: Option<String>| -> usize {
+            let mut plot = Plot::new();
+            plot.show_box = false;
+            plot.add_graph3d(
+                vec![[0.0, 0.0, 0.0]],
+                vec![[255, 255, 255]],
+                vec![],
+                2.0,
+                None,
+                None,
+                None,
+                name,
+            );
+            plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count()
+        };
+        assert!(lit_graph(Some("graph".into())) > lit_graph(None));
+    }
+
     fn crosshair_plot() -> Plot {
         let mut plot = Plot::new();
         plot.add_line2d(
@@ -2770,7 +3816,7 @@ mod tests {
     #[test]
     fn hover2d_is_ignored_in_3d() {
         let mut plot = Plot::new();
-        plot.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [230, 60, 120], 3.0);
+        plot.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [230, 60, 120], 3.0, None);
         let plain = plot.render(300, 200).rgba();
         plot.hover2d_px = Some(150.0);
         assert_eq!(plot.render(300, 200).rgba(), plain);
@@ -2788,6 +3834,7 @@ mod tests {
             0.5,
             None,
             Some(vec![[9, 250, 9]]),
+            None,
             None,
         );
         let fb = plot.render(200, 100);

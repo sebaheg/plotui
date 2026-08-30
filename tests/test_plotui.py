@@ -90,8 +90,50 @@ def test_default_palette_assigns_distinct_colors():
     plot = Plot()
     plot.add_line([0.0, 1.0], [0.0, 1.0])
     plot.add_line([0.0, 1.0], [1.0, 0.0])
-    assert has_color(plot, (57, 135, 229)), "palette slot 1 (blue)"
-    assert has_color(plot, (25, 158, 112)), "palette slot 2 (aqua)"
+    assert has_color(plot, (230, 60, 120)), "colorway slot 1 (pink)"
+    assert has_color(plot, (69, 200, 209)), "colorway slot 2 (cyan)"
+
+
+def test_color_shorthands_parse_names_and_hex():
+    plot = Plot()
+    plot.add_line([0.0, 1.0], [0.0, 1.0], color="red")
+    plot.add_line([0.0, 1.0], [1.0, 0.0], color="#45c8d1")
+    assert has_color(plot, (255, 0, 0)), "named color must reach the pixels"
+    assert has_color(plot, (69, 200, 209)), "hex color must reach the pixels"
+    with pytest.raises(ValueError, match="unknown color"):
+        Plot().add_line([0.0, 1.0], [0.0, 1.0], color="blurple")
+
+
+def test_scatter3d_without_color_takes_colorway_slots():
+    # Depth fog dims 3D marks, so compare byte-identical renders against
+    # explicitly colored traces instead of probing for pure palette pixels.
+    xs, ys, zs = [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]
+    default = Plot()
+    default.add_scatter3d(xs, ys, zs)
+    default.add_scatter3d(ys, zs, xs)
+    explicit = Plot()
+    explicit.add_scatter3d(xs, ys, zs, color=(230, 60, 120))
+    explicit.add_scatter3d(ys, zs, xs, color=(69, 200, 209))
+    assert default.render_rgba(W, H) == explicit.render_rgba(W, H)
+
+
+def test_set_colorway_by_name_and_list():
+    plot = Plot()
+    plot.set_colorway("vivid")
+    plot.add_line([0.0, 1.0], [0.0, 1.0])
+    assert has_color(plot, (255, 30, 120)), "vivid slot 1"
+
+    custom = Plot()
+    custom.set_colorway(["red", (0, 200, 0)])
+    custom.add_line([0.0, 1.0], [0.0, 1.0])
+    custom.add_line([0.0, 1.0], [1.0, 0.0])
+    assert has_color(custom, (255, 0, 0)), "custom slot 1 (shorthand)"
+    assert has_color(custom, (0, 200, 0)), "custom slot 2 (tuple)"
+
+    with pytest.raises(ValueError, match="unknown colorway"):
+        Plot().set_colorway("neon")
+    with pytest.raises(ValueError, match="at least one color"):
+        Plot().set_colorway([])
 
 
 def test_pick_roundtrip_3d():
@@ -551,3 +593,146 @@ def test_numpy_arrays_render_identically_to_lists():
     lists = Plot()
     lists.add_line(xs, ys, color=(10, 20, 30))
     assert strided.render_rgba(W, H) == lists.render_rgba(W, H)
+
+
+# --- force-directed graphs: ForceLayout + graph mutators ---
+
+
+def _graph_plot(xs, ys, zs, edges):
+    plot = Plot()
+    h = plot.add_graph3d(xs, ys, zs, edges=edges, node_colors=[(200, 120, 90)] * len(xs))
+    return plot, h
+
+
+def test_force_layout_is_deterministic_and_settles():
+    from plotui import ForceLayout
+
+    edges = [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5)]
+    a, b = ForceLayout(6, edges, seed=9), ForceLayout(6, edges, seed=9)
+    for _ in range(50):
+        a.step()
+        b.step()
+    assert a.positions() == b.positions()
+    energy = float("inf")
+    for _ in range(600):
+        energy = a.step()
+    assert energy < 1e-3
+
+
+def test_set_graph_positions_matches_one_shot_build():
+    edges = [(0, 1), (1, 2)]
+    target = ([0.5, -0.5, 0.0], [0.0, 0.5, -0.5], [-0.5, 0.0, 0.5])
+    wide = ([5.0, -5.0, 0.0], [0.0, 5.0, -5.0], [-5.0, 0.0, 5.0])
+    oneshot, _ = _graph_plot(*target, edges)
+    moved, h = _graph_plot(*wide, edges)
+    moved.set_graph_positions(h, *target)
+    assert moved.render_rgba(W, H) == oneshot.render_rgba(W, H)
+
+
+def test_set_graph_colors_recolors_and_restores():
+    plot, h = _graph_plot([0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [(0, 1)])
+    before = plot.render_rgba(W, H)
+    plot.set_graph_colors(h, [(9, 250, 9)] * 2, [(250, 9, 9)])
+    assert plot.render_rgba(W, H) != before
+    plot.set_graph_colors(h, [(200, 120, 90)] * 2)
+    assert plot.render_rgba(W, H) == before
+
+
+def test_extend_graph_matches_one_shot_build():
+    oneshot, _ = _graph_plot(
+        [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [(0, 1), (1, 2)]
+    )
+    inc, h = _graph_plot([0.0, 1.0], [0.0, 0.0], [0.0, 0.0], [(0, 1)])
+    inc.extend_graph(h, [0.0], [1.0], [0.0], node_colors=[(200, 120, 90)], edges=[(1, 2)])
+    assert inc.render_rgba(W, H) == oneshot.render_rgba(W, H)
+
+
+def test_graph_mutator_error_messages_are_canonical():
+    plot, h = _graph_plot([0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [(0, 1)])
+    s = plot.add_scatter3d([0.0], [0.0], [0.0])
+    with pytest.raises(ValueError, match="length must match"):
+        plot.set_graph_positions(h, [0.0], [0.0], [0.0])
+    with pytest.raises(ValueError, match="length must match"):
+        plot.set_graph_colors(h, [(1, 2, 3)])
+    with pytest.raises(ValueError, match="unknown trace handle"):
+        plot.set_graph_positions(99, [0.0], [0.0], [0.0])
+    with pytest.raises(ValueError, match="wrong trace kind"):
+        plot.extend_graph(s, [0.0], [0.0], [0.0])
+
+
+# --- the x window and range slider ---
+
+
+def test_x_window_windows_and_autoscales():
+    plot = demo_2d()
+    plain = plot.render_rgba(300, 200)
+    assert plot.set_x_window((2.0, 8.0)) is True
+    assert plot.set_x_window((2.0, 8.0)) is False, "unchanged window reports no change"
+    assert plot.x_window() == (2.0, 8.0)
+    assert plot.render_rgba(300, 200) != plain
+    assert plot.set_x_window(None) is True
+    assert plot.render_rgba(300, 200) == plain
+
+
+def test_x_window_validation_message():
+    plot = demo_2d()
+    with pytest.raises(ValueError, match=r"x_window needs finite lo < hi, got \(5, 5\)"):
+        plot.set_x_window((5.0, 5.0))
+
+
+def test_range_slider_strip_draws_and_clears():
+    plot = demo_2d()
+    plain = plot.render_rgba(300, 200)
+    assert plot.set_range_slider(True) is True
+    assert plot.range_slider() is True
+    assert plot.render_rgba(300, 200) != plain, "the strip changes pixels"
+    assert plot.set_range_slider(False) is True
+    assert plot.render_rgba(300, 200) == plain
+
+
+def test_datetime_x_sets_epoch_and_offsets():
+    from datetime import datetime, timedelta, timezone
+
+    plot = Plot()
+    start = datetime(2026, 3, 10, 6, 0, tzinfo=timezone.utc)
+    xs = [start + timedelta(hours=i) for i in range(48)]
+    plot.add_line(xs, [float(i) for i in range(48)])
+    # The epoch pins to the first timestamp's UTC midnight.
+    assert plot.x_epoch() == datetime(2026, 3, 10, tzinfo=timezone.utc).timestamp()
+    # Naive datetimes read as UTC wall time: same values, same plot.
+    naive = Plot()
+    naive.add_line([t.replace(tzinfo=None) for t in xs], [float(i) for i in range(48)])
+    assert naive.render_rgba(300, 200) == plot.render_rgba(300, 200)
+    # Mixing numeric x onto a time axis is one canonical error.
+    with pytest.raises(ValueError, match="cannot mix datetime and numeric x"):
+        plot.add_line([0.0, 1.0], [0.0, 1.0])
+    # And datetime x onto a numeric plot likewise.
+    numeric = demo_2d()
+    with pytest.raises(ValueError, match="cannot mix datetime and numeric x"):
+        numeric.add_line(xs, [float(i) for i in range(48)])
+
+
+def test_numpy_datetime64_x():
+    np = pytest.importorskip("numpy")
+    plot = Plot()
+    xs = np.arange("2026-01-01", "2026-01-11", dtype="datetime64[D]")
+    plot.add_line(xs, np.arange(10, dtype="float32"))
+    assert plot.x_epoch() == 1_767_225_600.0  # 2026-01-01T00:00Z
+    assert len(plot.render_rgba(300, 200)) == 300 * 200 * 4
+
+
+def test_drag_x_window_parts_roundtrip():
+    plot = demo_2d()
+    plot.set_range_slider(True)
+    # 400x240: the strip is live; a right-handle drag from the full extent
+    # materializes a window.
+    assert plot.drag_x_window(400, 240, "right", -120.0) is True
+    lo, hi = plot.x_window()
+    assert hi < 25.0, f"right handle must have pulled the window in, got {hi}"
+    assert plot.range_slider_hit(400, 240, 200.0, 224.0, 4.0) is not None
+    assert plot.jump_x_window(400, 240, 300.0) is True
+    assert plot.pan_x_window(400, 240, 25.0) is True
+    assert plot.zoom_x_window(400, 240, 200.0, 2.0) is True
+    assert plot.shift_x_window(0.5) is True
+    with pytest.raises(ValueError, match="range part must be"):
+        plot.drag_x_window(400, 240, "middle", 1.0)

@@ -21,6 +21,10 @@ terminal.** It has no event loop and no input handling — the TUI framework
 camera, and asks for a frame.
 
 ```
+f64 data ─▶ camera + rasterizer ─▶ RGBA buffer ─▶ Kitty escape bytes ─▶ your terminal's cell grid
+```
+
+```
 crates/
   plotui-core/      pure engine: data model, 3D camera, rasterizer → RGBA
   plotui-protocol/  RGBA → terminal bytes (Kitty graphics protocol)
@@ -37,7 +41,9 @@ examples/           raw_demo.py (Kitty images), textual_demo.py
 ```
 
 `core` and `protocol` are pure and I/O-free, so the same engine can back every
-frontend and be unit-tested by hashing pixel buffers.
+frontend and be unit-tested by hashing pixel buffers. The protocol layer emits
+Kitty graphics escapes — chunked, placement-aware, and wrapped for tmux
+passthrough — as pure functions of the RGBA frame.
 
 ## Integrations
 
@@ -73,9 +79,12 @@ cargo binstall plotui                           # prebuilt, via cargo-binstall
 ```
 
 ```bash
-seq 1 100 | awk '{print $1, sin($1/10)}' | plotui line
+seq 1 100 | LC_ALL=C awk '{print $1, sin($1/10)}' | plotui line
 plotui scatter -H -d, data.csv                  # header row + comma-delimited
 plotui bar counts.tsv
+plotui example scatter                          # built-in demo scenes, no data needed
+plotui example deps                             # plotui's own dependency graph, laid
+                                                # out live by a force simulation
 ```
 
 Like every plotui frontend, the CLI needs a terminal with Kitty graphics
@@ -116,7 +125,8 @@ terminals, never a degraded plot. Override with
 from plotui import Plot
 
 # 2D: axes, ticks, and a legend appear automatically. Traces added without a
-# color take palette slots in fixed order; `name=` puts a series in the legend.
+# color take colorway slots in fixed order; `name=` puts a series in the
+# legend. Colors accept (r, g, b) tuples or shorthands: "#e63c78", "red".
 plot = Plot()
 plot.add_line(xs, ys, name="forecast")
 plot.add_scatter(xs2, ys2, name="observed")
@@ -130,7 +140,12 @@ plot.add_line(xs, cpu_minutes, name="cpu min", axis="y3")
 
 # 3D: any 3D trace switches the plot to the orbit camera.
 plot = Plot()
-plot.add_scatter3d(xs, ys, zs, color=(230, 60, 120), size=2.0)
+plot.add_scatter3d(xs, ys, zs, name="Cluster A")   # colors from the colorway
+
+# Colorways: the default sequence is pink/cyan/orange-first; swap it with a
+# built-in name or your own list before adding traces.
+plot.set_colorway("vivid")                         # "plotui", "muted", "vivid"
+plot.set_colorway(["#e63c78", "cyan", (240, 161, 60)])
 
 # Streaming: every add_* returns a trace handle. Append through it instead
 # of rebuilding — O(new points), autoscale follows; numpy arrays are read
@@ -196,7 +211,13 @@ dispatches those to every class in the MRO, so both would run).
       (fixed image id, atomic replace) — wire the pixel path into the Textual widget
 - [x] 2D traces: scatter, line, bar; axes, ticks, tick labels, legend
 - [x] Independent right-hand y-axes (`axis="y2"`/`"y3"`) with tinted tick labels
-- [ ] 2D step trace; axis titles; time-formatted x ticks
+- [x] Time axes: datetime x input (numpy `datetime64`, pandas, `datetime`,
+      ISO-8601 CLI columns) with calendar-boundary ticks and date readouts
+- [x] Range slider (Plotly-style): an x-window with windowed y-autoscale and
+      an interactive overview strip — engine-drawn, so identical in every
+      frontend (`plotui example timeseries`, `--range-slider`,
+      `PlotWidget(..., range_slider=True)`)
+- [ ] 2D step trace; axis titles
 - [ ] 3D surface / mesh; axis cube with labels
 - [x] Interactive hover / pick for 3D graph nodes *and* edges (opt-in via
       `PlotWidget(..., pickable=True)`: hover lights the element up white,
@@ -219,6 +240,11 @@ dispatches those to every class in the MRO, so both would run).
 - [x] CLI: `plotui line|scatter|bar` from stdin or a file — interactive on a
       TTY, one static frame when piped; installed via curl, Homebrew, cargo,
       or pip (see Install above)
+- [x] CLI examples: `plotui example scatter|graph|stream|timeseries|deps` —
+      self-contained demo scenes, no input data needed
+- [x] Force-directed graphs: a `ForceLayout` simulation in the core (exposed
+      in Python, Go, and JS) plus in-place graph mutation — move, recolor,
+      and grow a live graph without rebuilds (`plotui example deps`)
 - [ ] CLI v2: `--follow` streaming, `scatter3d`, histogram/density/count
       transforms, `--out png`
 - [ ] Prebuilt static libs for the Go bindings (today: local source build)

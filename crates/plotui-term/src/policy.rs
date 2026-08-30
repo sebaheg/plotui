@@ -19,11 +19,22 @@ pub const KEY_PAN_CELLS: f64 = 2.0;
 
 /// Zoom factor per scroll-up / `+` press.
 pub const ZOOM_IN: f64 = 1.1;
+/// Log-zoom per cell of mouse drag, for input maps that put zoom on a drag
+/// axis (~1.16x per cell, in scroll-tick territory).
+pub const DRAG_ZOOM_PER_CELL: f64 = 0.15;
 /// Zoom factor per scroll-down / `-` press.
 pub const ZOOM_OUT: f64 = 0.9;
 
 /// Default edge pick radius as a fraction of the node pick radius.
 pub const EDGE_RADIUS_FACTOR: f32 = 0.75;
+
+/// Range-slider grab tolerance in cells (multiplied by the cell pixel
+/// width). Terminal mice report per cell, so anything under one cell makes
+/// the handles ungrabbable.
+pub const RANGE_GRAB_TOL_CELLS: f32 = 1.0;
+
+/// Fraction of the window span an `[`/`]` press slides the x window.
+pub const KEY_WINDOW_STEP_FRAC: f64 = 0.1;
 
 /// Radians of yaw per auto-rotate tick (frontends tick at ~30 Hz).
 pub const AUTO_ROTATE_STEP: f64 = 0.02;

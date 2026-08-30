@@ -27,6 +27,7 @@ type Element struct {
 // that call's Python-parity defaults before applying the options.
 type traceOpts struct {
 	color      *RGB
+	colorName  *string
 	size       float32
 	width      float32
 	name       *string
@@ -43,9 +44,14 @@ type traceOpts struct {
 // reproduce the Python binding's defaults exactly).
 type TraceOption func(*traceOpts)
 
-// WithColor sets an explicit trace color; omitted, series without a fixed
-// default take palette slots in fixed order.
+// WithColor sets an explicit trace color; omitted, series take colorway
+// slots in fixed order (see SetColorway).
 func WithColor(c RGB) TraceOption { return func(o *traceOpts) { o.color = &c } }
+
+// WithColorName is WithColor with a shorthand string: "#rrggbb" hex or a
+// name like "red" (see ParseColor). An unknown shorthand makes the Add*
+// call return the shared parse error.
+func WithColorName(s string) TraceOption { return func(o *traceOpts) { o.colorName = &s } }
 
 // WithSize sets the marker size (scatter) or node size (graph).
 func WithSize(size float32) TraceOption { return func(o *traceOpts) { o.size = size } }
@@ -83,9 +89,16 @@ func WithEdgeColors(colors []RGB) TraceOption { return func(o *traceOpts) { o.ed
 // "square", "triangle", "diamond", "diamond-open", "dot".
 func WithNodeShapes(shapes []string) TraceOption { return func(o *traceOpts) { o.nodeShapes = shapes } }
 
-func applyOpts(seed traceOpts, opts []TraceOption) traceOpts {
+func applyOpts(seed traceOpts, opts []TraceOption) (traceOpts, error) {
 	for _, opt := range opts {
 		opt(&seed)
 	}
-	return seed
+	if seed.colorName != nil {
+		c, err := ParseColor(*seed.colorName)
+		if err != nil {
+			return seed, err
+		}
+		seed.color = &c
+	}
+	return seed, nil
 }

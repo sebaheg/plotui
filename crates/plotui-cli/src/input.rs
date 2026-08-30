@@ -12,6 +12,45 @@ pub struct Table {
     pub names: Vec<Option<String>>,
     pub x: Vec<f32>,
     pub series: Vec<Vec<f32>>,
+    /// Set when the x column held ISO-8601 dates: `x` values are seconds
+    /// since this UTC epoch base (the first timestamp's midnight), and the
+    /// plot gets a calendar x axis.
+    pub x_epoch: Option<f64>,
+}
+
+/// A strict ISO-8601 timestamp — `YYYY-MM-DD`, optionally `THH:MM[:SS]`
+/// (`T` or a space, optional trailing `Z`) — as epoch seconds UTC. Years
+/// need four digits, so numeric-ish strings like "1-2-3" never pass.
+fn parse_iso(s: &str) -> Option<f64> {
+    let s = s.strip_suffix('Z').unwrap_or(s);
+    let (date, time) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t)),
+        None => (s, None),
+    };
+    let mut it = date.split('-');
+    let (ys, ms, ds) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() || ys.len() != 4 {
+        return None;
+    }
+    let (y, m, d) = (ys.parse::<i32>().ok()?, ms.parse::<u32>().ok()?, ds.parse::<u32>().ok()?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let mut secs = 0i64;
+    if let Some(t) = time {
+        let mut parts = t.split(':');
+        let hh: i64 = parts.next()?.parse().ok()?;
+        let mm: i64 = parts.next()?.parse().ok()?;
+        let ss: i64 = match parts.next() {
+            Some(p) => p.parse().ok()?,
+            None => 0,
+        };
+        if parts.next().is_some() || hh > 23 || mm > 59 || ss > 59 {
+            return None;
+        }
+        secs = hh * 3600 + mm * 60 + ss;
+    }
+    Some(plotui_core::days_from_civil(y, m, d) as f64 * 86_400.0 + secs as f64)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -101,6 +140,11 @@ fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, Str
 
     let ncols = fields(rows[0].1, delim).len();
     let n_series = if ncols <= 1 { 1 } else { ncols - 1 };
+    // A first x cell that is no number but a strict ISO date puts the whole
+    // x column on a time axis (values become offsets from an epoch base).
+    let first_x = fields(rows[0].1, delim)[0];
+    let time_x = ncols > 1 && first_x.parse::<f32>().is_err() && parse_iso(first_x).is_some();
+    let mut x_epoch: Option<f64> = None;
     let mut x: Vec<f32> = Vec::with_capacity(rows.len());
     let mut series: Vec<Vec<f32>> = vec![Vec::with_capacity(rows.len()); n_series];
 
@@ -109,8 +153,18 @@ fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, Str
         if f.len() != ncols {
             return Err(format!("line {lineno}: expected {ncols} fields, found {}", f.len()));
         }
+        if time_x {
+            let ts = parse_iso(f[0]).ok_or_else(|| {
+                format!(
+                    "line {lineno}: {:?} is not an ISO-8601 date (mixed date and numeric x?)",
+                    f[0]
+                )
+            })?;
+            let base = *x_epoch.get_or_insert_with(|| (ts / 86_400.0).floor() * 86_400.0);
+            x.push((ts - base) as f32);
+        }
         let mut nums = Vec::with_capacity(ncols);
-        for field in &f {
+        for field in &f[if time_x { 1 } else { 0 }..] {
             match field.parse::<f32>() {
                 Ok(v) => nums.push(v),
                 Err(_) => {
@@ -126,8 +180,15 @@ fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, Str
             x.push(x.len() as f32);
             series[0].push(nums[0]);
         } else {
-            x.push(nums[0]);
-            for (s, v) in series.iter_mut().zip(&nums[1..]) {
+            // With a time x, `nums` holds only the series values; otherwise
+            // its first entry is x.
+            let ys = if time_x {
+                &nums[..]
+            } else {
+                x.push(nums[0]);
+                &nums[1..]
+            };
+            for (s, v) in series.iter_mut().zip(ys) {
                 s.push(*v);
             }
         }
@@ -144,7 +205,7 @@ fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, Str
         (1..ncols).map(|i| header_names.get(i).cloned()).collect()
     };
 
-    Ok(Table { names, x, series })
+    Ok(Table { names, x, series, x_epoch })
 }
 
 #[cfg(test)]
@@ -234,5 +295,25 @@ mod tests {
         let t = parse("1;10\n2;20\n", Some(";"), false).unwrap();
         assert_eq!(t.series, vec![vec![10.0, 20.0]]);
         assert!(parse_delimiter("ab").is_err());
+    }
+
+    #[test]
+    fn iso_dates_parse_to_epoch_offsets() {
+        let t = parse("2026-01-01 1\n2026-01-02 4\n2026-01-03T06:00 2\n", None, false).unwrap();
+        let base = plotui_core::days_from_civil(2026, 1, 1) as f64 * 86_400.0;
+        assert_eq!(t.x_epoch, Some(base));
+        assert_eq!(t.x, vec![0.0, 86_400.0, 2.0 * 86_400.0 + 6.0 * 3600.0]);
+        assert_eq!(t.series, vec![vec![1.0, 4.0, 2.0]]);
+        // Numeric x stays numeric, and near-date numerics don't trip it.
+        assert_eq!(parse("1,10\n2,20\n", None, false).unwrap().x_epoch, None);
+        assert!(parse_iso("1-2-3").is_none(), "years need four digits");
+        assert_eq!(parse_iso("2026-03-10T12:30:15Z"), parse_iso("2026-03-10 12:30:15"));
+    }
+
+    #[test]
+    fn mixed_dates_and_numbers_error() {
+        let err = parse("2026-01-01,1\n7,2\n", None, false).unwrap_err();
+        assert!(err.contains("line 2"), "{err}");
+        assert!(err.contains("is not an ISO-8601 date"), "{err}");
     }
 }

@@ -1,4 +1,75 @@
 /**
+ * A 3D force-directed layout: connected nodes attract, all nodes repel, a
+ * cooling temperature settles the motion. Pure math on the host's timer —
+ * call `step()` per animation frame and hand `positions()` to
+ * `Plot.set_graph_positions`. Deterministic for a given seed.
+ */
+export class ForceLayout {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        ForceLayoutFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_forcelayout_free(ptr, 0);
+    }
+    /**
+     * Warm insertion of one node connected to `neighbors` (existing
+     * indices); returns the new node's index. Pair with
+     * `Plot.extend_graph`.
+     * @param {Uint32Array} neighbors
+     * @returns {number}
+     */
+    add_node(neighbors) {
+        const ptr0 = passArray32ToWasm0(neighbors, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.forcelayout_add_node(this.__wbg_ptr, ptr0, len0);
+        return ret >>> 0;
+    }
+    /**
+     * A layout over `n_nodes` with seeded initial positions in the unit
+     * ball. `edges` are flat `[a0, b0, a1, b1, …]` index pairs.
+     * @param {number} n_nodes
+     * @param {Uint32Array} edges
+     * @param {number} seed
+     */
+    constructor(n_nodes, edges, seed) {
+        const ptr0 = passArray32ToWasm0(edges, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.forcelayout_new(n_nodes, ptr0, len0, seed);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        ForceLayoutFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Current node positions as a flat `[x0, y0, z0, x1, …]` array, in
+     * index order.
+     * @returns {Float32Array}
+     */
+    positions() {
+        const ret = wasm.forcelayout_positions(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * One simulation tick. Returns the mean displacement — stop repainting
+     * once it drops below ~1e-3.
+     * @returns {number}
+     */
+    step() {
+        const ret = wasm.forcelayout_step(this.__wbg_ptr);
+        return ret;
+    }
+}
+if (Symbol.dispose) ForceLayout.prototype[Symbol.dispose] = ForceLayout.prototype.free;
+
+/**
  * A `pick_element` hit: a node or an edge, by flat index (nodes across all
  * 3D traces in insertion order; edges across graph traces).
  */
@@ -92,15 +163,17 @@ export class Plot {
     /**
      * Add a 3D graph: nodes at `xs/ys/zs`, `edges` as flat index pairs
      * `[a0, b0, a1, b1, …]`, a uniform node `color`, and marker `size`.
+     * `name` puts the graph in the legend.
      * @param {Float32Array} xs
      * @param {Float32Array} ys
      * @param {Float32Array} zs
      * @param {Uint32Array} edges
      * @param {string | null} [color]
      * @param {number | null} [size]
+     * @param {string | null} [name]
      * @returns {number}
      */
-    add_graph3d(xs, ys, zs, edges, color, size) {
+    add_graph3d(xs, ys, zs, edges, color, size, name) {
         const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
@@ -111,7 +184,9 @@ export class Plot {
         const len3 = WASM_VECTOR_LEN;
         var ptr4 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len4 = WASM_VECTOR_LEN;
-        const ret = wasm.plot_add_graph3d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, isLikeNone(size) ? Number.MAX_SAFE_INTEGER : Math.fround(size));
+        var ptr5 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_graph3d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, isLikeNone(size) ? Number.MAX_SAFE_INTEGER : Math.fround(size), ptr5, len5);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -199,16 +274,17 @@ export class Plot {
         return ret[0] >>> 0;
     }
     /**
-     * Add a 3D scatter series; returns the trace handle for
-     * `extend_xyz`/`set_visible`.
+     * Add a 3D scatter series; `name` puts it in the legend. Returns the
+     * trace handle for `extend_xyz`/`set_visible`.
      * @param {Float32Array} xs
      * @param {Float32Array} ys
      * @param {Float32Array} zs
      * @param {string | null} [color]
      * @param {number | null} [size]
+     * @param {string | null} [name]
      * @returns {number}
      */
-    add_scatter3d(xs, ys, zs, color, size) {
+    add_scatter3d(xs, ys, zs, color, size, name) {
         const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
@@ -217,7 +293,9 @@ export class Plot {
         const len2 = WASM_VECTOR_LEN;
         var ptr3 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len3 = WASM_VECTOR_LEN;
-        const ret = wasm.plot_add_scatter3d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, isLikeNone(size) ? Number.MAX_SAFE_INTEGER : Math.fround(size));
+        var ptr4 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len4 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_scatter3d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, isLikeNone(size) ? Number.MAX_SAFE_INTEGER : Math.fround(size), ptr4, len4);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -256,6 +334,20 @@ export class Plot {
         return ret[0] >>> 0;
     }
     /**
+     * Route a drag through the input map: `(dx, dy)` pointer deltas,
+     * `shift` for the modifier, then the sensitivities — radians per unit,
+     * framebuffer pixels per unit, log-zoom per unit.
+     * @param {number} dx
+     * @param {number} dy
+     * @param {boolean} shift
+     * @param {number} rotate_scale
+     * @param {number} pan_scale
+     * @param {number} zoom_scale
+     */
+    apply_drag(dx, dy, shift, rotate_scale, pan_scale, zoom_scale) {
+        wasm.plot_apply_drag(this.__wbg_ptr, dx, dy, shift, rotate_scale, pan_scale, zoom_scale);
+    }
+    /**
      * `[yaw, pitch, zoom, pan_x, pan_y]` — pass back to `set_camera_state`.
      * @returns {Float64Array}
      */
@@ -264,6 +356,66 @@ export class Plot {
         var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
         return v1;
+    }
+    /**
+     * Restore the autoscaled 3D frame.
+     */
+    clear_bounds() {
+        wasm.plot_clear_bounds(this.__wbg_ptr);
+    }
+    /**
+     * Clear the x window (back to full-extent autoscale).
+     * @returns {boolean}
+     */
+    clear_x_window() {
+        const ret = wasm.plot_clear_x_window(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Drag the grabbed strip `part` (a `range_slider_hit` string) by
+     * `dx_px` framebuffer pixels; returns whether a repaint is needed.
+     * @param {number} w
+     * @param {number} h
+     * @param {string} part
+     * @param {number} dx_px
+     * @returns {boolean}
+     */
+    drag_x_window(w, h, part, dx_px) {
+        const ptr0 = passStringToWasm0(part, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_drag_x_window(this.__wbg_ptr, w, h, ptr0, len0, dx_px);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * Append nodes and edges to a graph trace (pair with
+     * `ForceLayout.add_node`): `edges` as flat `[a0, b0, a1, b1, …]` index
+     * pairs referencing old or new nodes; `node_colors` one shorthand per
+     * appended node (renderer default where missing).
+     * @param {number} handle
+     * @param {Float32Array} xs
+     * @param {Float32Array} ys
+     * @param {Float32Array} zs
+     * @param {string[] | null | undefined} node_colors
+     * @param {Uint32Array} edges
+     */
+    extend_graph(handle, xs, ys, zs, node_colors, edges) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArrayF32ToWasm0(zs, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(node_colors) ? 0 : passArrayJsValueToWasm0(node_colors, wasm.__wbindgen_malloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ptr4 = passArray32ToWasm0(edges, wasm.__wbindgen_malloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_extend_graph(this.__wbg_ptr, handle, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * Append points to a 2D trace by handle.
@@ -321,6 +473,17 @@ export class Plot {
         const ret = wasm.plot_is_3d(this.__wbg_ptr);
         return ret !== 0;
     }
+    /**
+     * Center the window on the strip position under `px` (a track click).
+     * @param {number} w
+     * @param {number} h
+     * @param {number} px
+     * @returns {boolean}
+     */
+    jump_x_window(w, h, px) {
+        const ret = wasm.plot_jump_x_window(this.__wbg_ptr, w, h, px);
+        return ret !== 0;
+    }
     constructor() {
         const ret = wasm.plot_new();
         this.__wbg_ptr = ret;
@@ -341,6 +504,17 @@ export class Plot {
      */
     pan(dx, dy) {
         wasm.plot_pan(this.__wbg_ptr, dx, dy);
+    }
+    /**
+     * Slide a set window by a plot-area drag of `dx_px` framebuffer pixels.
+     * @param {number} w
+     * @param {number} h
+     * @param {number} dx_px
+     * @returns {boolean}
+     */
+    pan_x_window(w, h, dx_px) {
+        const ret = wasm.plot_pan_x_window(this.__wbg_ptr, w, h, dx_px);
+        return ret !== 0;
     }
     /**
      * The 3D node under `(px, py)` framebuffer pixels, within `radius`.
@@ -372,6 +546,27 @@ export class Plot {
         return ret === 0 ? undefined : PickHit.__wrap(ret);
     }
     /**
+     * The surface-grid vertex under `(px, py)` framebuffer pixels, within
+     * `radius`: `[x, y, z, x_px, y_px]` (data coordinates, then projected
+     * screen position), or `None`. Surfaces are not part of node picking,
+     * so hover tooltips over a surface use this instead of `pick`.
+     * @param {number} w
+     * @param {number} h
+     * @param {number} px
+     * @param {number} py
+     * @param {number} radius
+     * @returns {Float32Array | undefined}
+     */
+    pick_surface(w, h, px, py, radius) {
+        const ret = wasm.plot_pick_surface(this.__wbg_ptr, w, h, px, py, radius);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        }
+        return v1;
+    }
+    /**
      * Projected node positions as flat `[x_px, y_px, depth]` triples, in
      * the same flat order `pick` uses.
      * @param {number} w
@@ -382,6 +577,43 @@ export class Plot {
         const ret = wasm.plot_project_nodes(this.__wbg_ptr, w, h);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Project a data-space point with the exact projection `render` uses:
+     * `[x_px, y_px, depth]` — anchor a pinned tooltip with this after
+     * camera changes.
+     * @param {number} w
+     * @param {number} h
+     * @param {number} x
+     * @param {number} y
+     * @param {number} z
+     * @returns {Float32Array}
+     */
+    project_point(w, h, x, y, z) {
+        const ret = wasm.plot_project_point(this.__wbg_ptr, w, h, x, y, z);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * What the range-slider strip has under `(px, py)` framebuffer pixels,
+     * within `tol_px`: `"left"`, `"right"`, `"window"`, `"track"`, or
+     * `undefined` off the strip.
+     * @param {number} w
+     * @param {number} h
+     * @param {number} px
+     * @param {number} py
+     * @param {number} tol_px
+     * @returns {string | undefined}
+     */
+    range_slider_hit(w, h, px, py, tol_px) {
+        const ret = wasm.plot_range_slider_hit(this.__wbg_ptr, w, h, px, py, tol_px);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]);
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
         return v1;
     }
     /**
@@ -415,12 +647,83 @@ export class Plot {
         wasm.plot_rotate(this.__wbg_ptr, d_yaw, d_pitch);
     }
     /**
+     * Pin the 3D data frame to `(lo, hi)` corners so the view stops
+     * re-centering while data moves (a running force layout, streamed
+     * points). `clear_bounds` restores autoscale.
+     * @param {number} lo_x
+     * @param {number} lo_y
+     * @param {number} lo_z
+     * @param {number} hi_x
+     * @param {number} hi_y
+     * @param {number} hi_z
+     */
+    set_bounds(lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) {
+        wasm.plot_set_bounds(this.__wbg_ptr, lo_x, lo_y, lo_z, hi_x, hi_y, hi_z);
+    }
+    /**
      * @param {Float64Array} state
      */
     set_camera_state(state) {
         const ptr0 = passArrayF64ToWasm0(state, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.plot_set_camera_state(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Swap the color sequence for traces added without an explicit color:
+     * a built-in name ("plotui", "muted", "vivid"), or a list of color
+     * shorthand strings. Traces already added keep their colors.
+     * @param {string | null} [name]
+     * @param {string[] | null} [colors]
+     */
+    set_colorway(name, colors) {
+        var ptr0 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(colors) ? 0 : passArrayJsValueToWasm0(colors, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_colorway(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Recolor a graph trace in place: one color shorthand per node, and
+     * optionally one per edge (`None` restores the default dimmed endpoint
+     * blend) — the host-side highlight primitive.
+     * @param {number} handle
+     * @param {string[]} node_colors
+     * @param {string[] | null} [edge_colors]
+     */
+    set_graph_colors(handle, node_colors, edge_colors) {
+        const ptr0 = passArrayJsValueToWasm0(node_colors, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(edge_colors) ? 0 : passArrayJsValueToWasm0(edge_colors, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_graph_colors(this.__wbg_ptr, handle, ptr0, len0, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Move every node of a graph trace at once — the per-frame call of a
+     * force-directed layout (pair with `ForceLayout`). The point count must
+     * match the trace's node count; structure, indices, hover, and
+     * selection stay valid.
+     * @param {number} handle
+     * @param {Float32Array} xs
+     * @param {Float32Array} ys
+     * @param {Float32Array} zs
+     */
+    set_graph_positions(handle, xs, ys, zs) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArrayF32ToWasm0(zs, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_graph_positions(this.__wbg_ptr, handle, ptr0, len0, ptr1, len1, ptr2, len2);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -454,6 +757,39 @@ export class Plot {
         return ret !== 0;
     }
     /**
+     * Remap what drag gestures do. Each argument names the camera control
+     * that gesture axis drives — "yaw", "pitch", "pan_x", "pan_y", "zoom"
+     * or "off" — or `None` to keep its current binding. The default map is
+     * drag = rotate (yaw/pitch), shift-drag = pan.
+     * @param {string | null} [drag_x]
+     * @param {string | null} [drag_y]
+     * @param {string | null} [shift_drag_x]
+     * @param {string | null} [shift_drag_y]
+     */
+    set_input_map(drag_x, drag_y, shift_drag_x, shift_drag_y) {
+        var ptr0 = isLikeNone(drag_x) ? 0 : passStringToWasm0(drag_x, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(drag_y) ? 0 : passStringToWasm0(drag_y, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(shift_drag_x) ? 0 : passStringToWasm0(shift_drag_x, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(shift_drag_y) ? 0 : passStringToWasm0(shift_drag_y, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_input_map(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Toggle the range-slider strip; returns whether a repaint is needed.
+     * @param {boolean} on
+     * @returns {boolean}
+     */
+    set_range_slider(on) {
+        const ret = wasm.plot_set_range_slider(this.__wbg_ptr, on);
+        return ret !== 0;
+    }
+    /**
      * Mark a node selected (drawn with a glow; `None` clears).
      * @param {number | null} [index]
      * @returns {boolean}
@@ -461,6 +797,46 @@ export class Plot {
     set_selected_node(index) {
         const ret = wasm.plot_set_selected_node(this.__wbg_ptr, isLikeNone(index) ? Number.MAX_SAFE_INTEGER : (index) >>> 0);
         return ret !== 0;
+    }
+    /**
+     * Show or hide the 3D bounding-box wireframe.
+     * @param {boolean} show
+     */
+    set_show_box(show) {
+        wasm.plot_set_show_box(this.__wbg_ptr, show);
+    }
+    /**
+     * Hover a surface point — pass a `pick_surface` hit's `[x, y, z]` (extra
+     * elements are ignored), or `None` to clear. The engine then draws the
+     * hover guides: a ring at the point, its floor shadow, axis-parallel
+     * guide lines, and the drop line. Returns whether a repaint is needed.
+     * @param {Float32Array | null} [xyz]
+     * @returns {boolean}
+     */
+    set_surface_hover(xyz) {
+        var ptr0 = isLikeNone(xyz) ? 0 : passArrayF32ToWasm0(xyz, wasm.__wbindgen_malloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_surface_hover(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * Pin a surface point (click counterpart of `set_surface_hover`): the
+     * guides stay drawn with the selection treatment until cleared with
+     * `None`. Returns whether a repaint is needed.
+     * @param {Float32Array | null} [xyz]
+     * @returns {boolean}
+     */
+    set_surface_selected(xyz) {
+        var ptr0 = isLikeNone(xyz) ? 0 : passArrayF32ToWasm0(xyz, wasm.__wbindgen_malloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_surface_selected(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
     }
     /**
      * Show or hide a trace; returns whether visibility changed.
@@ -476,6 +852,43 @@ export class Plot {
         return ret[0] !== 0;
     }
     /**
+     * Time axis: x values are seconds since this UTC epoch base (`None`
+     * clears); x ticks become calendar dates.
+     * @param {number | null} [epoch]
+     * @returns {boolean}
+     */
+    set_x_epoch(epoch) {
+        const ret = wasm.plot_set_x_epoch(this.__wbg_ptr, !isLikeNone(epoch), isLikeNone(epoch) ? 0 : epoch);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * Set the explicit 2D x window in data coordinates; returns whether a
+     * repaint is needed. Requires finite `lo < hi`.
+     * @param {number} lo
+     * @param {number} hi
+     * @returns {boolean}
+     */
+    set_x_window(lo, hi) {
+        const ret = wasm.plot_set_x_window(this.__wbg_ptr, lo, hi);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * Slide a set window by `frac` of its own span (positive = later x) —
+     * the keyboard step.
+     * @param {number} frac
+     * @returns {boolean}
+     */
+    shift_x_window(frac) {
+        const ret = wasm.plot_shift_x_window(this.__wbg_ptr, frac);
+        return ret !== 0;
+    }
+    /**
      * @returns {number}
      */
     vertex_count() {
@@ -483,10 +896,35 @@ export class Plot {
         return ret >>> 0;
     }
     /**
+     * The current x window as `[lo, hi]`, or `None`.
+     * @returns {Float64Array | undefined}
+     */
+    x_window() {
+        const ret = wasm.plot_x_window(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        }
+        return v1;
+    }
+    /**
      * @param {number} f
      */
     zoom_by(f) {
         wasm.plot_zoom_by(this.__wbg_ptr, f);
+    }
+    /**
+     * Zoom the window about the data x under `px` (`factor > 1` zooms in).
+     * @param {number} w
+     * @param {number} h
+     * @param {number} px
+     * @param {number} factor
+     * @returns {boolean}
+     */
+    zoom_x_window(w, h, px, factor) {
+        const ret = wasm.plot_zoom_x_window(this.__wbg_ptr, w, h, px, factor);
+        return ret !== 0;
     }
 }
 if (Symbol.dispose) Plot.prototype[Symbol.dispose] = Plot.prototype.free;
@@ -496,6 +934,14 @@ function __wbg_get_imports() {
         __wbg_Error_408e67f47ca7b58b: function(arg0, arg1) {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return ret;
+        },
+        __wbg___wbindgen_string_get_d154f1e671052120: function(arg0, arg1) {
+            const obj = arg1;
+            const ret = typeof(obj) === 'string' ? obj : undefined;
+            var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
         __wbg___wbindgen_throw_bb96b2010945f0bc: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
@@ -516,12 +962,21 @@ function __wbg_get_imports() {
     };
 }
 
+const ForceLayoutFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_forcelayout_free(ptr, 1));
 const PickHitFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_pickhit_free(ptr, 1));
 const PlotFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_plot_free(ptr, 1));
+
+function addToExternrefTable0(obj) {
+    const idx = wasm.__externref_table_alloc();
+    wasm.__wbindgen_externrefs.set(idx, obj);
+    return idx;
+}
 
 function getArrayF32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
@@ -531,6 +986,14 @@ function getArrayF32FromWasm0(ptr, len) {
 function getArrayF64FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
 }
 
 let cachedFloat32ArrayMemory0 = null;
@@ -591,6 +1054,16 @@ function passArrayF64ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 8, 8) >>> 0;
     getFloat64ArrayMemory0().set(arg, ptr / 8);
     WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayJsValueToWasm0(array, malloc) {
+    const ptr = malloc(array.length * 4, 4) >>> 0;
+    for (let i = 0; i < array.length; i++) {
+        const add = addToExternrefTable0(array[i]);
+        getDataViewMemory0().setUint32(ptr + 4 * i, add, true);
+    }
+    WASM_VECTOR_LEN = array.length;
     return ptr;
 }
 
@@ -671,6 +1144,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedDataViewMemory0 = null;
     cachedFloat32ArrayMemory0 = null;
     cachedFloat64ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;

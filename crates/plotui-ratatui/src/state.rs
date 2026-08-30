@@ -90,6 +90,9 @@ pub struct PlotState {
     pub(crate) dragging: bool,
     pub(crate) moved: bool,
     pub(crate) last_pos: (u16, u16),
+    /// The strip part grabbed by the active drag, if the drag started on the
+    /// range slider (then it never rotates/pans the camera).
+    pub(crate) range_drag: Option<plotui_core::RangeHit>,
     pub(crate) hovered: Option<Element>,
     pub(crate) interacting_override: bool,
     pub(crate) needs_redraw: bool,
@@ -118,6 +121,7 @@ impl PlotState {
             dragging: false,
             moved: false,
             last_pos: (0, 0),
+            range_drag: None,
             hovered: None,
             interacting_override: false,
             needs_redraw: true,
@@ -200,6 +204,46 @@ impl PlotState {
                 self.plot.extend_pts(handle, &pts)?;
             }
         }
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Move every node of a graph trace at once and repaint — the per-frame
+    /// call of a force-directed layout (pair with
+    /// [`plotui_core::ForceLayout`]).
+    pub fn set_graph_positions(
+        &mut self,
+        handle: usize,
+        positions: Vec<[f32; 3]>,
+    ) -> Result<(), TraceError> {
+        self.plot.set_graph_positions(handle, positions)?;
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Recolor a graph trace in place and repaint — dim everything, brighten
+    /// a hovered dependency path, restore.
+    pub fn set_graph_colors(
+        &mut self,
+        handle: usize,
+        node_colors: Vec<[u8; 3]>,
+        edge_colors: Option<Vec<[u8; 3]>>,
+    ) -> Result<(), TraceError> {
+        self.plot.set_graph_colors(handle, node_colors, edge_colors)?;
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Append nodes and edges to a graph trace and repaint (pair with
+    /// [`plotui_core::ForceLayout::add_node`]).
+    pub fn extend_graph(
+        &mut self,
+        handle: usize,
+        nodes: &[[f32; 3]],
+        node_colors: &[[u8; 3]],
+        edges: &[(u32, u32)],
+    ) -> Result<(), TraceError> {
+        self.plot.extend_graph(handle, nodes, node_colors, edges)?;
         self.invalidate();
         Ok(())
     }
@@ -302,5 +346,17 @@ impl PlotState {
             self.plot.hover2d_px = px;
             self.invalidate();
         }
+    }
+
+    /// Set (or clear) the 2D x window programmatically, with change
+    /// detection and a repaint. Interactive changes arrive through
+    /// `handle_event` instead and report as [`PlotEvent::RangeChanged`].
+    pub fn set_x_window(&mut self, window: Option<(f64, f64)>) -> bool {
+        if self.plot.x_window == window {
+            return false;
+        }
+        self.plot.x_window = window;
+        self.invalidate();
+        true
     }
 }

@@ -264,6 +264,7 @@ fn error_paths_carry_the_shared_messages() {
                 0,
                 shapes.as_ptr(),
                 1,
+                ptr::null(),
                 ptr::null_mut(),
             ),
             PLOTUI_ERR_INVALID_ARG
@@ -293,6 +294,7 @@ fn error_paths_carry_the_shared_messages() {
                 0,
                 ptr::null(),
                 0,
+                ptr::null(),
                 &mut hg,
             ),
             PLOTUI_OK
@@ -362,6 +364,7 @@ fn interactive_scale_follows_the_shared_policy() {
                 n,
                 ptr::null(),
                 2.0,
+                ptr::null(),
                 ptr::null_mut(),
             ),
             PLOTUI_OK
@@ -376,5 +379,169 @@ fn interactive_scale_follows_the_shared_policy() {
         assert_eq!(plotui_project_nodes(p, 160, 160, out.as_mut_ptr()), PLOTUI_OK);
         assert!(out.iter().any(|&v| v != 0.0));
         plotui_free(p);
+    }
+}
+
+#[test]
+fn range_slider_roundtrip() {
+    let p = plot_2d();
+    unsafe {
+        // Window set / read / change-detect / validate / clear.
+        let mut changed = false;
+        assert_eq!(plotui_set_x_window(p, true, 0.5, 1.5, &mut changed), PLOTUI_OK);
+        assert!(changed);
+        assert_eq!(plotui_set_x_window(p, true, 0.5, 1.5, &mut changed), PLOTUI_OK);
+        assert!(!changed);
+        let (mut lo, mut hi) = (0.0f64, 0.0f64);
+        assert!(plotui_x_window(p, &mut lo, &mut hi));
+        assert_eq!((lo, hi), (0.5, 1.5));
+        assert_eq!(plotui_set_x_window(p, true, 2.0, 2.0, &mut changed), PLOTUI_ERR_INVALID_ARG);
+        assert_eq!(last_error(), "x_window needs finite lo < hi, got (2, 2)");
+        assert_eq!(plotui_set_x_window(p, false, 0.0, 0.0, &mut changed), PLOTUI_OK);
+        assert!(changed);
+        assert!(!plotui_x_window(p, &mut lo, &mut hi));
+
+        // Epoch set / read / validate.
+        assert_eq!(plotui_set_x_epoch(p, true, 1.7e9, &mut changed), PLOTUI_OK);
+        assert!(changed);
+        let mut epoch = 0.0f64;
+        assert!(plotui_x_epoch(p, &mut epoch));
+        assert_eq!(epoch, 1.7e9);
+        assert_eq!(plotui_set_x_epoch(p, true, f64::NAN, &mut changed), PLOTUI_ERR_INVALID_ARG);
+
+        // Strip toggle, hit, drag: exercised at a size where the strip is
+        // live (400x240; the strip hugs the bottom rows).
+        assert!(plotui_set_range_slider(p, true));
+        assert!(!plotui_set_range_slider(p, true));
+        let mut part = -1i32;
+        assert_eq!(plotui_range_slider_hit(p, 400, 240, 200.0, 224.0, 4.0, &mut part), PLOTUI_OK);
+        assert_ne!(part, 0, "mid-strip point must hit something");
+        // Shrink from the full extent via the right handle, so the window
+        // has room to jump and pan.
+        assert_eq!(plotui_drag_x_window(p, 400, 240, 2, -120.0, &mut changed), PLOTUI_OK);
+        assert!(changed);
+        assert!(plotui_x_window(p, &mut lo, &mut hi), "a drag materializes a window");
+        assert!(hi < 2.0, "right handle must have pulled the window in, got hi={hi}");
+        assert_eq!(plotui_drag_x_window(p, 400, 240, 9, 1.0, &mut changed), PLOTUI_ERR_INVALID_ARG);
+        assert_eq!(
+            last_error(),
+            "range part must be 1 (left), 2 (right), 3 (window) or 4 (track), got 9"
+        );
+        assert!(plotui_jump_x_window(p, 400, 240, 300.0));
+        assert!(plotui_pan_x_window(p, 400, 240, 25.0));
+        assert!(plotui_zoom_x_window(p, 400, 240, 200.0, 2.0));
+        plotui_free(p);
+    }
+}
+
+#[test]
+fn graph_mutators_and_layout_roundtrip() {
+    unsafe {
+        // A settled layout drives a graph through the C ABI end to end.
+        let edges = [0u32, 1, 1, 2];
+        let l = plotui_layout_new(3, edges.as_ptr(), 2, 7);
+        assert!(!l.is_null());
+        let mut energy = f32::INFINITY;
+        for _ in 0..600 {
+            energy = plotui_layout_step(l);
+        }
+        assert!(energy < 1e-3, "layout must settle, got {energy}");
+        assert_eq!(plotui_layout_node_count(l), 3);
+        let mut pos = [0.0f32; 9];
+        assert_eq!(plotui_layout_positions(l, pos.as_mut_ptr()), PLOTUI_OK);
+
+        // Build a graph and move it onto the layout's positions.
+        let p = plotui_new();
+        let (xs, ys, zs): (Vec<f32>, Vec<f32>, Vec<f32>) = (
+            pos.chunks(3).map(|c| c[0]).collect(),
+            pos.chunks(3).map(|c| c[1]).collect(),
+            pos.chunks(3).map(|c| c[2]).collect(),
+        );
+        let mut h = usize::MAX;
+        assert_eq!(
+            plotui_add_graph3d(
+                p,
+                xs.as_ptr(),
+                3,
+                ys.as_ptr(),
+                3,
+                zs.as_ptr(),
+                3,
+                edges.as_ptr(),
+                2,
+                ptr::null(),
+                0,
+                ptr::null(),
+                3.0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                &mut h,
+            ),
+            PLOTUI_OK
+        );
+        assert_eq!(
+            plotui_set_graph_positions(p, h, xs.as_ptr(), 3, ys.as_ptr(), 3, zs.as_ptr(), 3),
+            PLOTUI_OK
+        );
+
+        // Recolor, then restore the default edge blend with NULL edges.
+        let node_rgbs = [9u8, 250, 9, 9, 250, 9, 9, 250, 9];
+        let edge_rgbs = [250u8, 9, 9, 250, 9, 9];
+        assert_eq!(
+            plotui_set_graph_colors(p, h, node_rgbs.as_ptr(), 3, edge_rgbs.as_ptr(), 2),
+            PLOTUI_OK
+        );
+        assert_eq!(plotui_set_graph_colors(p, h, node_rgbs.as_ptr(), 3, ptr::null(), 0), PLOTUI_OK);
+
+        // A node flies in: layout first, then the trace.
+        let neighbors = [0u32];
+        let mut idx = usize::MAX;
+        assert_eq!(plotui_layout_add_node(l, neighbors.as_ptr(), 1, &mut idx), PLOTUI_OK);
+        assert_eq!(idx, 3);
+        let (nx, ny, nz) = (&[0.1f32], &[0.2f32], &[0.3f32]);
+        let new_rgb = [69u8, 200, 209];
+        let new_edges = [0u32, 3];
+        assert_eq!(
+            plotui_extend_graph(
+                p,
+                h,
+                nx.as_ptr(),
+                1,
+                ny.as_ptr(),
+                1,
+                nz.as_ptr(),
+                1,
+                new_rgb.as_ptr(),
+                1,
+                new_edges.as_ptr(),
+                1,
+            ),
+            PLOTUI_OK
+        );
+        assert_eq!(plotui_node_count(p), 4);
+
+        // Error paths carry the core's canonical messages.
+        assert_eq!(
+            plotui_set_graph_positions(p, 99, nx.as_ptr(), 1, ny.as_ptr(), 1, nz.as_ptr(), 1),
+            PLOTUI_ERR_UNKNOWN_HANDLE
+        );
+        assert_eq!(last_error(), "unknown trace handle");
+        assert_eq!(
+            plotui_set_graph_positions(p, h, nx.as_ptr(), 1, ny.as_ptr(), 1, nz.as_ptr(), 1),
+            PLOTUI_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            last_error(),
+            "per-node/per-edge array length must match the trace's node/edge count"
+        );
+
+        plotui_free(p);
+        plotui_layout_free(l);
+        plotui_layout_free(ptr::null_mut()); // NULL is inert
     }
 }

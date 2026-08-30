@@ -38,7 +38,7 @@ fn plot_3d(n: usize) -> plotui_core::Plot {
             [(t * 20.0).cos(), t * 2.0 - 1.0, (t * 20.0).sin()]
         })
         .collect();
-    p.add_scatter3d(pts, [230, 60, 120], 2.0);
+    p.add_scatter3d(pts, [230, 60, 120], 2.0, None);
     p
 }
 
@@ -302,4 +302,80 @@ fn transmit_reemits_when_the_frame_changes() {
     state.plot_mut().camera.rotate(0.5, 0.0);
     let buf3 = render(&mut state);
     assert_ne!(buf3[(0, 0)].symbol(), first1);
+}
+
+// --- the range slider ---
+
+/// plot_2d with the strip on and a mid-data window; AREA (20x10 cells at
+/// 8x16px) is a 160x160 frame — exactly the strip's minimum height.
+fn range_state() -> PlotState {
+    let mut plot = plot_2d();
+    plot.range_slider = true;
+    plot.x_window = Some((0.5, 1.5));
+    PlotState::new(plot, opts(RenderMode::Placeholder))
+}
+
+#[test]
+fn strip_drag_slides_the_window_and_emits_on_release() {
+    let mut state = range_state();
+    render(&mut state);
+    assert!(!state.needs_redraw());
+    // Press mid-strip (cell row 9 → pixel row 152, inside the strip band),
+    // inside the window body, then drag two cells right and release.
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), 10, 9, KeyModifiers::NONE);
+    assert_eq!(state.handle_event(&down), None);
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 12, 9, KeyModifiers::NONE);
+    assert_eq!(state.handle_event(&drag), None);
+    assert!(state.needs_redraw(), "a strip drag repaints");
+    let up = mouse(MouseEventKind::Up(MouseButton::Left), 12, 9, KeyModifiers::NONE);
+    let ev = state.handle_event(&up);
+    let Some(PlotEvent::RangeChanged(Some((lo, hi)))) = ev else {
+        panic!("expected RangeChanged with a window, got {ev:?}");
+    };
+    assert!(lo > 0.5 && hi > 1.5, "window must have slid right, got ({lo}, {hi})");
+    assert!((hi - lo - 1.0).abs() < 1e-6, "span preserved");
+}
+
+#[test]
+fn plot_area_drag_pans_a_windowed_plot_instead_of_the_camera() {
+    let mut state = range_state();
+    render(&mut state);
+    let cam_before = state.plot().camera.state();
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), 10, 4, KeyModifiers::NONE);
+    state.handle_event(&down);
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 8, 4, KeyModifiers::NONE);
+    state.handle_event(&drag);
+    let (lo, _) = state.plot().x_window.unwrap();
+    assert!(lo > 0.5, "dragging left must slide the view right (grab the data)");
+    assert_eq!(state.plot().camera.state(), cam_before, "the camera stays out of it");
+}
+
+#[test]
+fn scroll_zooms_the_window_about_the_cursor_and_emits() {
+    let mut state = range_state();
+    render(&mut state);
+    let ev = state.handle_event(&mouse(MouseEventKind::ScrollUp, 10, 4, KeyModifiers::NONE));
+    let Some(PlotEvent::RangeChanged(Some((lo, hi)))) = ev else {
+        panic!("expected RangeChanged, got {ev:?}");
+    };
+    assert!(hi - lo < 1.0, "zooming in must shrink the span, got ({lo}, {hi})");
+}
+
+#[test]
+fn bracket_keys_shift_and_reset_clears() {
+    let mut state = range_state();
+    render(&mut state);
+    let key = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    let ev = state.handle_event(&key(']'));
+    assert!(matches!(ev, Some(PlotEvent::RangeChanged(Some(_)))));
+    let (lo, _) = state.plot().x_window.unwrap();
+    assert!(lo > 0.5, "']' slides the window right");
+    state.handle_event(&key('['));
+    let ev = state.handle_event(&key('['));
+    assert!(matches!(ev, Some(PlotEvent::RangeChanged(Some(_)))));
+    let (lo2, _) = state.plot().x_window.unwrap();
+    assert!(lo2 < lo, "'[' slides the window left, got {lo} -> {lo2}");
+    let ev = state.handle_event(&key('r'));
+    assert_eq!(ev, Some(PlotEvent::RangeChanged(None)), "reset clears the window");
+    assert_eq!(state.plot().x_window, None);
 }

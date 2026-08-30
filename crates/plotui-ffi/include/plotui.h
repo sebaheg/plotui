@@ -26,6 +26,13 @@
 #define PLOTUI_RENDER_UNSUPPORTED 2
 
 /**
+ * An opaque 3D force-directed layout (`plotui_core::ForceLayout`): pure
+ * math on the host's timer, deterministic for a given seed. Not
+ * thread-safe: one thread at a time, like `PlotuiPlot`.
+ */
+typedef struct PlotuiLayout PlotuiLayout;
+
+/**
  * An opaque plot handle: data + camera + this plot's Kitty image id.
  */
 typedef struct PlotuiPlot PlotuiPlot;
@@ -63,6 +70,36 @@ const char *plotui_last_error(void);
 void plotui_string_free(char *s);
 
 /**
+ * Parse a color shorthand — "#rrggbb" (or bare "rrggbb") hex, or a name
+ * like "red" — into 3 bytes at `out_rgb`. Stateless; the accepted names
+ * and the error message are the shared `plotui-bind` rule.
+ *
+ * # Safety
+ * `s` must be a NUL-terminated string; `out_rgb` must point at 3 writable
+ * bytes.
+ */
+int32_t plotui_parse_color(const char *s, uint8_t *out_rgb);
+
+/**
+ * Swap the color sequence assigned to traces added without an explicit
+ * color: `rgbs` is `3 * n` bytes of (r, g, b) triples; `n` must be at
+ * least 1. Traces already added keep their colors.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_colorway(struct PlotuiPlot *p, const uint8_t *rgbs, size_t n);
+
+/**
+ * Swap the color sequence to a built-in colorway by name: "plotui" (the
+ * default), "muted", or "vivid".
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_colorway_name(struct PlotuiPlot *p, const char *name);
+
+/**
  * # Safety
  * Pointer arguments follow the crate conventions (see the module docs).
  */
@@ -75,6 +112,7 @@ int32_t plotui_add_scatter3d(struct PlotuiPlot *p,
                              size_t nz,
                              const uint8_t *rgb,
                              float size,
+                             const char *name,
                              size_t *out_handle);
 
 /**
@@ -102,6 +140,7 @@ int32_t plotui_add_graph3d(struct PlotuiPlot *p,
                            size_t n_edge_rgbs,
                            const char *const *node_shapes,
                            size_t n_shapes,
+                           const char *name,
                            size_t *out_handle);
 
 /**
@@ -203,6 +242,64 @@ int32_t plotui_extend(struct PlotuiPlot *p,
                       size_t nz);
 
 /**
+ * Move every node of a graph trace at once — the per-frame call of a
+ * force-directed layout (pair with the `plotui_layout_*` functions). The
+ * point count (min of nx/ny/nz) must match the trace's node count;
+ * structure, indices, hover, and selection stay valid.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_graph_positions(struct PlotuiPlot *p,
+                                   size_t handle,
+                                   const float *xs,
+                                   size_t nx,
+                                   const float *ys,
+                                   size_t ny,
+                                   const float *zs,
+                                   size_t nz);
+
+/**
+ * Recolor a graph trace in place — the host-side highlight primitive.
+ * `node_rgbs` is `3 * n_nodes` bytes (one color per node); `edge_rgbs` is
+ * `3 * n_edges` bytes or NULL (with n 0) to restore the default dimmed
+ * endpoint blend.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_graph_colors(struct PlotuiPlot *p,
+                                size_t handle,
+                                const uint8_t *node_rgbs,
+                                size_t n_nodes,
+                                const uint8_t *edge_rgbs,
+                                size_t n_edges);
+
+/**
+ * Append nodes and edges to a graph trace (pair with
+ * `plotui_layout_add_node`). `edges` is `2 * n_edges` u32s as (i, j) pairs
+ * referencing old or new node indices; `node_rgbs` is `3 * n` byte triples
+ * coloring the appended nodes (renderer default where missing). Appending
+ * to a graph that is not the last node-bearing trace shifts downstream
+ * flat node/edge indices, as with `plotui_extend` on a 3D scatter.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_extend_graph(struct PlotuiPlot *p,
+                            size_t handle,
+                            const float *xs,
+                            size_t nx,
+                            const float *ys,
+                            size_t ny,
+                            const float *zs,
+                            size_t nz,
+                            const uint8_t *node_rgbs,
+                            size_t n_node_rgbs,
+                            const uint32_t *edges,
+                            size_t n_edges);
+
+/**
  * # Safety
  * Pointer arguments follow the crate conventions.
  */
@@ -233,6 +330,125 @@ int32_t plotui_set_hovered(struct PlotuiPlot *p, int32_t kind, size_t index, boo
  * `p` must be a live plot handle.
  */
 bool plotui_set_hover2d(struct PlotuiPlot *p, bool has_px, float px);
+
+/**
+ * Set the explicit 2D x window in data coordinates (`has` false clears it);
+ * `out_changed` tells the frontend whether a repaint is needed.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_changed` may be NULL.
+ */
+int32_t plotui_set_x_window(struct PlotuiPlot *p,
+                            bool has,
+                            double lo,
+                            double hi,
+                            bool *out_changed);
+
+/**
+ * Read the current x window into `out_lo`/`out_hi`; returns whether one is
+ * set (outputs untouched when not).
+ *
+ * # Safety
+ * `p` must be a live plot handle; out pointers may be NULL.
+ */
+bool plotui_x_window(const struct PlotuiPlot *p, double *out_lo, double *out_hi);
+
+/**
+ * Toggle the range-slider strip. Returns whether the state changed
+ * (repaint needed).
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+bool plotui_set_range_slider(struct PlotuiPlot *p, bool on);
+
+/**
+ * Set the time-axis epoch base, seconds UTC (`has` false clears it): x
+ * values then mean seconds since this base, x ticks become calendar dates.
+ * `out_changed` tells the frontend whether a repaint is needed.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_changed` may be NULL.
+ */
+int32_t plotui_set_x_epoch(struct PlotuiPlot *p, bool has, double epoch, bool *out_changed);
+
+/**
+ * Read the time-axis epoch base into `out_epoch`; returns whether one is
+ * set.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_epoch` may be NULL.
+ */
+bool plotui_x_epoch(const struct PlotuiPlot *p, double *out_epoch);
+
+/**
+ * What the range-slider strip has under `(px, py)` framebuffer pixels at a
+ * `w`×`h` frame, within `tol_px`: `out_part` is 0 none, 1 left handle,
+ * 2 right handle, 3 window body, 4 track.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_part` may be NULL.
+ */
+int32_t plotui_range_slider_hit(const struct PlotuiPlot *p,
+                                size_t px_w,
+                                size_t px_h,
+                                float px,
+                                float py,
+                                float tol_px,
+                                int32_t *out_part);
+
+/**
+ * Drag the grabbed strip `part` (1 left, 2 right, 3 window, 4 track) by
+ * `dx_px` framebuffer pixels; `out_changed` tells the frontend whether a
+ * repaint is needed.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_changed` may be NULL.
+ */
+int32_t plotui_drag_x_window(struct PlotuiPlot *p,
+                             size_t px_w,
+                             size_t px_h,
+                             int32_t part,
+                             float dx_px,
+                             bool *out_changed);
+
+/**
+ * Center the window on the strip position under `px` framebuffer pixels (a
+ * track click). Returns whether the window changed (repaint needed).
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+bool plotui_jump_x_window(struct PlotuiPlot *p, size_t px_w, size_t px_h, float px);
+
+/**
+ * Slide a set window by a plot-area drag of `dx_px` framebuffer pixels.
+ * Returns whether the window changed (repaint needed).
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+bool plotui_pan_x_window(struct PlotuiPlot *p, size_t px_w, size_t px_h, float dx_px);
+
+/**
+ * Zoom the window about the data x under `px` framebuffer pixels
+ * (`factor > 1` zooms in). Returns whether the window changed (repaint
+ * needed).
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+bool plotui_zoom_x_window(struct PlotuiPlot *p, size_t px_w, size_t px_h, float px, double factor);
+
+/**
+ * Slide a set window by `frac` of its own span (positive = later x) — the
+ * keyboard step, needing no pixel geometry. Returns whether the window
+ * changed (repaint needed).
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+bool plotui_shift_x_window(struct PlotuiPlot *p, double frac);
 
 /**
  * Pick under `(px, py)`: nearest node within `node_radius`, else nearest
@@ -292,6 +508,40 @@ void plotui_pan(struct PlotuiPlot *p, double dx, double dy);
  * `p` must be a live plot handle.
  */
 void plotui_reset(struct PlotuiPlot *p);
+
+/**
+ * Remap what drag gestures do. Each name is a camera control — "yaw",
+ * "pitch", "pan_x", "pan_y", "zoom" or "off" — or NULL to keep that
+ * axis's current binding. The default map is drag = rotate (yaw/pitch),
+ * shift-drag = pan. Returns 0, or -1 with `plotui_last_error()` set.
+ *
+ * # Safety
+ * `p` must be a live plot handle; names must be NULL or valid C strings.
+ */
+int32_t plotui_set_input_map(struct PlotuiPlot *p,
+                             const char *drag_x,
+                             const char *drag_y,
+                             const char *shift_drag_x,
+                             const char *shift_drag_y);
+
+/**
+ * Route a drag through the input map (see `plotui_set_input_map`):
+ * `(dx, dy)` pointer deltas in whatever unit the scales are calibrated
+ * for — `rotate_scale` radians per unit, `pan_*_scale` framebuffer pixels
+ * per unit, `zoom_scale` log-zoom per unit. `shift` nonzero selects the
+ * shift-drag bindings.
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+void plotui_apply_drag(struct PlotuiPlot *p,
+                       double dx,
+                       double dy,
+                       int32_t shift,
+                       double rotate_scale,
+                       double pan_x_scale,
+                       double pan_y_scale,
+                       double zoom_scale);
 
 /**
  * Write the camera state (yaw, pitch, zoom, pan_x, pan_y) into `out[5]`.
@@ -490,6 +740,69 @@ char *plotui_tmux_wrap(const char *escape);
 double plotui_interactive_scale(const struct PlotuiPlot *p,
                                 bool interacting,
                                 double configured_scale);
+
+/**
+ * A layout over `n_nodes` with seeded initial positions in the unit ball.
+ * `edges` is `2 * n_edges` u32s as (i, j) index pairs. Free with
+ * `plotui_layout_free`. Returns NULL only on a malformed edge slice.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+struct PlotuiLayout *plotui_layout_new(size_t n_nodes,
+                                       const uint32_t *edges,
+                                       size_t n_edges,
+                                       uint32_t seed);
+
+/**
+ * Free a layout. NULL is a no-op.
+ *
+ * # Safety
+ * `l` must be a pointer from `plotui_layout_new` not yet freed.
+ */
+void plotui_layout_free(struct PlotuiLayout *l);
+
+/**
+ * One simulation tick; returns the mean displacement ("energy") — hosts
+ * stop repainting once it drops below ~1e-3. A NULL layout returns 0.
+ *
+ * # Safety
+ * `l` must be a live layout handle or NULL.
+ */
+float plotui_layout_step(struct PlotuiLayout *l);
+
+/**
+ * The layout's node count (grows with `plotui_layout_add_node`) — the
+ * `out` size contract for `plotui_layout_positions`.
+ *
+ * # Safety
+ * `l` must be a live layout handle or NULL (which counts 0).
+ */
+size_t plotui_layout_node_count(const struct PlotuiLayout *l);
+
+/**
+ * Write the current positions as flat `[x0, y0, z0, x1, …]` into `out`,
+ * which must hold `plotui_layout_node_count(l) * 3` floats — feed them to
+ * `plotui_set_graph_positions`.
+ *
+ * # Safety
+ * `l` must be a live layout handle; `out` must point at enough floats.
+ */
+int32_t plotui_layout_positions(const struct PlotuiLayout *l, float *out);
+
+/**
+ * Warm insertion of one node connected to `neighbors` (existing indices,
+ * `n_neighbors` u32s): it spawns beside its first neighbor and re-heats
+ * the simulation. Writes the new node's index to `out_index`; pair with
+ * `plotui_extend_graph`.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_layout_add_node(struct PlotuiLayout *l,
+                               const uint32_t *neighbors,
+                               size_t n_neighbors,
+                               size_t *out_index);
 
 #ifdef __cplusplus
 }  // extern "C"

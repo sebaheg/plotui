@@ -10,7 +10,9 @@ Quick start::
     plot = Plot()
     h = plot.add_line(xs, ys, name="forecast") # 2D: axes/ticks/legend appear
     plot.add_line(xs, costs, axis="y2")        # independent right-hand axis
-    plot.add_scatter3d(xs, ys, zs)             # any 3D trace -> orbit camera
+    plot.add_line(xs, temps, color="red")      # shorthands: "red", "#e63c78"
+    plot.set_colorway("vivid")                 # or a list of colors
+    plot.add_scatter3d(xs, ys, zs, name="A")   # any 3D trace -> orbit camera
     plot.add_line3d(xs, ys, zs)                # 3D trajectory/curve
     plot.add_surface3d(xs, ys, Z)              # grid surface, viridis by default
     plot.extend(h, more_xs, more_ys)           # stream data by trace handle
@@ -18,7 +20,7 @@ Quick start::
     # In Textual:   use plotui.textual.PlotWidget(plot)
 """
 
-from ._plotui import Plot
+from ._plotui import ForceLayout, Plot
 
-__all__ = ["Plot"]
+__all__ = ["ForceLayout", "Plot"]
 __version__ = "0.3.0"
