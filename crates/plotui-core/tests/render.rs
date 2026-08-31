@@ -838,6 +838,7 @@ fn extend_and_visibility_error_paths() {
     let sf =
         p.add_surface3d(vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0; 4], [1, 2, 3], None, false, None);
     let l2 = p.add_line2d(vec![0.0], vec![0.0], PALETTE[0], 2.0, None, YAxis::Primary);
+    let me = p.add_mesh3d(vec![[0.0; 3]; 3], vec![[0, 1, 2]], [1, 2, 3], None, None);
 
     assert_eq!(p.extend_xy(99, &[], &[]), Err(TraceError::UnknownTrace));
     assert_eq!(p.set_visible(99, false), Err(TraceError::UnknownTrace));
@@ -845,6 +846,9 @@ fn extend_and_visibility_error_paths() {
     assert_eq!(p.extend_pts(l2, &[[0.0; 3]]), Err(TraceError::WrongKind));
     assert_eq!(p.extend_pts(g, &[[0.0; 3]]), Err(TraceError::Structural));
     assert_eq!(p.extend_xy(sf, &[1.0], &[1.0]), Err(TraceError::Structural));
+    // A mesh is structural like a graph or a surface, not the wrong kind.
+    assert_eq!(p.extend_pts(me, &[[0.0; 3]]), Err(TraceError::Structural));
+    assert_eq!(p.extend_xy(me, &[1.0], &[1.0]), Err(TraceError::Structural));
 }
 
 #[test]
