@@ -100,7 +100,7 @@ fn spawn_ffmpeg(path: &Path, c: Container, w: usize, h: usize, fps: u32) -> io::
 fn frame_rgba(plot: &Plot, w: usize, h: usize) -> Vec<u8> {
     let bg = plot.chrome.bg;
     let mut px = plot.render(w, h).rgba();
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         if p[3] == 0 {
             p[..3].copy_from_slice(&bg);
         }

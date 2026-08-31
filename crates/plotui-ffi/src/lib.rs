@@ -1829,7 +1829,7 @@ pub unsafe extern "C" fn plotui_layout_positions(l: *const PlotuiLayout, out: *m
         }
         let pts = l.layout.positions();
         let dst = std::slice::from_raw_parts_mut(out, pts.len() * 3);
-        for (chunk, p) in dst.chunks_exact_mut(3).zip(pts) {
+        for (chunk, p) in dst.as_chunks_mut::<3>().0.iter_mut().zip(pts) {
             chunk.copy_from_slice(p);
         }
         PLOTUI_OK
