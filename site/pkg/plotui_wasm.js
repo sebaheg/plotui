@@ -70,6 +70,67 @@ export class ForceLayout {
 if (Symbol.dispose) ForceLayout.prototype[Symbol.dispose] = ForceLayout.prototype.free;
 
 /**
+ * A polygonised iso-surface: vertex coordinates split per axis (the shape
+ * `Plot.add_mesh3d` takes) plus the flat `[a0, b0, c0, a1, …]` triangle
+ * indices that join them.
+ */
+export class Mesh {
+    static __wrap(ptr) {
+        const obj = Object.create(Mesh.prototype);
+        obj.__wbg_ptr = ptr;
+        MeshFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        MeshFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_mesh_free(ptr, 0);
+    }
+    /**
+     * @returns {Uint32Array}
+     */
+    tris() {
+        const ret = wasm.mesh_tris(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    xs() {
+        const ret = wasm.mesh_xs(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    ys() {
+        const ret = wasm.mesh_ys(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    zs() {
+        const ret = wasm.mesh_zs(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) Mesh.prototype[Symbol.dispose] = Mesh.prototype.free;
+
+/**
  * A `pick_element` hit: a node or an edge, by flat index (nodes across all
  * 3D traces in insertion order; edges across graph traces).
  */
@@ -241,6 +302,42 @@ export class Plot {
         var ptr4 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len4 = WASM_VECTOR_LEN;
         const ret = wasm.plot_add_line3d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, isLikeNone(width) ? Number.MAX_SAFE_INTEGER : Math.fround(width), ptr4, len4);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Add a triangle mesh: `xs`/`ys`/`zs` are the vertices, `tris` the flat
+     * `[a0, b0, c0, a1, …]` index triples that join them. Colormapped
+     * ("viridis" by default, or "plasma") over the mesh's own z range, or
+     * solid when a `color` is given without a `colormap`. Pair with
+     * `marching_cubes` for an iso-surface.
+     * @param {Float32Array} xs
+     * @param {Float32Array} ys
+     * @param {Float32Array} zs
+     * @param {Uint32Array} tris
+     * @param {string | null} [color]
+     * @param {string | null} [colormap]
+     * @param {string | null} [name]
+     * @returns {number}
+     */
+    add_mesh3d(xs, ys, zs, tris, color, colormap, name) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArrayF32ToWasm0(zs, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray32ToWasm0(tris, wasm.__wbindgen_malloc);
+        const len3 = WASM_VECTOR_LEN;
+        var ptr4 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len4 = WASM_VECTOR_LEN;
+        var ptr5 = isLikeNone(colormap) ? 0 : passStringToWasm0(colormap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        var ptr6 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len6 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_mesh3d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -928,6 +1025,35 @@ export class Plot {
     }
 }
 if (Symbol.dispose) Plot.prototype[Symbol.dispose] = Plot.prototype.free;
+
+/**
+ * Polygonise a sampled scalar field: the `field == iso` surface of
+ * `values[(k * ny + j) * nx + i]`, sampled at `origin + [i, j, k] * cell`.
+ *
+ * The marching-cubes tables live only in Rust, so a browser scene and
+ * `plotui example mandelbulb` agree triangle for triangle. Vertices are
+ * shared between neighbouring cells, which is what lets `add_mesh3d`
+ * shade the result smoothly.
+ * @param {Float32Array} values
+ * @param {number} nx
+ * @param {number} ny
+ * @param {number} nz
+ * @param {Float32Array} origin
+ * @param {number} cell
+ * @param {number} iso
+ * @returns {Mesh}
+ */
+export function marching_cubes(values, nx, ny, nz, origin, cell, iso) {
+    const ptr0 = passArrayF32ToWasm0(values, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(origin, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.marching_cubes(ptr0, len0, nx, ny, nz, ptr1, len1, cell, iso);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Mesh.__wrap(ret[0]);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -965,6 +1091,9 @@ function __wbg_get_imports() {
 const ForceLayoutFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_forcelayout_free(ptr, 1));
+const MeshFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_mesh_free(ptr, 1));
 const PickHitFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_pickhit_free(ptr, 1));
@@ -986,6 +1115,11 @@ function getArrayF32FromWasm0(ptr, len) {
 function getArrayF64FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
 let cachedDataViewMemory0 = null;

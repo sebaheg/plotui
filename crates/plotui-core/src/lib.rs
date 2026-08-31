@@ -14,11 +14,13 @@
 mod font;
 mod hershey;
 mod layout;
+mod marching;
 mod ticks;
 
 pub use font::{draw_text, draw_text_aa, text_width, CHAR_H, CHAR_W};
 pub use hershey::{draw_text_hershey, hershey_text_width};
 pub use layout::ForceLayout;
+pub use marching::marching_cubes;
 pub use ticks::{
     civil_from_days, date_ticks, days_from_civil, format_datetime, format_tick, nice_ticks,
 };
@@ -883,6 +885,18 @@ pub enum Trace {
         name: Option<String>,
         axis: YAxis,
     },
+    Mesh3d {
+        /// Indexed triangles: `tris[t]` names three vertices of `verts`, in
+        /// the same (x, y, z) space as `Scatter3d`. A triangle with an
+        /// out-of-range index or a non-finite vertex is skipped, the way a
+        /// surface cell with a non-finite corner is a hole.
+        verts: Vec<[f32; 3]>,
+        tris: Vec<[u32; 3]>,
+        /// Solid mesh color; `colormap` replaces it with a z ramp.
+        color: Rgb,
+        colormap: Option<Colormap>,
+        name: Option<String>,
+    },
 }
 
 impl Trace {
@@ -893,6 +907,7 @@ impl Trace {
                 | Trace::Graph3d { .. }
                 | Trace::Line3d { .. }
                 | Trace::Surface3d { .. }
+                | Trace::Mesh3d { .. }
         )
     }
 
@@ -904,7 +919,8 @@ impl Trace {
             | Trace::Surface3d { name, .. }
             | Trace::Scatter2d { name, .. }
             | Trace::Line2d { name, .. }
-            | Trace::Bar2d { name, .. } => name.as_deref(),
+            | Trace::Bar2d { name, .. }
+            | Trace::Mesh3d { name, .. } => name.as_deref(),
         }
     }
 
@@ -917,7 +933,9 @@ impl Trace {
             | Trace::Bar2d { color, .. } => *color,
             // A colormapped surface has no single color; its legend swatch is
             // a sample from the upper half of the ramp.
-            Trace::Surface3d { color, colormap, .. } => colormap.map_or(*color, |m| m.sample(0.75)),
+            Trace::Surface3d { color, colormap, .. } | Trace::Mesh3d { color, colormap, .. } => {
+                colormap.map_or(*color, |m| m.sample(0.75))
+            }
             Trace::Graph3d { node_colors, .. } => {
                 node_colors.first().copied().unwrap_or([120, 180, 230])
             }
@@ -1079,6 +1097,11 @@ fn compute_meta(t: &Trace) -> TraceMeta {
         Trace::Line3d { pts, .. } => {
             let mut b = b3_empty();
             let n = b3_seen_finite(&mut b, pts);
+            TraceMeta { visible: true, node_len: 0, vert_len: n, bounds: b }
+        }
+        Trace::Mesh3d { verts, .. } => {
+            let mut b = b3_empty();
+            let n = b3_seen_finite(&mut b, verts);
             TraceMeta { visible: true, node_len: 0, vert_len: n, bounds: b }
         }
         Trace::Surface3d { xs, ys, zs, .. } => {
@@ -1355,6 +1378,24 @@ impl Plot {
         self.push_trace(Trace::Surface3d { xs, ys, zs, color, colormap, wireframe, name })
     }
 
+    /// Add a triangle mesh: `tris` indexes into `verts`. Triangles with an
+    /// out-of-range index or a non-finite vertex are skipped. `colormap`
+    /// samples over the mesh's own z range, as for a surface. Vertices are
+    /// not pickable.
+    ///
+    /// [`marching_cubes`] turns a sampled scalar field into exactly this
+    /// pair of arrays.
+    pub fn add_mesh3d(
+        &mut self,
+        verts: Vec<[f32; 3]>,
+        tris: Vec<[u32; 3]>,
+        color: Rgb,
+        colormap: Option<Colormap>,
+        name: Option<String>,
+    ) -> TraceId {
+        self.push_trace(Trace::Mesh3d { verts, tris, color, colormap, name })
+    }
+
     /// Append points to an existing 2D trace: `(xs, ys)` for scatter and line
     /// traces, `(xs, heights)` for bars. Concatenation semantics — the result
     /// renders byte-identically to a plot built with the concatenated arrays
@@ -1384,7 +1425,9 @@ impl Plot {
                 self.meta[id].visible = visible;
                 Ok(())
             }
-            Trace::Graph3d { .. } | Trace::Surface3d { .. } => Err(TraceError::Structural),
+            Trace::Graph3d { .. } | Trace::Surface3d { .. } | Trace::Mesh3d { .. } => {
+                Err(TraceError::Structural)
+            }
             _ => Err(TraceError::WrongKind),
         }
     }
@@ -1424,7 +1467,9 @@ impl Plot {
                 m.vert_len += b3_seen_finite(&mut m.bounds, pts);
                 Ok(())
             }
-            Trace::Graph3d { .. } | Trace::Surface3d { .. } => Err(TraceError::Structural),
+            Trace::Graph3d { .. } | Trace::Surface3d { .. } | Trace::Mesh3d { .. } => {
+                Err(TraceError::Structural)
+            }
             _ => Err(TraceError::WrongKind),
         }
     }
@@ -1691,6 +1736,9 @@ impl Plot {
                         }
                     }
                 }
+                Trace::Mesh3d { verts, .. } => {
+                    v.extend(verts.iter().filter(|p| p.iter().all(|c| c.is_finite())));
+                }
                 _ => {}
             }
         }
@@ -1736,6 +1784,9 @@ impl Plot {
                             }
                         }
                     }
+                }
+                Trace::Mesh3d { verts, .. } => {
+                    v.extend(verts.iter().filter(|p| p.iter().all(|c| c.is_finite())));
                 }
                 _ => {}
             }
@@ -2259,6 +2310,66 @@ impl Plot {
                         let b = pr.project(w[1]);
                         let c = fog(*color, (a[2] + b[2]) * 0.5);
                         stroke3d(&mut fb, a, b, r, c);
+                    }
+                }
+                Trace::Mesh3d { verts, tris, color, colormap, .. } => {
+                    // The colormap spans this mesh's own z range.
+                    let (mut zlo, mut zhi) = (f32::INFINITY, f32::NEG_INFINITY);
+                    for v in verts.iter().filter(|v| v[2].is_finite()) {
+                        zlo = zlo.min(v[2]);
+                        zhi = zhi.max(v[2]);
+                    }
+                    let zrange = (zhi - zlo).max(1e-6);
+                    // Project each vertex once, keeping the view-space point
+                    // so normals are independent of zoom/pixels.
+                    let vp: Vec<[f32; 3]> = verts.iter().map(|&v| pr.view_norm(v)).collect();
+                    let sp: Vec<[f32; 3]> = vp.iter().map(|&v| pr.to_screen(v)).collect();
+                    // Drawable vertices, resolved once: both passes below run
+                    // over every triangle, and re-checking three vertices ×
+                    // three coordinates each time is the difference between
+                    // this and the rasterizer dominating.
+                    let drawable: Vec<bool> =
+                        verts.iter().map(|v| v.iter().all(|c| c.is_finite())).collect();
+                    let ok =
+                        |t: &&[u32; 3]| t.iter().all(|&i| drawable.get(i as usize) == Some(&true));
+                    // Gouraud shading as for a surface, but the normals come
+                    // from the triangulation: each vertex sums the (area-
+                    // weighted) normals of its incident facets, so a mesh
+                    // whose vertices are shared between cells shades
+                    // smoothly across them.
+                    let mut normal = vec![[0.0f32; 3]; verts.len()];
+                    for t in tris.iter().filter(ok) {
+                        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                        let n = vcross(vsub(vp[b], vp[a]), vsub(vp[c], vp[a]));
+                        for &k in &[a, b, c] {
+                            for d in 0..3 {
+                                normal[k][d] += n[d];
+                            }
+                        }
+                    }
+                    // The same two-sided headlight the surface uses.
+                    let light = [-0.35f32, 0.5, -0.79];
+                    let vcolor: Vec<Rgb> = (0..verts.len())
+                        .map(|k| {
+                            let n = normal[k];
+                            let nn = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                            // A vertex no drawn triangle touches has no
+                            // normal; its color is never used.
+                            let lambert = if nn > 1e-9 {
+                                ((n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / nn).abs()
+                            } else {
+                                1.0
+                            };
+                            let base =
+                                colormap.map_or(*color, |m| m.sample((verts[k][2] - zlo) / zrange));
+                            fog(shade(base, 0.55 + 0.45 * lambert), sp[k][2])
+                        })
+                        .collect();
+                    // Either winding draws: the z-buffer resolves occlusion,
+                    // so there is no backface to cull.
+                    for t in tris.iter().filter(ok) {
+                        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                        fb.tri_shaded(sp[a], sp[b], sp[c], vcolor[a], vcolor[b], vcolor[c]);
                     }
                 }
                 // 2D traces are not projected into a 3D scene.
@@ -3684,6 +3795,145 @@ mod tests {
         );
     }
 
+    /// An icosahedron-ish mesh: the six vertices of an octahedron and its
+    /// eight faces, wound consistently.
+    fn octahedron() -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+        let verts = vec![
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        let tris = vec![
+            [0, 2, 4],
+            [2, 1, 4],
+            [1, 3, 4],
+            [3, 0, 4],
+            [2, 0, 5],
+            [1, 2, 5],
+            [3, 1, 5],
+            [0, 3, 5],
+        ];
+        (verts, tris)
+    }
+
+    #[test]
+    fn mesh_draws_and_is_not_pickable() {
+        let mut plot = Plot::new();
+        plot.show_box = false;
+        let (verts, tris) = octahedron();
+        plot.add_mesh3d(verts, tris, [200, 60, 60], None, None);
+        let lit = plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count();
+        assert!(lit > 100, "mesh drew {lit} pixels");
+        assert_eq!(plot.node_count(), 0);
+        assert_eq!(plot.vertex_count(), 6);
+    }
+
+    /// A mesh is 3D geometry: one alone routes the plot to the orbit camera.
+    #[test]
+    fn a_mesh_alone_makes_the_plot_3d() {
+        let mut plot = Plot::new();
+        let (verts, tris) = octahedron();
+        plot.add_mesh3d(verts, tris, [200, 60, 60], None, None);
+        assert!(plot.is_3d());
+    }
+
+    /// The z-buffer, not the triangle order, decides: a near triangle
+    /// covers a far one whichever is drawn first.
+    #[test]
+    fn mesh_front_triangle_wins_the_depth_test() {
+        // 0: the near quad alone, 1: the far quad alone, 2/3: both, in
+        // either draw order.
+        let probe = |case: usize| -> Rgb {
+            let mut plot = Plot::new();
+            plot.show_box = false;
+            // Two parallel quads facing the default camera, the green one
+            // nearer along -y (the camera's look direction at yaw 0).
+            let verts = vec![
+                [-1.0, 1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, 1.0, 1.0],
+                [-1.0, -1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, -1.0, 1.0],
+                [-1.0, -1.0, 1.0],
+            ];
+            let far: Vec<[u32; 3]> = vec![[0, 1, 2], [0, 2, 3]];
+            let near: Vec<[u32; 3]> = vec![[4, 5, 6], [4, 6, 7]];
+            let tris = match case {
+                0 => near.clone(),
+                1 => far.clone(),
+                2 => [near.clone(), far.clone()].concat(),
+                _ => [far.clone(), near.clone()].concat(),
+            };
+            // Solid colors: the shade/fog terms are the same for both quads,
+            // so the winner is identifiable by hue alone.
+            plot.add_mesh3d(verts, tris.clone(), [200, 40, 40], None, None);
+            plot.bounds_override = Some(([-1.0; 3], [1.0; 3]));
+            let rgba = plot.render(200, 200).rgba();
+            let i = (100 * 200 + 100) * 4;
+            [rgba[i], rgba[i + 1], rgba[i + 2]]
+        };
+        // Whichever order they arrive in, the pixel is the near quad's —
+        // the depth test chose, not the draw order. The far quad alone
+        // paints a different (foggier) color, so the check has teeth.
+        assert_ne!(probe(0), probe(1), "the two quads are indistinguishable");
+        assert_eq!(probe(2), probe(0), "near drawn first");
+        assert_eq!(probe(3), probe(0), "far drawn first");
+    }
+
+    /// Smooth shading: shared vertices carry averaged normals, so a curved
+    /// mesh renders as a gradient rather than a handful of facet colors.
+    #[test]
+    fn mesh_shading_is_smooth_not_faceted() {
+        let n = 24usize;
+        let cell = 2.0 / (n - 1) as f32;
+        let values: Vec<f32> = (0..n)
+            .flat_map(|k| (0..n).flat_map(move |j| (0..n).map(move |i| (i, j, k))))
+            .map(|(i, j, k)| {
+                let c = |v: usize| -1.0 + v as f32 * cell;
+                (c(i) * c(i) + c(j) * c(j) + c(k) * c(k)).sqrt() - 0.7
+            })
+            .collect();
+        let (verts, tris) = marching_cubes(&values, n, n, n, [-1.0; 3], cell, 0.0);
+        let mut plot = Plot::new();
+        plot.show_box = false;
+        plot.add_mesh3d(verts, tris, [0, 0, 0], Some(Colormap::Viridis), None);
+        let mut colors = std::collections::HashSet::new();
+        for px in plot.render(200, 200).rgba().chunks(4) {
+            if px[3] > 0 {
+                colors.insert([px[0], px[1], px[2]]);
+            }
+        }
+        assert!(colors.len() > 200, "only {} distinct colors — looks faceted", colors.len());
+    }
+
+    /// Bad triangles are skipped, not drawn and not fatal: an out-of-range
+    /// index or a non-finite vertex removes just that triangle.
+    #[test]
+    fn mesh_skips_broken_triangles() {
+        let lit = |tris: Vec<[u32; 3]>, nan: bool| -> usize {
+            let mut plot = Plot::new();
+            plot.show_box = false;
+            let mut verts =
+                vec![[-1.0, 0.0, -1.0], [1.0, 0.0, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]];
+            if nan {
+                verts[2] = [f32::NAN; 3];
+            }
+            plot.add_mesh3d(verts, tris, [200, 60, 60], None, None);
+            plot.bounds_override = Some(([-1.0; 3], [1.0; 3]));
+            plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count()
+        };
+        let whole = lit(vec![[0, 1, 2], [0, 2, 3]], false);
+        assert!(whole > 100, "quad drew {whole} pixels");
+        assert!(lit(vec![[0, 1, 2], [0, 2, 9]], false) < whole, "bad index still drew");
+        assert!(lit(vec![[0, 1, 2], [0, 2, 3]], true) < whole, "NaN vertex still drew");
+        assert_eq!(lit(vec![[0, 1, 99]], false), 0, "a wholly broken mesh drew pixels");
+    }
+
     /// The wireframe overlay adds pixels of its own on top of the fill.
     #[test]
     fn surface_wireframe_changes_pixels() {
@@ -3732,6 +3982,20 @@ mod tests {
         let unnamed = lit(None, false);
         assert!(lit(Some("trajectory"), false) > unnamed);
         assert_eq!(lit(None, true), unnamed);
+    }
+
+    /// A named mesh reaches the 3D legend like any other named trace, with
+    /// a swatch sampled from the upper half of its ramp.
+    #[test]
+    fn named_mesh_draws_a_legend() {
+        let lit = |name: Option<String>| -> usize {
+            let mut plot = Plot::new();
+            plot.show_box = false;
+            let (verts, tris) = octahedron();
+            plot.add_mesh3d(verts, tris, [0, 0, 0], Some(Colormap::Plasma), name);
+            plot.render(200, 200).rgba().chunks(4).filter(|px| px[3] > 0).count()
+        };
+        assert!(lit(Some("bulb".into())) > lit(None));
     }
 
     /// `name` on scatter3d and graph3d reaches the legend the same way as

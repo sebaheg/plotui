@@ -10,6 +10,7 @@
 // the fallback path (a static import would abort this whole module).
 let Plot = null;
 let ForceLayout = null;
+let marching_cubes = null;
 let memory = null;
 const DPR_MAX = 2;
 const T1 = '#ec4c86', T2 = '#45c8d1', T3 = '#f0a13c', INK = '#676f76';
@@ -406,6 +407,117 @@ const EXAMPLES = {
     },
   },
 
+  mandelbulb: {
+    is3d: true,
+    setup(plot, ui) {
+      // Mirrors crates/plotui-cli/src/mandelbulb.rs constant-for-constant
+      // and shares its marching-cubes tables through wasm, so this is the
+      // bulb from `plotui example mandelbulb`. The field is sampled in f32
+      // (Math.fround) to track the Rust one, but acos/atan2/pow round
+      // differently here, so a handful of samples near the surface land on
+      // the other side of the iso value: expect the odd triangle to differ.
+      const RES = 64, HALF = 1.2, CELL = 2 * HALF / (RES - 1), ISO = 0;
+      const POWER = 8, ITERS = 14, BAILOUT = 2;
+      const BANDS = 60, REVEAL_MS = 150;
+
+      // The power-8 Mandelbulb distance estimator, in f32 throughout so the
+      // field matches the Rust one sample for sample.
+      const f = Math.fround;
+      const distance = (cx, cy, cz) => {
+        let zx = cx, zy = cy, zz = cz, dr = 1, r = 0, escaped = false;
+        for (let i = 0; i < ITERS; i++) {
+          r = f(Math.sqrt(f(f(f(zx * zx) + f(zy * zy)) + f(zz * zz))));
+          if (r > BAILOUT) { escaped = true; break; }
+          const theta = f(f(Math.acos(f(zz / r))) * POWER);
+          const phi = f(f(Math.atan2(zy, zx)) * POWER);
+          dr = f(f(f(f(Math.pow(r, POWER - 1)) * POWER) * dr) + 1);
+          const zr = f(Math.pow(r, POWER));
+          const st = f(Math.sin(theta));
+          zx = f(f(f(zr * st) * f(Math.cos(phi))) + cx);
+          zy = f(f(f(zr * st) * f(Math.sin(phi))) + cy);
+          zz = f(f(zr * f(Math.cos(theta))) + cz);
+        }
+        const d = f(f(f(0.5 * f(Math.log(Math.max(r, 1e-9)))) * r) / dr);
+        return escaped ? Math.max(d, 1e-6) : Math.min(d, -1e-6);
+      };
+
+      const values = new Float32Array(RES * RES * RES);
+      const coord = (i) => f(-HALF + f(i * CELL));
+      for (let k = 0, n = 0; k < RES; k++) {
+        for (let j = 0; j < RES; j++) {
+          for (let i = 0; i < RES; i++) values[n++] = distance(coord(i), coord(j), coord(k));
+        }
+      }
+      const mesh = marching_cubes(values, RES, RES, RES,
+        Float32Array.from([-HALF, -HALF, -HALF]), CELL, ISO);
+      const [mx, my, mz, mt] = [mesh.xs(), mesh.ys(), mesh.zs(), mesh.tris()];
+
+      // Deal the triangles into height bands by z centroid, then re-index
+      // each band against its own vertices — plus the bulb's lowest and
+      // highest vertex, so the Plasma ramp spans the whole bulb in every
+      // slice instead of restarting inside each one.
+      const bands = Array.from({ length: BANDS }, () => []);
+      for (let t = 0; t < mt.length; t += 3) {
+        const zc = (mz[mt[t]] + mz[mt[t + 1]] + mz[mt[t + 2]]) / 3;
+        const b = Math.min(((zc + HALF) / (2 * HALF) * BANDS) | 0, BANDS - 1);
+        bands[b].push(t);
+      }
+      let lo = 0, hi = 0;
+      for (let v = 0; v < mz.length; v++) {
+        if (mz[v] < mz[lo]) lo = v;
+        if (mz[v] > mz[hi]) hi = v;
+      }
+      const local = new Int32Array(mz.length).fill(-1);
+      const handles = bands.map((band) => {
+        const xs = [mx[lo], mx[hi]], ys = [my[lo], my[hi]], zs = [mz[lo], mz[hi]];
+        const tris = [], touched = [lo, hi];
+        local[lo] = 0;
+        local[hi] = 1;
+        for (const t of band) {
+          for (let e = 0; e < 3; e++) {
+            const g = mt[t + e];
+            if (local[g] < 0) {
+              local[g] = xs.length;
+              xs.push(mx[g]);
+              ys.push(my[g]);
+              zs.push(mz[g]);
+              touched.push(g);
+            }
+            tris.push(local[g]);
+          }
+        }
+        for (const g of touched) local[g] = -1;
+        return plot.add_mesh3d(
+          Float32Array.from(xs), Float32Array.from(ys), Float32Array.from(zs),
+          Uint32Array.from(tris), undefined, 'plasma', undefined,
+        );
+      });
+      // Pin the frame to the sampled box so the camera never breathes as
+      // bands arrive.
+      plot.set_bounds(-1.3, -1.3, -1.3, 1.3, 1.3, 1.3);
+      for (let i = 1; i < handles.length; i++) plot.set_visible(handles[i], false);
+
+      let last = performance.now();
+      let shown = 1, acc = 0;
+      return {
+        tick() {
+          const now = performance.now();
+          const dt = Math.min(now - last, 250);
+          last = now;
+          if (!ui.dragging()) plot.rotate(0.004, 0);
+          if (shown < handles.length) {
+            acc += dt;
+            while (acc >= REVEAL_MS && shown < handles.length) {
+              acc -= REVEAL_MS;
+              plot.set_visible(handles[shown++], true);
+            }
+          }
+          ui.markDirty(); // spinning even after the reveal completes
+        },
+      };
+    },
+  },
+
   lorenz: {
     is3d: true,
     setup(plot) {
@@ -740,6 +852,7 @@ function showFallback() {
     const wasm = await mod.default();
     Plot = mod.Plot;
     ForceLayout = mod.ForceLayout;
+    marching_cubes = mod.marching_cubes;
     memory = wasm.memory;
   } catch (e) {
     console.error('plotui wasm failed to load:', e);

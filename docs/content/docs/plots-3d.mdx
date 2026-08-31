@@ -1,6 +1,6 @@
 ---
 title: 3D plots
-description: Scatter clouds, pickable graphs, trajectories, and Gouraud-shaded surfaces under one orbit camera.
+description: Scatter clouds, pickable graphs, trajectories, Gouraud-shaded surfaces, and triangle meshes under one orbit camera.
 ---
 
 Any 3D trace switches the whole plot to the orbit camera: drag rotates,
@@ -124,3 +124,35 @@ Grid vertices are not pickable.
 
 The z-buffer handles occlusion globally: a trajectory drawn through a surface
 disappears behind hills and re-emerges, with no ordering to manage.
+
+## Meshes
+
+Arbitrary geometry — iso-surfaces, scanned models, anything that reduces to
+triangles — shaded like a surface but free of the grid:
+
+```python
+plot.add_mesh3d(
+    xs, ys, zs,              # the vertices
+    tris,                    # [(a, b, c), ...] indices into them
+    colormap="plasma",       # or None + `color` for a solid mesh
+    name=None,
+)
+```
+
+Triangles index the vertex arrays, so vertices shared between faces are
+stored once and shaded once. Each vertex takes its normal from the facets
+that meet there, which is what makes a mesh of shared vertices read as a
+smooth surface rather than a field of facets; shading is two-sided, so
+either winding draws and there is no backface to cull. The colormap runs
+over the mesh's own z range. Triangles with a NaN vertex or an out-of-range
+index are skipped, the way a surface cell with a NaN corner is a hole. Mesh
+vertices are not pickable, so adding a mesh never shifts existing node
+indices.
+
+`marching_cubes(values, nx, ny, nz, origin, cell, iso)` turns a sampled
+scalar field into exactly these two arrays, sharing vertices along cell
+edges so the result shades smoothly across cells.
+
+Meshes are available in Rust and JavaScript today; the Python binding above
+is the shape it will take. Run `plotui example mandelbulb` to see one — the
+Mandelbulb fractal, polygonised and revealed slice by slice.

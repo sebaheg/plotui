@@ -218,7 +218,7 @@ dispatches those to every class in the MRO, so both would run).
       frontend (`plotui example timeseries`, `--range-slider`,
       `PlotWidget(..., range_slider=True)`)
 - [ ] 2D step trace; axis titles
-- [ ] 3D surface / mesh; axis cube with labels
+- [ ] Axis cube with labels
 - [x] Interactive hover / pick for 3D graph nodes *and* edges (opt-in via
       `PlotWidget(..., pickable=True)`: hover lights the element up white,
       click posts `ElementPicked`)
@@ -240,11 +240,16 @@ dispatches those to every class in the MRO, so both would run).
 - [x] CLI: `plotui line|scatter|bar` from stdin or a file — interactive on a
       TTY, one static frame when piped; installed via curl, Homebrew, cargo,
       or pip (see Install above)
-- [x] CLI examples: `plotui example scatter|graph|stream|timeseries|deps|lidar`
+- [x] CLI examples:
+      `plotui example scatter|graph|stream|timeseries|deps|lidar|mandelbulb`
       — self-contained demo scenes, no input data needed
 - [x] Force-directed graphs: a `ForceLayout` simulation in the core (exposed
       in Python, Go, and JS) plus in-place graph mutation — move, recolor,
       and grow a live graph without rebuilds (`plotui example deps`)
+- [x] 3D surfaces and triangle meshes: Gouraud-shaded geometry with height
+      colormaps, plus a `marching_cubes` helper that turns a sampled scalar
+      field into a mesh (`plotui example mandelbulb`; meshes in Rust and JS
+      so far, Python to follow)
 - [x] Animation export: `--out file.mp4|gif|webm` records any animated
       example headlessly via ffmpeg (`plotui example lidar --out demo.mp4`);
       `--out file.png` takes one frame of any chart or example
