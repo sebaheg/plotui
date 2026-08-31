@@ -37,11 +37,18 @@ Or run a built-in example — no data needed (`plotui example` lists them):
 plotui example scatter   # rotating 3D scatter, three clusters — the plotui.xyz hero
 plotui example graph     # interactive 3D graph: hover nodes and edges
 plotui example stream    # live streaming plot, three series appended at 20 Hz
+plotui example lidar     # streaming 3D point cloud: a LiDAR sweep, beam by beam
 ```
 
 On a TTY the chart opens interactively (drag to pan, scroll to zoom, hover for
 the crosshair, `q` to quit); piped or with `--static` it prints one frame and
-exits. The CLI needs a terminal with Kitty graphics — **Kitty**, **Ghostty**,
+exits. Any example also records to a file with `--out` — no graphics terminal
+needed, just [ffmpeg](https://ffmpeg.org) on your PATH:
+
+```bash
+plotui example lidar --out lidar.mp4          # 10 s clip (.gif/.webm work too)
+plotui example scatter --out scatter.png      # one frame as an image
+``` The CLI needs a terminal with Kitty graphics — **Kitty**, **Ghostty**,
 **iTerm2 ≥ 3.5**, **WezTerm**, or **Konsole**; see
 [Terminal support](/docs/terminals).
 

@@ -21,7 +21,13 @@
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+html {
+  scroll-behavior: smooth;
+  /* Without this, iOS Safari "font boosting" inflates text ~30% and breaks
+     the header/hero layout on phones. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 body {
@@ -45,7 +51,7 @@ header {
   border-bottom: 1px solid var(--grid);
 }
 .nav {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
   /* Vertical only — a `padding` shorthand here would zero out .wrap's side
      padding (same element, same specificity) and go edge-to-edge on phones. */
   padding-top: 20px; padding-bottom: 20px;
@@ -67,6 +73,7 @@ a.wordmark:hover { text-decoration: none; color: var(--bright); }
 .nav-links a.gh {
   color: var(--bg); background: var(--trace-3);
   padding: 8px 14px; border-radius: 6px;
+  white-space: nowrap;
 }
 .nav-links a.gh:hover { background: #f7b968; }
 .nav-links a[aria-current="page"] { color: var(--bright); }
@@ -191,6 +198,9 @@ footer a { color: var(--body); }
   touch-action: none; cursor: grab;
 }
 .ex-canvas:active { cursor: grabbing; }
+/* 2D cards inherit touch-action: none like the 3D ones: a one-finger drag
+   scrubs the engine's crosshair (the touch analogue of hovering) and never
+   turns into a page scroll. */
 .ex-canvas.crosshair { cursor: crosshair; }
 .ex-fallback { padding: 24px; color: var(--body); font: 12px/1.6 var(--mono); }
 .ex-code {
@@ -200,6 +210,26 @@ footer a { color: var(--body); }
   overflow-x: auto; color: var(--body);
 }
 .ex-code[hidden] { display: none; }
+
+/* ---------- maximized example card ---------- */
+/* The green macOS "zoom" light in the title bar toggles it. */
+.term-bar button.b-max {
+  border: 0; padding: 0; cursor: pointer;
+  background: #28c840;
+}
+.term-bar button.b-max:hover { background: #52e06a; }
+.ex-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(5, 7, 9, .82);
+}
+.ex-backdrop[hidden] { display: none; }
+.ex-card.max {
+  position: fixed; inset: 3vh 3vw; z-index: 60; margin: 0;
+  display: flex; flex-direction: column;
+}
+.ex-card.max .term-body { flex: 1; min-height: 0; }
+.ex-card.max .ex-canvas { height: 100%; }
+.ex-card.max .ex-code { flex-shrink: 0; max-height: 32vh; overflow-y: auto; }
 .ex-code .kw { color: var(--trace-1); }
 .ex-code .fn { color: var(--trace-2); }
 .ex-code .str { color: var(--trace-3); }
@@ -212,5 +242,17 @@ footer a { color: var(--body); }
 }
 @media (max-width: 640px) {
   .nav-links a:not(.gh):not(.ex) { display: none; }
+  .nav-links { gap: 16px; }
+  .nav { padding-top: 16px; padding-bottom: 16px; }
   section { padding: 56px 0; }
+  /* Stack the CTA pair full-width instead of two ragged left-aligned pills. */
+  .cta-row { flex-direction: column; align-items: stretch; }
+  .cta-row .btn { text-align: center; }
+}
+@media (max-width: 400px) {
+  /* 320px-wide phones: the full-size wordmark + examples + GitHub pill
+     overflow the viewport by a few px. */
+  .wordmark { font-size: 15px; }
+  .nav-links { gap: 10px; }
+  .nav-links a.gh { padding: 7px 10px; }
 }

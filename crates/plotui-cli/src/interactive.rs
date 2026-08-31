@@ -2,7 +2,7 @@
 //! Drag to pan, scroll to zoom, hover for the crosshair; `q`/Esc/Ctrl-C quit.
 
 use std::io::stdout;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -12,7 +12,7 @@ use plotui_core::Plot;
 use plotui_ratatui::{PlotEvent, PlotOptions, PlotState, PlotWidget};
 use plotui_term::RenderMode;
 
-pub type FeedFn = Box<dyn FnMut(&mut PlotState)>;
+pub type FeedFn = Box<dyn FnMut(&mut PlotState, f64)>;
 pub type KeyFn = Box<dyn FnMut(&mut PlotState, KeyCode) -> bool>;
 pub type EventFn = Box<dyn FnMut(&mut PlotState, PlotEvent)>;
 
@@ -25,14 +25,32 @@ pub struct Hooks {
     /// Spin the camera (~30 Hz); pauses while dragging or while an element
     /// is selected, and space toggles it.
     pub auto_rotate: bool,
-    /// Called once per loop pass, before drawing — streaming scenes append
-    /// points here (time-based, so event bursts don't speed the feed up).
+    /// Called once per loop pass, before drawing, with the elapsed time in
+    /// milliseconds (capped, so a suspended terminal doesn't fast-forward the
+    /// feed) — streaming scenes append points here. Taking dt from the caller
+    /// keeps scenes clock-free, so the headless recorder can drive them at a
+    /// fixed virtual rate.
     pub feed: Option<FeedFn>,
     /// Extra key bindings; return true to consume the key.
     pub on_key: Option<KeyFn>,
     /// Called with every interaction event the widget reports (a pick, a
     /// hover change, a range-slider change).
     pub on_plot_event: Option<EventFn>,
+}
+
+/// Cap on per-pass elapsed time so a suspended terminal (or a slow encode)
+/// doesn't fast-forward feeds when it resumes.
+const MAX_DT_MS: f64 = 250.0;
+
+/// One animation step: run the feed with `dt_ms` of elapsed time, then
+/// auto-rotate if `spin`. Shared by the event loop and the headless recorder.
+pub fn advance(state: &mut PlotState, hooks: &mut Hooks, dt_ms: f64, spin: bool) {
+    if let Some(feed) = hooks.feed.as_mut() {
+        feed(state, dt_ms);
+    }
+    if spin {
+        state.tick();
+    }
 }
 
 pub fn run(
@@ -64,11 +82,16 @@ pub fn run_with(
 
     let mut terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;
+    let mut last = Instant::now();
     let result = (|| -> std::io::Result<()> {
         loop {
-            if let Some(feed) = hooks.feed.as_mut() {
-                feed(&mut state);
-            }
+            let now = Instant::now();
+            let dt = (now.duration_since(last).as_secs_f64() * 1000.0).min(MAX_DT_MS);
+            last = now;
+            // Spinning yields to the user: never while dragging, and a selected
+            // element holds the view still until it's deselected.
+            let spinning = spin && !state.dragging() && state.plot().selected.is_none();
+            advance(&mut state, &mut hooks, dt, spinning);
             terminal.draw(|f| {
                 let mut area = f.area();
                 if let Some(w) = width {
@@ -108,11 +131,6 @@ pub fn run_with(
                         }
                     }
                 }
-            }
-            // Spinning yields to the user: never while dragging, and a selected
-            // element holds the view still until it's deselected.
-            if spin && !state.dragging() && state.plot().selected.is_none() {
-                state.tick();
             }
         }
     })();

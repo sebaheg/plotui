@@ -6,15 +6,14 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
 
 use plotui_core::{ForceLayout, Plot, Rgb, Shape, COLORWAY_PLOTUI};
 use plotui_ratatui::{ElementKind, OverlaySpan, PlotEvent, PlotState};
-use plotui_term::RenderMode;
 use ratatui::style::{Color, Style};
 
+use crate::examples::{self, Output};
 use crate::interactive::{self, Hooks};
-use crate::{render, ExampleArgs};
+use crate::{record, ExampleArgs};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Group {
@@ -247,10 +246,10 @@ impl Scene {
     }
 }
 
-pub fn run(mode: RenderMode, args: &ExampleArgs, interactive: bool) -> std::io::Result<()> {
+pub fn run(args: &ExampleArgs, out: Output) -> std::io::Result<()> {
     let (mut plot, mut scene) = Scene::build();
 
-    if !interactive {
+    if out.is_still() {
         // One frame: the fully-arrived, settled graph.
         while scene.spawn_next(&mut plot).is_some() {}
         for _ in 0..1500 {
@@ -259,22 +258,18 @@ pub fn run(mode: RenderMode, args: &ExampleArgs, interactive: bool) -> std::io::
             }
             scene.step(&mut plot);
         }
-        return render::render_static(&plot, mode, args.width, args.height);
+        return examples::emit(&plot, args, &out);
     }
 
     let scene = Rc::new(RefCell::new(scene));
 
     let feed_scene = Rc::clone(&scene);
-    let mut last = Instant::now();
     let mut acc = 0.0f64;
     let mut spawn_acc = 0.0f64;
-    let feed = Box::new(move |state: &mut PlotState| {
+    let feed = Box::new(move |state: &mut PlotState, dt_ms: f64| {
         let mut s = feed_scene.borrow_mut();
-        let now = Instant::now();
-        let dt = now.duration_since(last).as_secs_f64().min(0.25) * 1000.0;
-        last = now;
-        acc += dt;
-        spawn_acc += dt;
+        acc += dt_ms;
+        spawn_acc += dt_ms;
         let mut ticked = false;
         while acc >= TICK_MS {
             acc -= TICK_MS;
@@ -322,13 +317,22 @@ pub fn run(mode: RenderMode, args: &ExampleArgs, interactive: bool) -> std::io::
         }
     });
 
-    let hooks = Hooks {
-        pickable: true,
-        feed: Some(feed),
-        on_plot_event: Some(on_plot_event),
-        ..Default::default()
-    };
-    interactive::run_with(plot, mode, args.width, args.height, hooks)
+    match out {
+        Output::Record(opts) => {
+            let hooks = Hooks { feed: Some(feed), ..Default::default() };
+            record::record(plot, hooks, &opts)
+        }
+        Output::Interactive(mode) => {
+            let hooks = Hooks {
+                pickable: true,
+                feed: Some(feed),
+                on_plot_event: Some(on_plot_event),
+                ..Default::default()
+            };
+            interactive::run_with(plot, mode, args.width, args.height, hooks)
+        }
+        Output::Static(_) => unreachable!("still outputs handled above"),
+    }
 }
 
 #[cfg(test)]

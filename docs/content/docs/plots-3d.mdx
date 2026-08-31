@@ -17,6 +17,19 @@ work everywhere (see [Colors](/docs/charts-2d#colors)).
 plot.add_scatter3d(xs, ys, zs, color=None, size=3.0, name="Cluster A")
 ```
 
+`add_scatter3d` returns a trace handle, and `extend` appends points through
+it in place — bounds and pick indices update incrementally, so a point cloud
+can stream in live while the camera keeps moving:
+
+```python
+h = plot.add_scatter3d([], [], [])   # start empty
+plot.extend(h, xs, ys, zs)           # each batch as it arrives — no rebuilds
+```
+
+`plotui example lidar` is a complete version of this recipe: a simulated
+LiDAR sweep scanning a room, streamed beam by beam
+(`--out lidar.mp4` records it to a video).
+
 ## Graphs
 
 Node-link graphs with per-node styling and interactive picking:

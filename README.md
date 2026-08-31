@@ -240,13 +240,16 @@ dispatches those to every class in the MRO, so both would run).
 - [x] CLI: `plotui line|scatter|bar` from stdin or a file — interactive on a
       TTY, one static frame when piped; installed via curl, Homebrew, cargo,
       or pip (see Install above)
-- [x] CLI examples: `plotui example scatter|graph|stream|timeseries|deps` —
-      self-contained demo scenes, no input data needed
+- [x] CLI examples: `plotui example scatter|graph|stream|timeseries|deps|lidar`
+      — self-contained demo scenes, no input data needed
 - [x] Force-directed graphs: a `ForceLayout` simulation in the core (exposed
       in Python, Go, and JS) plus in-place graph mutation — move, recolor,
       and grow a live graph without rebuilds (`plotui example deps`)
+- [x] Animation export: `--out file.mp4|gif|webm` records any animated
+      example headlessly via ffmpeg (`plotui example lidar --out demo.mp4`);
+      `--out file.png` takes one frame of any chart or example
 - [ ] CLI v2: `--follow` streaming, `scatter3d`, histogram/density/count
-      transforms, `--out png`
+      transforms
 - [ ] Prebuilt static libs for the Go bindings (today: local source build)
 
 ## License

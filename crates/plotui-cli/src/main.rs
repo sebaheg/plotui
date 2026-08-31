@@ -11,6 +11,8 @@ mod deps;
 mod examples;
 mod input;
 mod interactive;
+mod lidar;
+mod record;
 mod render;
 
 use std::io::IsTerminal;
@@ -73,6 +75,12 @@ struct Args {
     /// the x axis)
     #[arg(long)]
     range_slider: bool,
+    /// Export to a file instead of the terminal (.png; needs ffmpeg on PATH)
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Export frame size as WxH pixels (only with --out)
+    #[arg(long, default_value = "1280x720", value_parser = parse_size)]
+    size: (u16, u16),
 }
 
 #[derive(clap::Args)]
@@ -92,6 +100,30 @@ pub struct ExampleArgs {
     /// Render one frame and exit (default when stdout is not a terminal)
     #[arg(long = "static")]
     static_mode: bool,
+    /// Export to a file instead of the terminal: .mp4/.gif/.webm records the
+    /// animation, .png takes one frame (needs ffmpeg on PATH)
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Export frame size as WxH pixels (only with --out)
+    #[arg(long, default_value = "1280x720", value_parser = parse_size)]
+    size: (u16, u16),
+    /// Frames to record with --out (at --fps; 300 @ 30 fps ≈ 10 s)
+    #[arg(long, default_value_t = 300)]
+    frames: u32,
+    /// Frame rate for --out recordings
+    #[arg(long, default_value_t = 30)]
+    fps: u32,
+}
+
+fn parse_size(s: &str) -> Result<(u16, u16), String> {
+    let err = || format!("expected WxH (e.g. 1280x720), got '{s}'");
+    let (w, h) = s.split_once(['x', 'X']).ok_or_else(err)?;
+    let w: u16 = w.trim().parse().map_err(|_| err())?;
+    let h: u16 = h.trim().parse().map_err(|_| err())?;
+    if w < 2 || h < 2 {
+        return Err(err());
+    }
+    Ok((w, h))
 }
 
 #[derive(Clone, Copy)]
@@ -118,6 +150,20 @@ fn main() -> ExitCode {
         }
     };
 
+    let mut plot = build::build_plot(kind, &table);
+    plot.range_slider = args.range_slider;
+
+    // File export never needs (or probes) a graphics-capable terminal.
+    if let Some(out) = &args.out {
+        return match record::record_static(&plot, out, args.size.0.into(), args.size.1.into()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("plotui: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let mode = plotui_term::detect_render_mode();
     if mode == RenderMode::Unsupported {
         for line in plotui_term::policy::UNSUPPORTED_MESSAGE {
@@ -126,8 +172,6 @@ fn main() -> ExitCode {
         return ExitCode::from(3);
     }
 
-    let mut plot = build::build_plot(kind, &table);
-    plot.range_slider = args.range_slider;
     let result = if args.static_mode || !std::io::stdout().is_terminal() {
         render::render_static(&plot, mode, args.width, args.height)
     } else {

@@ -58,8 +58,8 @@
     <div class="gallery-grid">
 
       <figure class="term ex-card" data-example="scatter3d" data-dim="3d">
-        <div class="term-bar" aria-hidden="true">
-          <span class="b"></span><span class="b"></span><span class="b"></span>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
           <span class="term-title">scatter3d — three gaussian clusters</span>
         </div>
         <div class="term-body">
@@ -72,8 +72,7 @@
           <span class="act"><span class="key">scroll</span>zoom</span>
           <span class="act"><span class="key">hover</span>coords</span>
           <span class="act"><span class="key">2×click</span>reset</span>
-          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
-        </div>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
 
 p = Plot()
@@ -84,8 +83,8 @@ p.<span class="fn">add_scatter3d</span>(xs_c, ys_c, zs_c, color=(<span class="st
       </figure>
 
       <figure class="term ex-card" data-example="surface3d" data-dim="3d">
-        <div class="term-bar" aria-hidden="true">
-          <span class="b"></span><span class="b"></span><span class="b"></span>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
           <span class="term-title">surface3d — 48×48 grid, viridis</span>
         </div>
         <div class="term-body">
@@ -98,8 +97,7 @@ p.<span class="fn">add_scatter3d</span>(xs_c, ys_c, zs_c, color=(<span class="st
           <span class="act"><span class="key">scroll</span>zoom</span>
           <span class="act"><span class="key">2×click</span>reset</span>
           <button class="btn wire-toggle" type="button" aria-pressed="false">wire</button>
-          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
-        </div>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
 
 p = Plot()
@@ -110,8 +108,8 @@ p.<span class="fn">add_surface3d</span>(xs, ys, zs, colormap=<span class="kw">No
       </figure>
 
       <figure class="term ex-card" data-example="graph3d" data-dim="3d">
-        <div class="term-bar" aria-hidden="true">
-          <span class="b"></span><span class="b"></span><span class="b"></span>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
           <span class="term-title">graph3d — node + edge picking</span>
         </div>
         <div class="term-body">
@@ -124,8 +122,7 @@ p.<span class="fn">add_surface3d</span>(xs, ys, zs, colormap=<span class="kw">No
           <span class="act"><span class="key">scroll</span>zoom</span>
           <span class="act"><span class="key">hover</span>nodes &amp; edges</span>
           <span class="act"><span class="key">2×click</span>reset</span>
-          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
-        </div>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
 
 p = Plot()
@@ -136,8 +133,8 @@ hit = p.<span class="fn">pick_element_px</span>(w, h, mx, my, node_radius=<span 
       </figure>
 
       <figure class="term ex-card" data-example="deps" data-dim="3d">
-        <div class="term-bar" aria-hidden="true">
-          <span class="b"></span><span class="b"></span><span class="b"></span>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
           <span class="term-title">deps — force-directed layout, live</span>
         </div>
         <div class="term-body">
@@ -149,8 +146,7 @@ hit = p.<span class="fn">pick_element_px</span>(w, h, mx, my, node_radius=<span 
           <span class="act"><span class="key">scroll</span>zoom</span>
           <span class="act"><span class="key">hover</span>dependency paths</span>
           <span class="act"><span class="key">2×click</span>reset</span>
-          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
-        </div>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> ForceLayout, Plot
 
 lay = <span class="fn">ForceLayout</span>(n, edges, seed=<span class="str">7</span>)
@@ -162,9 +158,34 @@ h = p.<span class="fn">add_graph3d</span>(*lay.<span class="fn">positions</span>
 p.<span class="fn">set_graph_colors</span>(h, node_colors, edge_colors)</code></pre>
       </figure>
 
+      <figure class="term ex-card" data-example="lidar" data-dim="3d">
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">scatter3d — streaming LiDAR sweep</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="A LiDAR-like 3D scan of a room, points arriving live as the scanner sweeps"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+h = p.<span class="fn">add_scatter3d</span>([], [], [], color=(<span class="str">69, 200, 209</span>))
+<span class="cm"># stream points in as they arrive — appended in place,</span>
+<span class="cm"># no rebuilds, while the camera keeps moving</span>
+<span class="kw">for</span> xs, ys, zs <span class="kw">in</span> scanner:
+    p.<span class="fn">extend</span>(h, xs, ys, zs)</code></pre>
+      </figure>
+
       <figure class="term ex-card" data-example="lorenz" data-dim="3d">
-        <div class="term-bar" aria-hidden="true">
-          <span class="b"></span><span class="b"></span><span class="b"></span>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
           <span class="term-title">line3d — lorenz attractor, 2 500 points</span>
         </div>
         <div class="term-body">
@@ -176,8 +197,7 @@ p.<span class="fn">set_graph_colors</span>(h, node_colors, edge_colors)</code></
           <span class="act"><span class="key">⇧drag</span>pan</span>
           <span class="act"><span class="key">scroll</span>zoom</span>
           <span class="act"><span class="key">2×click</span>reset</span>
-          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
-        </div>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
 
 p = Plot()
@@ -188,8 +208,8 @@ p.<span class="fn">add_line3d</span>(xs, ys, zs, color=(<span class="str">236, 7
       </figure>
 
       <figure class="term ex-card" data-example="lines2d" data-dim="2d" hidden>
-        <div class="term-bar" aria-hidden="true">
-          <span class="b"></span><span class="b"></span><span class="b"></span>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
           <span class="term-title">line + scatter — crosshair readout</span>
         </div>
         <div class="term-body">
@@ -198,8 +218,7 @@ p.<span class="fn">add_line3d</span>(xs, ys, zs, color=(<span class="str">236, 7
         </div>
         <div class="term-foot">
           <span class="act"><span class="key">hover</span>crosshair</span>
-          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
-        </div>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
 
 p = Plot()
@@ -210,8 +229,8 @@ p.<span class="fn">set_hover2d</span>(mouse_x)  <span class="cm"># engine draws 
       </figure>
 
       <figure class="term ex-card" data-example="bars2d" data-dim="2d" hidden>
-        <div class="term-bar" aria-hidden="true">
-          <span class="b"></span><span class="b"></span><span class="b"></span>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
           <span class="term-title">bar — monthly totals + trend</span>
         </div>
         <div class="term-body">
@@ -220,8 +239,7 @@ p.<span class="fn">set_hover2d</span>(mouse_x)  <span class="cm"># engine draws 
         </div>
         <div class="term-foot">
           <span class="act"><span class="key">hover</span>crosshair</span>
-          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>
-        </div>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
 
 p = Plot()

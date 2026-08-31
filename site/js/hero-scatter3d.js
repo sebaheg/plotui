@@ -259,9 +259,10 @@
 
   // ---- input: mouse + touch ----
   // Touch gestures: one finger rotates (and hovers any dot it rests on or
-  // crosses), two fingers pinch-zoom, a quick double-tap resets the view.
+  // crosses), two fingers pan (their midpoint) and pinch-zoom (their
+  // spread), a quick double-tap resets the view.
   var pointers = new Map(); // active pointers, id → {x, y}
-  var pinching = false, pinchDist = 0;
+  var pinching = false, pinchDist = 0, pinchCX = 0, pinchCY = 0;
   var touchDragging = false; // the current drag comes from a finger
   var downX = 0, downY = 0, downAt = 0;
   var lastTapAt = 0, lastTapX = 0, lastTapY = 0;
@@ -270,6 +271,11 @@
     var it = pointers.values();
     var a = it.next().value, b = it.next().value;
     return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+  function twoPointerCentroid() {
+    var it = pointers.values();
+    var a = it.next().value, b = it.next().value;
+    return [(a.x + b.x) / 2, (a.y + b.y) / 2];
   }
   function resetView() {
     yaw = DEF_YAW; pitch = DEF_PITCH; zoom = DEF_ZOOM; panX = 0; panY = 0;
@@ -293,9 +299,12 @@
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* Safari edge cases */ }
     if (pointers.size === 2) {
-      // Second finger down: the rotate drag ends, pinch-zoom begins.
+      // Second finger down: the rotate drag ends; the pair pans (midpoint)
+      // and pinch-zooms (spread).
       pinching = true; dragging = false;
       pinchDist = twoPointerDist();
+      var c = twoPointerCentroid();
+      pinchCX = c[0]; pinchCY = c[1];
       hoverX = hoverY = null;
       draw();
       return;
@@ -314,6 +323,10 @@
       var d = twoPointerDist();
       if (pinchDist > 0) zoom = Math.max(.4, Math.min(4, zoom * d / pinchDist));
       pinchDist = d;
+      var c = twoPointerCentroid();
+      panX += c[0] - pinchCX;
+      panY += c[1] - pinchCY;
+      pinchCX = c[0]; pinchCY = c[1];
     } else if (dragging) {
       var dx = e.clientX - lastX, dy = e.clientY - lastY;
       if (e.shiftKey) {

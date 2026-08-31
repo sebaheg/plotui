@@ -2,13 +2,13 @@
 //! demo with no input data — the same scenes the website shows.
 
 use std::process::ExitCode;
-use std::time::Instant;
 
 use plotui_core::{Plot, Rgb, TraceId, YAxis};
 use plotui_ratatui::PlotState;
 use plotui_term::RenderMode;
 
 use crate::interactive::{self, Hooks};
+use crate::record::{self, RecordOpts};
 use crate::{render, ExampleArgs};
 
 const EXAMPLES: &[(&str, &str)] = &[
@@ -17,7 +17,37 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("stream", "Live streaming plot — three series appended at 20 Hz"),
     ("timeseries", "A year of daily data with a range slider — drag it to zoom the x axis"),
     ("deps", "plotui's own dependency graph, laid out live by a force simulation"),
+    ("lidar", "Streaming LiDAR sweep — a scanned room arriving beam by beam, height-colored"),
 ];
+
+/// Where an example's frames go: the terminal (live or one frame of Kitty
+/// escapes) or a file via the headless recorder.
+pub enum Output {
+    Interactive(RenderMode),
+    Static(RenderMode),
+    Record(RecordOpts),
+}
+
+impl Output {
+    /// A single-frame destination: `--static`, a pipe, or `--out *.png`.
+    /// The scene should arrive fully played out, not empty.
+    pub fn is_still(&self) -> bool {
+        match self {
+            Output::Interactive(_) => false,
+            Output::Static(_) => true,
+            Output::Record(opts) => opts.is_still(),
+        }
+    }
+}
+
+/// Render a finished (non-animating) plot to whatever `out` selects.
+pub fn emit(plot: &Plot, args: &ExampleArgs, out: &Output) -> std::io::Result<()> {
+    match out {
+        Output::Interactive(_) => unreachable!("emit is for still outputs"),
+        Output::Static(mode) => render::render_static(plot, *mode, args.width, args.height),
+        Output::Record(opts) => record::record_static(plot, &opts.path, opts.width, opts.height),
+    }
+}
 
 pub fn run(args: &ExampleArgs) -> ExitCode {
     let name = match args.name.as_deref() {
@@ -29,44 +59,47 @@ pub fn run(args: &ExampleArgs) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let mode = plotui_term::detect_render_mode();
-    if mode == RenderMode::Unsupported {
-        for line in plotui_term::policy::UNSUPPORTED_MESSAGE {
-            eprintln!("{line}");
+    // File export never needs (or probes) a graphics-capable terminal.
+    let output = if let Some(path) = &args.out {
+        Output::Record(RecordOpts {
+            path: path.clone(),
+            width: args.size.0.into(),
+            height: args.size.1.into(),
+            fps: args.fps,
+            frames: args.frames,
+        })
+    } else {
+        let mode = plotui_term::detect_render_mode();
+        if mode == RenderMode::Unsupported {
+            for line in plotui_term::policy::UNSUPPORTED_MESSAGE {
+                eprintln!("{line}");
+            }
+            return ExitCode::from(3);
         }
-        return ExitCode::from(3);
-    }
+        if !args.static_mode && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            Output::Interactive(mode)
+        } else {
+            Output::Static(mode)
+        }
+    };
 
-    let interactive = !args.static_mode && std::io::IsTerminal::is_terminal(&std::io::stdout());
     let result = match name {
-        "scatter" => {
-            let plot = build_scatter();
-            if interactive {
-                let hooks = Hooks { pickable: true, auto_rotate: true, ..Default::default() };
-                interactive::run_with(plot, mode, args.width, args.height, hooks)
-            } else {
-                render::render_static(&plot, mode, args.width, args.height)
-            }
-        }
-        "graph" => {
-            let plot = build_graph();
-            if interactive {
-                let hooks = Hooks { pickable: true, auto_rotate: true, ..Default::default() };
-                interactive::run_with(plot, mode, args.width, args.height, hooks)
-            } else {
-                render::render_static(&plot, mode, args.width, args.height)
-            }
-        }
-        "stream" => run_stream(mode, args, interactive),
+        "scatter" => run_spinning(build_scatter(), args, output),
+        "graph" => run_spinning(build_graph(), args, output),
+        "stream" => run_stream(args, output),
         "timeseries" => {
             let plot = build_timeseries();
-            if interactive {
-                interactive::run_with(plot, mode, args.width, args.height, Hooks::default())
-            } else {
-                render::render_static(&plot, mode, args.width, args.height)
+            match output {
+                Output::Interactive(mode) => {
+                    interactive::run_with(plot, mode, args.width, args.height, Hooks::default())
+                }
+                // Nothing animates here, so recording means one .png frame
+                // (record_static refuses video extensions with a hint).
+                out => emit(&plot, args, &out),
             }
         }
-        "deps" => crate::deps::run(mode, args, interactive),
+        "deps" => crate::deps::run(args, output),
+        "lidar" => crate::lidar::run(args, output),
         _ => unreachable!("validated above"),
     };
     match result {
@@ -75,6 +108,19 @@ pub fn run(args: &ExampleArgs) -> ExitCode {
             eprintln!("plotui: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The auto-rotating pickable scenes (scatter, graph): the plot itself is
+/// static data; only the camera moves.
+fn run_spinning(plot: Plot, args: &ExampleArgs, out: Output) -> std::io::Result<()> {
+    let hooks = Hooks { pickable: true, auto_rotate: true, ..Default::default() };
+    match out {
+        Output::Interactive(mode) => {
+            interactive::run_with(plot, mode, args.width, args.height, hooks)
+        }
+        Output::Record(opts) if !opts.is_still() => record::record(plot, hooks, &opts),
+        out => emit(&plot, args, &out),
     }
 }
 
@@ -89,10 +135,10 @@ fn list() -> ExitCode {
 
 /// mulberry32, the site's PRNG — same seeds, same streams, so the terminal
 /// scenes are point-for-point the ones on plotui.xyz.
-struct Rng(u32);
+pub(crate) struct Rng(pub(crate) u32);
 
 impl Rng {
-    fn next(&mut self) -> f32 {
+    pub(crate) fn next(&mut self) -> f32 {
         self.0 = self.0.wrapping_add(0x6D2B79F5);
         let a = self.0;
         let mut t = (a ^ (a >> 15)).wrapping_mul(a | 1);
@@ -101,7 +147,7 @@ impl Rng {
     }
 
     /// Sum-of-uniforms gaussian-ish noise in roughly [-1, 1].
-    fn gauss(&mut self) -> f32 {
+    pub(crate) fn gauss(&mut self) -> f32 {
         (self.next() + self.next() + self.next() + self.next() - 2.0) / 2.0
     }
 }
@@ -198,7 +244,7 @@ fn build_graph() -> Plot {
 /// The streaming demo from examples/textual_stream.py: a forecast line, noisy
 /// observations, and a load series on y2, appended at 20 Hz through trace
 /// handles. Keys 1/2/3 toggle the series.
-fn run_stream(mode: RenderMode, args: &ExampleArgs, interactive: bool) -> std::io::Result<()> {
+fn run_stream(args: &ExampleArgs, out: Output) -> std::io::Result<()> {
     const STEP: f32 = 0.25;
     const TICK_MS: f64 = 50.0;
 
@@ -230,12 +276,12 @@ fn run_stream(mode: RenderMode, args: &ExampleArgs, interactive: bool) -> std::i
             .expect("load handle");
     };
 
-    if !interactive {
+    if out.is_still() {
         // One frame: arrive with the window the animation would have built.
         for _ in 0..180 {
             push(&mut plot, &handles);
         }
-        return render::render_static(&plot, mode, args.width, args.height);
+        return emit(&plot, args, &out);
     }
 
     for _ in 0..10 {
@@ -243,13 +289,9 @@ fn run_stream(mode: RenderMode, args: &ExampleArgs, interactive: bool) -> std::i
     }
 
     let feed_handles = handles.clone();
-    let mut last = Instant::now();
     let mut acc = 0.0f64;
-    let feed = Box::new(move |state: &mut PlotState| {
-        let now = Instant::now();
-        // Cap catch-up so a suspended terminal doesn't fast-forward the feed.
-        acc += now.duration_since(last).as_secs_f64().min(0.25) * 1000.0;
-        last = now;
+    let feed = Box::new(move |state: &mut PlotState, dt_ms: f64| {
+        acc += dt_ms;
         let mut moved = false;
         while acc >= TICK_MS {
             push(state.plot_mut(), &feed_handles);
@@ -261,17 +303,25 @@ fn run_stream(mode: RenderMode, args: &ExampleArgs, interactive: bool) -> std::i
         }
     });
 
-    let mut shown = [true; 3];
-    let on_key = Box::new(move |state: &mut PlotState, code: crossterm::event::KeyCode| {
-        let crossterm::event::KeyCode::Char(ch @ '1'..='3') = code else {
-            return false;
-        };
-        let i = ch as usize - '1' as usize;
-        shown[i] = !shown[i];
-        state.set_visible(handles[i], shown[i]);
-        true
-    });
-
-    let hooks = Hooks { feed: Some(feed), on_key: Some(on_key), ..Default::default() };
-    interactive::run_with(plot, mode, args.width, args.height, hooks)
+    match out {
+        Output::Record(opts) => {
+            let hooks = Hooks { feed: Some(feed), ..Default::default() };
+            record::record(plot, hooks, &opts)
+        }
+        Output::Interactive(mode) => {
+            let mut shown = [true; 3];
+            let on_key = Box::new(move |state: &mut PlotState, code: crossterm::event::KeyCode| {
+                let crossterm::event::KeyCode::Char(ch @ '1'..='3') = code else {
+                    return false;
+                };
+                let i = ch as usize - '1' as usize;
+                shown[i] = !shown[i];
+                state.set_visible(handles[i], shown[i]);
+                true
+            });
+            let hooks = Hooks { feed: Some(feed), on_key: Some(on_key), ..Default::default() };
+            interactive::run_with(plot, mode, args.width, args.height, hooks)
+        }
+        Output::Static(_) => unreachable!("still outputs handled above"),
+    }
 }

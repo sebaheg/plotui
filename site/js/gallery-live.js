@@ -170,7 +170,22 @@ function energyData() {
       m.markDirty();
     }
 
+    // Touch: one finger rotates; two fingers pan (their midpoint) and
+    // pinch-zoom (their spread) — the finger analogues of shift-drag + wheel.
+    const pointers = new Map(); // active pointers, id → {x, y}
+    let panCX = 0, panCY = 0, pinchD = 0, multi = false;
+    function centroidDist() {
+      const it = pointers.values();
+      const a = it.next().value, b = it.next().value;
+      return [(a.x + b.x) / 2, (a.y + b.y) / 2, Math.hypot(a.x - b.x, a.y - b.y)];
+    }
+
     surfCanvas.addEventListener('pointerdown', (e) => {
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 2) {
+        multi = true; // this gesture is never a tap-to-pin
+        [panCX, panCY, pinchD] = centroidDist();
+      }
       dragging = true;
       touched = true; // the visitor has the camera now; stop the idle sway
       lastX = downX = e.clientX;
@@ -180,6 +195,16 @@ function energyData() {
       surfCanvas.setPointerCapture(e.pointerId);
     });
     surfCanvas.addEventListener('pointermove', (e) => {
+      const p = pointers.get(e.pointerId);
+      if (p) { p.x = e.clientX; p.y = e.clientY; }
+      if (pointers.size >= 2) {
+        const [cx, cy, d] = centroidDist();
+        plot.pan((cx - panCX) * m.dpr, (cy - panCY) * m.dpr);
+        if (pinchD > 0) plot.zoom_by(d / pinchD);
+        panCX = cx; panCY = cy; pinchD = d;
+        m.markDirty();
+        return;
+      }
       if (dragging) {
         // Routed through the plot's input map (drag rotates, shift-drag
         // pans, by default) — remappable per plot via set_input_map.
@@ -199,20 +224,33 @@ function energyData() {
       if (plot.set_surface_hover(hit ? [hit[0], hit[1], hit[2]] : null)) m.markDirty();
       hover = hit;
     });
-    surfCanvas.addEventListener('pointerup', (e) => {
-      if (!dragging) return;
+    function endPointer(e) {
+      pointers.delete(e.pointerId);
+      if (pointers.size === 1) {
+        // One finger stays down: continue it as a rotate drag from where it is.
+        const rest = pointers.values().next().value;
+        lastX = rest.x;
+        lastY = rest.y;
+        return;
+      }
+      if (!dragging || pointers.size > 0) return;
       dragging = false;
       surfCanvas.classList.remove('dragging');
       // A press released without real movement is a click: pin the point
-      // under it, or unpin when it lands on empty space.
-      if (Math.hypot(e.clientX - downX, e.clientY - downY) < 6) {
+      // under it, or unpin when it lands on empty space. Never after a
+      // two-finger gesture.
+      if (!multi && e.type === 'pointerup'
+          && Math.hypot(e.clientX - downX, e.clientY - downY) < 6) {
         const [fx, fy] = m.fbCoords(e);
         const hit = plot.pick_surface(m.w, m.h, fx, fy, 14 * m.dpr) || null;
         pinned = hit ? [hit[0], hit[1], hit[2]] : null;
         plot.set_surface_selected(pinned);
       }
+      multi = false;
       m.markDirty(); // repaint full-res after a half-res drag
-    });
+    }
+    surfCanvas.addEventListener('pointerup', endPointer);
+    surfCanvas.addEventListener('pointercancel', endPointer);
     surfCanvas.addEventListener('pointerenter', () => { inside = true; });
     surfCanvas.addEventListener('pointerleave', () => {
       inside = false;

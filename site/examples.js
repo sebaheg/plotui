@@ -294,6 +294,118 @@ const EXAMPLES = {
     },
   },
 
+  lidar: {
+    is3d: true,
+    setup(plot, ui) {
+      // Mirrors crates/plotui-cli/src/lidar.rs constant-for-constant (same
+      // PRNG, same seed), so this sweep is point-for-point the one in
+      // `plotui example lidar`.
+      const DEG = Math.PI / 180;
+      const SENSOR = [0, 0, 0.8];
+      const BEAMS = 16, ELEV_LO = -22 * DEG, ELEV_HI = 12 * DEG;
+      const AZ_COLS = 400, TOTAL = AZ_COLS * 2;
+      const AZ_STEP = 360 * DEG / AZ_COLS;
+      const COL_MS = 15, MAX_RANGE = 9;
+      const BOXES = [
+        [[7.9, -8.1, 0.0], [8.1, 8.1, 2.5]],
+        [[-8.1, -8.1, 0.0], [-7.9, 8.1, 2.5]],
+        [[-8.1, 7.9, 0.0], [8.1, 8.1, 2.5]],
+        [[-8.1, -8.1, 0.0], [8.1, -7.9, 2.5]],
+        [[2.0, 1.0, 0.0], [3.2, 2.2, 1.2]],
+        [[-4.5, 3.0, 0.0], [-3.3, 4.2, 2.0]],
+        [[-2.0, -5.0, 0.0], [-0.4, -3.6, 0.9]],
+        [[4.2, -3.5, 0.0], [5.0, -2.7, 2.5]],
+        [[-6.2, -1.0, 0.0], [-5.4, 0.2, 1.6]],
+      ];
+      // Height bands (upper z bound → color): deep blue → cyan → amber.
+      const BANDS = [
+        [0.15, '#2d46a5'], [0.60, '#2878cd'], [1.10, '#2dafd7'],
+        [1.60, '#6ecdb9'], [2.10, '#c8c878'], [Infinity, '#ebaf5a'],
+      ];
+      const rand = mulberry32(20260830);
+      const gauss = () => (rand() + rand() + rand() + rand() - 2) / 2;
+
+      const slab = (o, d, lo, hi) => {
+        let t0 = 0, t1 = Infinity;
+        for (let k = 0; k < 3; k++) {
+          if (Math.abs(d[k]) < 1e-8) {
+            if (o[k] < lo[k] || o[k] > hi[k]) return null;
+          } else {
+            let a = (lo[k] - o[k]) / d[k], b = (hi[k] - o[k]) / d[k];
+            if (a > b) [a, b] = [b, a];
+            t0 = Math.max(t0, a);
+            t1 = Math.min(t1, b);
+            if (t0 > t1) return null;
+          }
+        }
+        return t0 > 1e-4 ? t0 : null;
+      };
+      const cast = (o, d) => {
+        let best = MAX_RANGE, hit = false;
+        if (d[2] < 0) {
+          const t = -o[2] / d[2];
+          if (t < best && Math.abs(o[0] + d[0] * t) <= 8 && Math.abs(o[1] + d[1] * t) <= 8) {
+            best = t;
+            hit = true;
+          }
+        }
+        for (const [lo, hi] of BOXES) {
+          const t = slab(o, d, lo, hi);
+          if (t !== null && t < best) {
+            best = t;
+            hit = true;
+          }
+        }
+        return hit ? best : null;
+      };
+
+      const handles = BANDS.map(([, c]) => plot.add_scatter3d([], [], [], c, 2.0));
+      plot.set_bounds(-8.5, -8.5, -0.4, 8.5, 8.5, 3.6);
+
+      const column = (az, out) => {
+        const sinT = Math.sin(az * AZ_STEP), cosT = Math.cos(az * AZ_STEP);
+        for (let b = 0; b < BEAMS; b++) {
+          const phi = ELEV_LO + (ELEV_HI - ELEV_LO) * b / (BEAMS - 1);
+          const sinP = Math.sin(phi), cosP = Math.cos(phi);
+          const d = [cosP * cosT, cosP * sinT, sinP];
+          const t = cast(SENSOR, d);
+          if (t === null) { gauss(); continue; } // keep the noise stream aligned
+          const r = t + gauss() * 0.02;
+          const p = [SENSOR[0] + d[0] * r, SENSOR[1] + d[1] * r, SENSOR[2] + d[2] * r];
+          const band = BANDS.findIndex(([top]) => p[2] < top);
+          out[band < 0 ? BANDS.length - 1 : band].push(p);
+        }
+      };
+
+      let last = performance.now();
+      let az = 0, acc = 0;
+      return {
+        tick() {
+          const now = performance.now();
+          const dt = Math.min(now - last, 250);
+          last = now;
+          if (!ui.dragging()) plot.rotate(0.004, 0);
+          if (az < TOTAL) {
+            acc += dt;
+            const out = BANDS.map(() => []);
+            while (acc >= COL_MS && az < TOTAL) {
+              acc -= COL_MS;
+              column(az++, out);
+            }
+            out.forEach((pts, i) => {
+              if (!pts.length) return;
+              plot.extend_xyz(
+                handles[i],
+                pts.map((p) => p[0]), pts.map((p) => p[1]), pts.map((p) => p[2]),
+              );
+            });
+          }
+          ui.markDirty(); // spinning even after the sweep completes
+        },
+      };
+    },
+  },
+
   lorenz: {
     is3d: true,
     setup(plot) {
@@ -364,7 +476,7 @@ function mountExample(card) {
 
   const plot = new Plot();
   let dirty = true, visible = true;
-  const ui = { card, markDirty: () => { dirty = true; } };
+  const ui = { card, markDirty: () => { dirty = true; }, dragging: () => dragging };
   const api = def.setup(plot, ui) || {};
   const heavy = def.is3d && plot.vertex_count() > 400;
 
@@ -421,8 +533,20 @@ function mountExample(card) {
     return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr];
   }
 
+  // Touch on 3D: one finger rotates; two fingers pan (their midpoint) and
+  // pinch-zoom (their spread) — the finger analogues of shift-drag + wheel.
+  const pointers = new Map(); // active pointers, id → {x, y}
+  let panCX = 0, panCY = 0, pinchD = 0;
+  function centroidDist() {
+    const it = pointers.values();
+    const a = it.next().value, b = it.next().value;
+    return [(a.x + b.x) / 2, (a.y + b.y) / 2, Math.hypot(a.x - b.x, a.y - b.y)];
+  }
+
   canvas.addEventListener('pointerdown', (e) => {
     if (!def.is3d) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) [panCX, panCY, pinchD] = centroidDist();
     dragging = true;
     lastX = e.clientX;
     lastY = e.clientY;
@@ -430,6 +554,16 @@ function mountExample(card) {
     setHover(null, e);
   });
   canvas.addEventListener('pointermove', (e) => {
+    const p = pointers.get(e.pointerId);
+    if (p) { p.x = e.clientX; p.y = e.clientY; }
+    if (pointers.size >= 2) {
+      const [cx, cy, d] = centroidDist();
+      plot.pan((cx - panCX) * dpr, (cy - panCY) * dpr);
+      if (pinchD > 0) plot.zoom_by(d / pinchD);
+      panCX = cx; panCY = cy; pinchD = d;
+      dirty = true;
+      return;
+    }
     if (dragging) {
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
       if (e.shiftKey) plot.pan(dx * dpr, dy * dpr);
@@ -457,11 +591,21 @@ function mountExample(card) {
       if (plot.set_hover2d(px)) dirty = true;
     }
   });
-  canvas.addEventListener('pointerup', () => {
-    if (!dragging) return;
+  function endPointer(e) {
+    pointers.delete(e.pointerId);
+    if (pointers.size === 1) {
+      // One finger stays down: continue it as a rotate drag from where it is.
+      const rest = pointers.values().next().value;
+      lastX = rest.x;
+      lastY = rest.y;
+      return;
+    }
+    if (!dragging || pointers.size > 0) return;
     dragging = false;
     dirty = true; // repaint full-res after a half-res drag
-  });
+  }
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
   canvas.addEventListener('pointerleave', (e) => {
     setHover(null, e);
     if (def.hover2d && plot.set_hover2d(undefined)) dirty = true;
@@ -539,6 +683,48 @@ for (const btn of document.querySelectorAll('.ex-card .code-toggle')) {
     btn.setAttribute('aria-expanded', String(show));
   });
 }
+
+// The green title-bar "zoom" lights work with or without wasm: maximizing
+// swaps the card into a fixed overlay; each canvas's ResizeObserver
+// re-renders the plot at the new size. A placeholder keeps the grid from
+// reflowing underneath.
+const backdrop = document.createElement('div');
+backdrop.className = 'ex-backdrop';
+backdrop.hidden = true;
+document.body.appendChild(backdrop);
+let maxed = null; // { card, btn, placeholder }
+
+function closeMax() {
+  if (!maxed) return;
+  maxed.card.classList.remove('max');
+  maxed.btn.classList.remove('on');
+  maxed.btn.setAttribute('aria-pressed', 'false');
+  maxed.placeholder.remove();
+  backdrop.hidden = true;
+  document.body.style.overflow = '';
+  maxed = null;
+}
+
+for (const btn of document.querySelectorAll('.ex-card .b-max')) {
+  btn.addEventListener('click', () => {
+    const card = btn.closest('.ex-card');
+    if (maxed && maxed.card === card) { closeMax(); return; }
+    closeMax();
+    const placeholder = document.createElement('div');
+    placeholder.style.height = card.getBoundingClientRect().height + 'px';
+    card.before(placeholder);
+    card.classList.add('max');
+    btn.classList.add('on');
+    btn.setAttribute('aria-pressed', 'true');
+    backdrop.hidden = false;
+    document.body.style.overflow = 'hidden'; // no page scroll behind the overlay
+    maxed = { card, btn, placeholder };
+  });
+}
+backdrop.addEventListener('click', closeMax);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeMax();
+});
 
 function showFallback() {
   for (const card of document.querySelectorAll('.ex-card .term-body')) {
