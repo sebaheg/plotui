@@ -2324,11 +2324,14 @@ impl Plot {
                     // so normals are independent of zoom/pixels.
                     let vp: Vec<[f32; 3]> = verts.iter().map(|&v| pr.view_norm(v)).collect();
                     let sp: Vec<[f32; 3]> = vp.iter().map(|&v| pr.to_screen(v)).collect();
-                    let ok = |t: &&[u32; 3]| {
-                        t.iter().all(|&i| {
-                            verts.get(i as usize).is_some_and(|v| v.iter().all(|c| c.is_finite()))
-                        })
-                    };
+                    // Drawable vertices, resolved once: both passes below run
+                    // over every triangle, and re-checking three vertices ×
+                    // three coordinates each time is the difference between
+                    // this and the rasterizer dominating.
+                    let drawable: Vec<bool> =
+                        verts.iter().map(|v| v.iter().all(|c| c.is_finite())).collect();
+                    let ok =
+                        |t: &&[u32; 3]| t.iter().all(|&i| drawable.get(i as usize) == Some(&true));
                     // Gouraud shading as for a surface, but the normals come
                     // from the triangulation: each vertex sums the (area-
                     // weighted) normals of its incident facets, so a mesh

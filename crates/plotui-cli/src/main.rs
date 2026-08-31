@@ -12,6 +12,7 @@ mod examples;
 mod input;
 mod interactive;
 mod lidar;
+mod mandelbulb;
 mod record;
 mod render;
 

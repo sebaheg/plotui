@@ -18,6 +18,10 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("timeseries", "A year of daily data with a range slider — drag it to zoom the x axis"),
     ("deps", "plotui's own dependency graph, laid out live by a force simulation"),
     ("lidar", "Streaming LiDAR sweep — a scanned room arriving beam by beam, height-colored"),
+    (
+        "mandelbulb",
+        "The 3D cousin of the Mandelbrot set — a marching-cubes mesh, revealed slice by slice",
+    ),
 ];
 
 /// Where an example's frames go: the terminal (live or one frame of Kitty
@@ -100,6 +104,7 @@ pub fn run(args: &ExampleArgs) -> ExitCode {
         }
         "deps" => crate::deps::run(args, output),
         "lidar" => crate::lidar::run(args, output),
+        "mandelbulb" => crate::mandelbulb::run(args, output),
         _ => unreachable!("validated above"),
     };
     match result {
@@ -127,7 +132,7 @@ fn run_spinning(plot: Plot, args: &ExampleArgs, out: Output) -> std::io::Result<
 fn list() -> ExitCode {
     println!("Built-in examples (no input data needed):\n");
     for (name, desc) in EXAMPLES {
-        println!("  {name:<8} {desc}");
+        println!("  {name:<12} {desc}");
     }
     println!("\nRun one with `plotui example <name>`.");
     ExitCode::SUCCESS
