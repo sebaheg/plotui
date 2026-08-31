@@ -197,6 +197,23 @@ pub fn check_surface_grid_len(nx: usize, ny: usize, len: usize) -> Result<(), Bi
     Ok(())
 }
 
+/// Validate a mesh's flat index triples: a whole number of triangles, every
+/// index naming a vertex that exists.
+pub fn check_mesh_indices(n_verts: usize, tris: &[u32]) -> Result<(), BindError> {
+    if !tris.len().is_multiple_of(3) {
+        return Err(BindError::invalid(format!(
+            "tris must be flat [a, b, c] vertex triples; got {} indices",
+            tris.len(),
+        )));
+    }
+    if let Some(&bad) = tris.iter().find(|&&i| i as usize >= n_verts) {
+        return Err(BindError::invalid(format!(
+            "triangle index {bad} names no vertex; the mesh has {n_verts}",
+        )));
+    }
+    Ok(())
+}
+
 /// The graph node-color rule: one color per node, padding or truncating a
 /// partial `node_colors` with the uniform fallback.
 pub fn graph_node_colors(n: usize, node_colors: Option<Vec<Rgb>>, uniform: Rgb) -> Vec<Rgb> {
@@ -352,6 +369,14 @@ pub fn extend(
                     .into(),
             });
         }
+        Some(Trace::Mesh3d { .. }) => {
+            return Err(BindError {
+                kind: BindErrorKind::Structural,
+                msg: "mesh3d traces are structural (triangles reference vertex indices); \
+                     rebuild the plot to change them"
+                    .into(),
+            });
+        }
         Some(Trace::Scatter3d { .. } | Trace::Line3d { .. }) => Kind::D3,
         Some(_) => Kind::D2,
     };
@@ -418,6 +443,17 @@ mod tests {
     }
 
     #[test]
+    fn mesh_index_validation() {
+        assert!(check_mesh_indices(3, &[0, 1, 2]).is_ok());
+        assert!(check_mesh_indices(0, &[]).is_ok());
+        assert!(check_mesh_indices(3, &[0, 1]).unwrap_err().msg.starts_with("tris must be flat"));
+        assert_eq!(
+            check_mesh_indices(3, &[0, 1, 3]).unwrap_err().msg,
+            "triangle index 3 names no vertex; the mesh has 3"
+        );
+    }
+
+    #[test]
     fn extend_dispatches_on_trace_kind() {
         let mut p = Plot::new();
         let h2 = p.add_line2d(vec![0.0], vec![0.0], [1, 2, 3], 1.0, None, YAxis::Primary);
@@ -438,6 +474,13 @@ mod tests {
         let err = extend(&mut p, hg, &[1.0], &[1.0], None).unwrap_err();
         assert_eq!(err.kind, BindErrorKind::Structural);
         assert!(err.msg.starts_with("graph3d traces are structural"));
+
+        // A mesh is structural too — without its own arm the D2 catch-all
+        // would misread it as a 2D trace and take the (xs, ys) path.
+        let hm = p.add_mesh3d(vec![[0.0; 3]; 3], vec![[0, 1, 2]], [1, 2, 3], None, None);
+        let err = extend(&mut p, hm, &[1.0], &[1.0], None).unwrap_err();
+        assert_eq!(err.kind, BindErrorKind::Structural);
+        assert!(err.msg.starts_with("mesh3d traces are structural"));
         let err = extend(&mut p, 99, &[1.0], &[1.0], None).unwrap_err();
         assert_eq!(err.kind, BindErrorKind::UnknownHandle);
         assert_eq!(err.msg, "unknown trace handle 99");

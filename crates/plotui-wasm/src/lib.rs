@@ -174,6 +174,34 @@ impl Plot {
         ))
     }
 
+    /// Add a triangle mesh: `xs`/`ys`/`zs` are the vertices, `tris` the flat
+    /// `[a0, b0, c0, a1, …]` index triples that join them. Colormapped
+    /// ("viridis" by default, or "plasma") over the mesh's own z range, or
+    /// solid when a `color` is given without a `colormap`. Pair with
+    /// `marching_cubes` for an iso-surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_mesh3d(
+        &mut self,
+        xs: &[f32],
+        ys: &[f32],
+        zs: &[f32],
+        tris: &[u32],
+        color: Option<String>,
+        colormap: Option<String>,
+        name: Option<String>,
+    ) -> Result<usize, JsError> {
+        let verts = plotui_bind::zip3(xs, ys, zs);
+        plotui_bind::check_mesh_indices(verts.len(), tris).map_err(to_js)?;
+        let faces: Vec<[u32; 3]> = tris.as_chunks::<3>().0.to_vec();
+        let cmap = match (&color, &colormap) {
+            (Some(_), None) => None,
+            _ => plotui_bind::parse_colormap(Some(colormap.as_deref().unwrap_or("viridis")))
+                .map_err(to_js)?,
+        };
+        let c = resolve_color(&self.inner, color.as_deref())?;
+        Ok(self.inner.add_mesh3d(verts, faces, c, cmap, name))
+    }
+
     /// Add a 2D scatter series on `axis` "y" (default), "y2" or "y3".
     pub fn add_scatter2d(
         &mut self,
@@ -665,4 +693,63 @@ impl ForceLayout {
     pub fn add_node(&mut self, neighbors: &[u32]) -> usize {
         self.inner.add_node(neighbors)
     }
+}
+
+/// A polygonised iso-surface: vertex coordinates split per axis (the shape
+/// `Plot.add_mesh3d` takes) plus the flat `[a0, b0, c0, a1, …]` triangle
+/// indices that join them.
+#[wasm_bindgen]
+pub struct Mesh {
+    xs: Vec<f32>,
+    ys: Vec<f32>,
+    zs: Vec<f32>,
+    tris: Vec<u32>,
+}
+
+#[wasm_bindgen]
+impl Mesh {
+    pub fn xs(&self) -> Vec<f32> {
+        self.xs.clone()
+    }
+
+    pub fn ys(&self) -> Vec<f32> {
+        self.ys.clone()
+    }
+
+    pub fn zs(&self) -> Vec<f32> {
+        self.zs.clone()
+    }
+
+    pub fn tris(&self) -> Vec<u32> {
+        self.tris.clone()
+    }
+}
+
+/// Polygonise a sampled scalar field: the `field == iso` surface of
+/// `values[(k * ny + j) * nx + i]`, sampled at `origin + [i, j, k] * cell`.
+///
+/// The marching-cubes tables live only in Rust, so a browser scene and
+/// `plotui example mandelbulb` agree triangle for triangle. Vertices are
+/// shared between neighbouring cells, which is what lets `add_mesh3d`
+/// shade the result smoothly.
+#[wasm_bindgen]
+pub fn marching_cubes(
+    values: &[f32],
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    origin: &[f32],
+    cell: f32,
+    iso: f32,
+) -> Result<Mesh, JsError> {
+    let [ox, oy, oz] = *origin else {
+        return Err(JsError::new("origin must be [x, y, z]"));
+    };
+    let (verts, tris) = plotui_core::marching_cubes(values, nx, ny, nz, [ox, oy, oz], cell, iso);
+    Ok(Mesh {
+        xs: verts.iter().map(|v| v[0]).collect(),
+        ys: verts.iter().map(|v| v[1]).collect(),
+        zs: verts.iter().map(|v| v[2]).collect(),
+        tris: tris.into_iter().flatten().collect(),
+    })
 }

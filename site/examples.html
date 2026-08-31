@@ -183,6 +183,32 @@ h = p.<span class="fn">add_scatter3d</span>([], [], [], color=(<span class="str"
     p.<span class="fn">extend</span>(h, xs, ys, zs)</code></pre>
       </figure>
 
+      <figure class="term ex-card" data-example="mandelbulb" data-dim="3d">
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">mesh3d — mandelbulb, marching cubes</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="The Mandelbulb fractal as a shaded 3D mesh, revealed slice by slice from the bottom up"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">rs</button>        </div>
+        <pre class="ex-code" hidden><code><span class="cm">// meshes are Rust and JS today; the Python binding is still to come</span>
+<span class="kw">use</span> plotui_core::{marching_cubes, Colormap, Plot};
+
+<span class="cm">// sample any scalar field on a grid, then polygonise it</span>
+<span class="kw">let</span> (verts, tris) = <span class="fn">marching_cubes</span>(&amp;values, nx, ny, nz,
+                                    [<span class="str">-1.2, -1.2, -1.2</span>], cell, <span class="str">0.0</span>);
+<span class="kw">let mut</span> p = Plot::<span class="fn">new</span>();
+p.<span class="fn">add_mesh3d</span>(verts, tris, color, <span class="fn">Some</span>(Colormap::Plasma), <span class="fn">None</span>);
+<span class="cm">// shared edge vertices → smooth Gouraud shading across cells</span></code></pre>
+      </figure>
+
       <figure class="term ex-card" data-example="lorenz" data-dim="3d">
         <div class="term-bar">
           <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>

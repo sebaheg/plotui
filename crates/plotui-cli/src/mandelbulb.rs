@@ -5,8 +5,10 @@
 //! polygonised once at startup, and the triangles are sorted by height into
 //! bands. Each band is its own hidden `Mesh3d` trace; the feed hook reveals
 //! one every REVEAL_MS, bottom-up like a CT scan, while the camera orbits.
-//! Constants are mirrored verbatim in site/examples.js, so the website scene
-//! is triangle-for-triangle this one.
+//! Constants are mirrored verbatim in site/examples.js, and the website
+//! drives the same marching-cubes tables through wasm, so it shows this
+//! bulb — up to the odd triangle where the browser's transcendentals round
+//! a sample to the other side of the iso value.
 
 use plotui_core::{marching_cubes, Colormap, Plot, TraceId};
 use plotui_ratatui::PlotState;
