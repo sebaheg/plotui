@@ -241,7 +241,7 @@ dispatches those to every class in the MRO, so both would run).
       TTY, one static frame when piped; installed via curl, Homebrew, cargo,
       or pip (see Install above)
 - [x] CLI examples:
-      `plotui example scatter|graph|stream|timeseries|deps|lidar|mandelbulb`
+      `plotui example scatter|graph|stream|timeseries|deps|lidar|aizawa|mandelbulb`
       — self-contained demo scenes, no input data needed
 - [x] Force-directed graphs: a `ForceLayout` simulation in the core (exposed
       in Python, Go, and JS) plus in-place graph mutation — move, recolor,

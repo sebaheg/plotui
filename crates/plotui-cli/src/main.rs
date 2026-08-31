@@ -6,6 +6,7 @@
 //! for the crosshair, `q` to quit); when stdout is piped, or with `--static`,
 //! one frame of Kitty escapes is printed instead.
 
+mod aizawa;
 mod build;
 mod deps;
 mod examples;

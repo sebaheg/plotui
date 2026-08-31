@@ -209,6 +209,33 @@ p.<span class="fn">add_mesh3d</span>(verts, tris, color, <span class="fn">Some</
 <span class="cm">// shared edge vertices → smooth Gouraud shading across cells</span></code></pre>
       </figure>
 
+      <figure class="term ex-card" data-example="aizawa" data-dim="3d">
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">line3d — aizawa attractor, drawing itself</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="The Aizawa attractor drawing itself stroke by stroke in 3D, colored by speed"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+h = p.<span class="fn">add_line3d</span>([], [], [], color=<span class="str">"#c03c80"</span>, width=<span class="str">1.4</span>)
+<span class="cm"># integrate and append — the curve grows in place,</span>
+<span class="cm"># no rebuilds, while the camera keeps orbiting</span>
+<span class="kw">for</span> xs, ys, zs <span class="kw">in</span> rk4_steps(aizawa):
+    p.<span class="fn">extend</span>(h, xs, ys, zs)
+<span class="cm"># a NaN vertex breaks the line, so one trace can hold</span>
+<span class="cm"># many runs — that's how the speed bands stay separate</span></code></pre>
+      </figure>
+
       <figure class="term ex-card" data-example="lorenz" data-dim="3d">
         <div class="term-bar">
           <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>

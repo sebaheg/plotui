@@ -518,6 +518,91 @@ const EXAMPLES = {
     },
   },
 
+  aizawa: {
+    is3d: true,
+    setup(plot, ui) {
+      // Mirrors crates/plotui-cli/src/aizawa.rs constant-for-constant. The
+      // Rust side integrates in f64 for exactly this reason: nothing here is
+      // transcendental, so both sides round identically and this is the same
+      // orbit as `plotui example aizawa`, not just the same attractor.
+      const A = 0.95, B = 0.7, C = 0.6, D = 3.5, E = 0.25, F = 0.1;
+      const DT = 0.01, STEPS = 12000, STEP_MS = 1;
+      const START = [0.1, 0, 0];
+      const WIDTH = 1.4;
+      // Speed bands (upper bound → color); colors are Plasma at 0.12 + 0.85 b / 5.
+      const BANDS = [
+        [0.85, '#430697'], [1.40, '#8a0ea0'], [2.20, '#c03c80'],
+        [3.15, '#e3705b'], [4.30, '#f6a93a'], [Infinity, '#f1ed25'],
+      ];
+
+      const deriv = ([x, y, z]) => [
+        (z - B) * x - D * y,
+        D * x + (z - B) * y,
+        C + A * z - z * z * z / 3 - (x * x + y * y) * (1 + E * z) + F * z * x * x * x,
+      ];
+      const step = (a, k, s) => [a[0] + k[0] * s, a[1] + k[1] * s, a[2] + k[2] * s];
+      const rk4 = (p, dt) => {
+        const k1 = deriv(p);
+        const k2 = deriv(step(p, k1, dt * 0.5));
+        const k3 = deriv(step(p, k2, dt * 0.5));
+        const k4 = deriv(step(p, k3, dt));
+        return [0, 1, 2].map((i) => p[i] + dt / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
+      };
+      // Math.sqrt of the sum, not Math.hypot: hypot is more accurate, which
+      // would put a boundary point in a different band than Rust's sqrt does.
+      const speed = (p) => { const d = deriv(p); return Math.sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]); };
+      const band = (p) => {
+        const s = speed(p);
+        const i = BANDS.findIndex(([top]) => s < top);
+        return i < 0 ? BANDS.length - 1 : i;
+      };
+
+      const handles = BANDS.map(([, c]) => plot.add_line3d([], [], [], c, WIDTH));
+      // Pin the frame to the attractor so the camera never breathes as the
+      // curve grows into it.
+      plot.set_bounds(-1.6, -1.6, -0.6, 1.6, 1.6, 1.9);
+
+      let p = START, drawn = 0, acc = 0;
+      const last = BANDS.map(() => -1);
+      const advance = (out) => {
+        const next = rk4(p, DT), b = band(p);
+        // A NaN breaks the polyline, so the jump from wherever this band
+        // left off is not drawn as a segment.
+        if (last[b] === drawn) out[b].push(next);
+        else out[b].push([NaN, NaN, NaN], p, next);
+        drawn++;
+        last[b] = drawn;
+        p = next;
+      };
+
+      let lastTime = performance.now();
+      return {
+        tick() {
+          const now = performance.now();
+          const dt = Math.min(now - lastTime, 250);
+          lastTime = now;
+          if (!ui.dragging()) plot.rotate(0.004, 0);
+          if (drawn < STEPS) {
+            acc += dt;
+            const out = BANDS.map(() => []);
+            while (acc >= STEP_MS && drawn < STEPS) {
+              acc -= STEP_MS;
+              advance(out);
+            }
+            out.forEach((pts, i) => {
+              if (!pts.length) return;
+              plot.extend_xyz(
+                handles[i],
+                pts.map((q) => q[0]), pts.map((q) => q[1]), pts.map((q) => q[2]),
+              );
+            });
+          }
+          ui.markDirty(); // spinning even after the curve completes
+        },
+      };
+    },
+  },
+
   lorenz: {
     is3d: true,
     setup(plot) {
