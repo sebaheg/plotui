@@ -1,3 +1,8 @@
+// stream-demo.js — the streaming section's fallback mockup.
+//
+// Hand-drawn Canvas 2D, not plotui. stream-live.js drives this section with
+// the real engine and injects this file only if the wasm module fails to
+// load, so what ships is a degraded picture rather than an empty frame.
 (function () {
   var canvas = document.getElementById('stream2d');
   if (!canvas) return;

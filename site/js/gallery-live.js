@@ -9,6 +9,8 @@
 // If the wasm module fails to load, the hand-drawn mockup renderers
 // (gallery-surface3d.js / gallery-chart2d.js) are injected as a fallback.
 
+import { engine } from './wasm-engine.js';
+
 const DPR_MAX = 2;
 
 function showFallback() {
@@ -60,15 +62,7 @@ function energyData() {
     observed.push(base + (rnd() - .5) * 9);
     forecast.push(base + (rnd() - .5) * 3.5);
   }
-  const MONTHS = 12;
-  const months = [], solar = [], wind = [], hydro = [];
-  for (let m = 0; m < MONTHS; m++) {
-    months.push(m + 1);
-    solar.push(14 + 30 * Math.max(0, Math.sin((m + .5) / 12 * Math.PI)) + rnd() * 5);
-    wind.push(30 + 16 * Math.cos((m + .5) / 12 * Math.PI * 2) + rnd() * 6);
-    hydro.push(20 + 7 * Math.sin((m + 3) / 12 * Math.PI * 2) + rnd() * 3);
-  }
-  return { hours, observed, forecast, months, solar, wind, hydro };
+  return { hours, observed, forecast };
 }
 
 /* ---------- boot ---------- */
@@ -76,10 +70,7 @@ function energyData() {
 (async () => {
   let Plot, memory;
   try {
-    const mod = await import('../pkg/plotui_wasm.js');
-    const wasm = await mod.default();
-    Plot = mod.Plot;
-    memory = wasm.memory;
+    ({ Plot, memory } = await engine());
   } catch (e) {
     console.error('plotui wasm failed to load, falling back to mockups:', e);
     showFallback();
@@ -89,7 +80,6 @@ function energyData() {
   const css = getComputedStyle(document.documentElement);
   const C1 = css.getPropertyValue('--trace-1').trim();
   const C2 = css.getPropertyValue('--trace-2').trim();
-  const C3 = css.getPropertyValue('--trace-3').trim();
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const mounted = [];
 
@@ -151,9 +141,10 @@ function energyData() {
     const plot = new Plot();
     const g = peaksTerrain();
     plot.add_surface3d(g.xs, g.ys, g.zs, undefined, 'viridis', false, undefined);
-    // A gentle 3/4 view over the z-up terrain (the engine's turntable spins
-    // about z, so horizontal drags orbit this view). Double-click restores it.
-    const HOME = [0.55, 0.5, 1.0, 0, 0];
+    // A gentle 3/4 view over the z-up terrain, looking down from above —
+    // negative pitch raises the camera (the engine's turntable spins about z,
+    // so horizontal drags orbit this view). Double-click restores it.
+    const HOME = [0.55, -0.5, 1.0, 0, 0];
     plot.set_camera_state(HOME);
     const heavy = plot.vertex_count() > 400;
     const tip = document.getElementById('surf-tip');
@@ -300,73 +291,29 @@ function energyData() {
     });
   }
 
-  /* ---- the 2D chart types ---- */
+  /* ---- the 2D time series ---- */
 
   const chartCanvas = document.getElementById('chart2d');
   if (chartCanvas) {
     const m = mountCanvas(chartCanvas);
     const d = energyData();
 
-    // One engine plot per chart type; the buttons switch which one renders.
-    const plots = {
-      line: (p) => {
-        p.add_line2d(d.hours, d.observed, C1, 2.0, 'observed', undefined);
-        p.add_line2d(d.hours, d.forecast, C2, 2.0, 'forecast', undefined);
-      },
-      scatter: (p) => {
-        p.add_scatter2d(d.hours, d.observed, C1, 2.5, 'observed', undefined);
-        p.add_scatter2d(d.hours, d.forecast, C2, 2.5, 'forecast', undefined);
-      },
-      bar: (p) => {
-        p.add_bar2d(d.months, d.wind, C2, 'wind', undefined);
-      },
-      stacked: (p) => {
-        // The painter's trick the API uses for stacks: totals first,
-        // then the shorter cumulative bars on top.
-        const sw = d.solar.map((v, i) => v + d.wind[i]);
-        const total = sw.map((v, i) => v + d.hydro[i]);
-        p.add_bar2d(d.months, total, C3, 'hydro', undefined);
-        p.add_bar2d(d.months, sw, C2, 'wind', undefined);
-        p.add_bar2d(d.months, d.solar, C1, 'solar', undefined);
-      },
-    };
-    for (const kind of Object.keys(plots)) {
-      const p = new Plot();
-      plots[kind](p);
-      plots[kind] = p;
-    }
-    let active = plots.line;
+    const plot = new Plot();
+    plot.add_line2d(d.hours, d.observed, C1, 2.0, 'observed', undefined);
+    plot.add_line2d(d.hours, d.forecast, C2, 2.0, 'forecast', undefined);
 
     chartCanvas.addEventListener('pointermove', (e) => {
-      if (active.set_hover2d(m.fbCoords(e)[0])) m.markDirty();
+      if (plot.set_hover2d(m.fbCoords(e)[0])) m.markDirty();
     });
     chartCanvas.addEventListener('pointerleave', () => {
-      if (active.set_hover2d(undefined)) m.markDirty();
+      if (plot.set_hover2d(undefined)) m.markDirty();
     });
-
-    const TITLES = {
-      line: 'plot.add_line(hours, mw, name="observed")',
-      scatter: 'plot.add_scatter(hours, mw, name="observed")',
-      bar: 'plot.add_bar(months, mwh, name="wind")',
-      stacked: 'plot.add_bar(months, totals)  # tallest first',
-    };
-    const title = document.getElementById('chart2d-title');
-    const buttons = document.querySelectorAll('#gallery .term-foot .btn');
-    for (const btn of buttons) {
-      btn.addEventListener('click', () => {
-        active.set_hover2d(undefined);
-        active = plots[btn.dataset.kind];
-        for (const b of buttons) b.classList.toggle('on', b === btn);
-        if (title) title.textContent = TITLES[btn.dataset.kind];
-        m.markDirty();
-      });
-    }
 
     mounted.push({
       frame() {
         if (!m.visible || !m.dirty) return;
         m.dirty = false;
-        m.blit(active, false);
+        m.blit(plot, false);
       },
     });
   }

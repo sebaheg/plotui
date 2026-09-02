@@ -30,10 +30,10 @@
 
 <header>
   <div class="wrap nav">
-    <a class="wordmark" href="index.html">plo<span class="t1">t</span><span class="t2">u</span><span class="t3">i.</span>xyz</a>
+    <a class="wordmark" href="/">plo<span class="t1">t</span><span class="t2">u</span><span class="t3">i.</span>xyz</a>
     <nav class="nav-links" aria-label="Main">
-      <a href="index.html#install">install</a>
-      <a class="ex" href="examples.html" aria-current="page">examples</a>
+      <a href="/#install">install</a>
+      <a class="ex" href="/examples" aria-current="page">examples</a>
       <a href="https://docs.plotui.xyz">docs</a>
       <a class="gh" href="https://github.com/sebaheg/plotui">GitHub ↗</a>
     </nav>
@@ -209,6 +209,32 @@ p.<span class="fn">add_mesh3d</span>(verts, tris, color, <span class="fn">Some</
 <span class="cm">// shared edge vertices → smooth Gouraud shading across cells</span></code></pre>
       </figure>
 
+      <figure class="term ex-card" data-example="protein" data-dim="3d">
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">mesh3d — ubiquitin, swept from a PDB file</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="The protein ubiquitin as a ribbon cartoon in 3D, folding into place one secondary-structure element at a time"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">drag</span>rotate</span>
+          <span class="act"><span class="key">⇧drag</span>pan</span>
+          <span class="act"><span class="key">scroll</span>zoom</span>
+          <span class="act"><span class="key">2×click</span>reset</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">rs</button>        </div>
+        <pre class="ex-code" hidden><code><span class="cm">// plotui knows nothing about proteins — it sweeps polylines.</span>
+<span class="cm">// the PDB parsing and the peptide plane live in the caller.</span>
+<span class="kw">use</span> plotui_core::{catmull_rom, ribbon, tube, Plot};
+
+<span class="kw">let</span> path = <span class="fn">catmull_rom</span>(&amp;alpha_carbons, <span class="str">12</span>); <span class="cm">// 3.8 Å apart is too coarse</span>
+<span class="cm">// a flat band, turned by the peptide plane, tapering to an arrowhead</span>
+<span class="kw">let</span> (verts, tris) = <span class="fn">ribbon</span>(&amp;path, &amp;normals, &amp;widths, <span class="str">0.45</span>);
+<span class="kw">let</span> (verts, tris) = <span class="fn">tube</span>(&amp;path, &amp;[<span class="str">0.32</span>], <span class="str">8</span>);   <span class="cm">// loops, as round tube</span>
+p.<span class="fn">add_mesh3d</span>(verts, tris, color, <span class="fn">None</span>, name);</code></pre>
+      </figure>
+
       <figure class="term ex-card" data-example="aizawa" data-dim="3d">
         <div class="term-bar">
           <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
@@ -298,6 +324,125 @@ p.<span class="fn">set_hover2d</span>(mouse_x)  <span class="cm"># engine draws 
 p = Plot()
 p.<span class="fn">add_bar</span>(months, totals, color=(<span class="str">69, 200, 209</span>), name=<span class="str">"total"</span>)
 p.<span class="fn">add_line</span>(months, trend, color=(<span class="str">240, 161, 60</span>), name=<span class="str">"trend"</span>)</code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="steps2d" data-dim="2d" hidden>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">step — a pool that holds its size</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas crosshair" aria-label="Interactive 2D step chart"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">hover</span>crosshair</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_step</span>(ts, workers, where_=<span class="str">"post"</span>, name=<span class="str">"workers"</span>)
+p.<span class="fn">add_line</span>(ts, queue, name=<span class="str">"queue depth"</span>)
+<span class="cm"># a straight segment would draw a transition that never happened</span></code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="hist2d" data-dim="2d" hidden>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">histogram — request latency</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas crosshair" aria-label="Interactive 2D histogram"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">hover</span>crosshair</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_histogram</span>(samples, name=<span class="str">"latency (ms)"</span>)
+<span class="cm"># bins chosen by Freedman-Diaconis; extend_values streams more in</span></code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="heatmap2d" data-dim="2d" hidden>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">heatmap — traffic by hour and weekday</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="2D heatmap of traffic by hour and weekday"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_heatmap</span>(hours, days, rate, colormap=<span class="str">"viridis"</span>, label=<span class="str">"requests/s"</span>)
+p.<span class="fn">set_categories</span>(<span class="str">"y"</span>, [<span class="str">"Mon"</span>, <span class="str">"Tue"</span>, ...])</code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="stacked2d" data-dim="2d" hidden>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">bars — generation mix, stacked</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas crosshair" aria-label="Interactive 2D stacked bar chart"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">hover</span>crosshair</span>
+          <button class="btn mode-toggle" type="button" aria-pressed="true">stack</button>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">set_barmode</span>(<span class="str">"stack"</span>)  <span class="cm"># or "group"</span>
+p.<span class="fn">add_bar</span>(months, solar, name=<span class="str">"solar"</span>)
+p.<span class="fn">add_bar</span>(months, wind, name=<span class="str">"wind"</span>)
+p.<span class="fn">add_bar</span>(months, hydro, name=<span class="str">"hydro"</span>)</code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="band2d" data-dim="2d" hidden>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">band — a forecast and what it doesn't know</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas crosshair" aria-label="Interactive 2D forecast with confidence band"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">hover</span>crosshair</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_band</span>(hours, lo, hi, name=<span class="str">"95% interval"</span>)  <span class="cm"># before the line</span>
+p.<span class="fn">add_line</span>(hours, mid, name=<span class="str">"forecast"</span>)
+h = p.<span class="fn">add_scatter</span>(obs_x, obs_y, name=<span class="str">"observed"</span>)
+p.<span class="fn">set_error_bars</span>(h, y_plus=err)</code></pre>
+      </figure>
+
+      <figure class="term ex-card" data-example="box2d" data-dim="2d" hidden>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">box — build times across four machines</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="2D box plot of build times"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> Plot
+
+p = Plot()
+p.<span class="fn">add_box</span>([ci_a, ci_b, ci_c, ci_d], name=<span class="str">"build time (s)"</span>)
+p.<span class="fn">set_categories</span>(<span class="str">"x"</span>, [<span class="str">"ci-a"</span>, <span class="str">"ci-b"</span>, <span class="str">"ci-c"</span>, <span class="str">"ci-d"</span>])
+<span class="cm"># whiskers stop at real data; stragglers stay their own points</span></code></pre>
       </figure>
 
     </div>

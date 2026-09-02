@@ -5,7 +5,6 @@
   var css = getComputedStyle(document.documentElement);
   var C1 = css.getPropertyValue('--trace-1').trim();
   var C2 = css.getPropertyValue('--trace-2').trim();
-  var C3 = css.getPropertyValue('--trace-3').trim();
   var GRID = css.getPropertyValue('--grid').trim();
   var FRAME = css.getPropertyValue('--frame').trim();
   var INK = css.getPropertyValue('--ink').trim();
@@ -27,23 +26,7 @@
     observed.push(base + (rnd() - .5) * 9);
     forecast.push(base + (rnd() - .5) * 3.5);
   }
-  var MONTHS = 12;
-  var solar = [], wind = [], hydro = [];
-  for (var m = 0; m < MONTHS; m++) {
-    solar.push(14 + 30 * Math.max(0, Math.sin((m + .5) / 12 * Math.PI)) + rnd() * 5);
-    wind.push(30 + 16 * Math.cos((m + .5) / 12 * Math.PI * 2) + rnd() * 6);
-    hydro.push(20 + 7 * Math.sin((m + 3) / 12 * Math.PI * 2) + rnd() * 3);
-  }
 
-  var TITLES = {
-    line: 'plot.add_line(hours, mw, name="observed")',
-    scatter: 'plot.add_scatter(observed, forecast)',
-    bar: 'plot.add_bar(months, mwh, name="wind")',
-    stacked: 'plot.add_bar(months, totals)  # tallest first'
-  };
-  var MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
-                     'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-  var kind = 'line';
   var hoverI = null; // snapped sample index, like the widget's crosshair
   var w = 0, h = 0, dpr = 1;
 
@@ -119,75 +102,27 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     var x0 = 34, y0 = 12, x1 = w - 10, y1 = h - 18;
-    var sx, sy, i2, m2, bw2;
-
-    if (kind === 'line' || kind === 'scatter') {
-      var ymax = 90;
-      axes(x0, y0, x1, y1, ymax);
-      sx = function (i) { return x0 + (x1 - x0) * i / (HOURS - 1); };
-      sy = function (v) { return y1 - (y1 - y0) * v / ymax; };
-      var series = [['observed', C1, observed], ['forecast', C2, forecast]];
-      series.forEach(function (s) {
-        ctx.strokeStyle = s[1]; ctx.fillStyle = s[1]; ctx.lineWidth = 2;
-        if (kind === 'line') {
-          ctx.beginPath();
-          for (i2 = 0; i2 < HOURS; i2++) {
-            if (i2 === 0) ctx.moveTo(sx(i2), sy(s[2][i2])); else ctx.lineTo(sx(i2), sy(s[2][i2]));
-          }
-          ctx.stroke();
-        } else {
-          for (i2 = 0; i2 < HOURS; i2++) {
-            ctx.beginPath(); ctx.arc(sx(i2), sy(s[2][i2]), 2.4, 0, Math.PI * 2); ctx.fill();
-          }
-        }
-      });
-      legend(series.map(function (s) { return [s[0], s[1]]; }), x1, y0);
-      if (hoverI != null) {
-        var hx = sx(hoverI);
-        ctx.strokeStyle = INK; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(hx, y0); ctx.lineTo(hx, y1); ctx.stroke();
-        series.forEach(function (s) { marker(hx, sy(s[2][hoverI]), s[1]); });
-        readout(hx, 'hour  ' + hoverI,
-          series.map(function (s) { return [s[0], s[1], s[2][hoverI]]; }), x0, x1, y0);
+    var ymax = 90;
+    axes(x0, y0, x1, y1, ymax);
+    var sx = function (i) { return x0 + (x1 - x0) * i / (HOURS - 1); };
+    var sy = function (v) { return y1 - (y1 - y0) * v / ymax; };
+    var series = [['observed', C1, observed], ['forecast', C2, forecast]];
+    series.forEach(function (s) {
+      ctx.strokeStyle = s[1]; ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (var i2 = 0; i2 < HOURS; i2++) {
+        if (i2 === 0) ctx.moveTo(sx(i2), sy(s[2][i2])); else ctx.lineTo(sx(i2), sy(s[2][i2]));
       }
-    } else {
-      var stacked = kind === 'stacked';
-      var ymaxB = stacked ? 110 : 60;
-      axes(x0, y0, x1, y1, ymaxB);
-      sy = function (v) { return y1 - (y1 - y0) * v / ymaxB; };
-      bw2 = (x1 - x0) / MONTHS * .62;
-      for (m2 = 0; m2 < MONTHS; m2++) {
-        var bx = x0 + (x1 - x0) * (m2 + .5) / MONTHS - bw2 / 2;
-        if (stacked) {
-          // The painter's trick the real API uses: draw totals first,
-          // then the shorter cumulative bars on top.
-          var cum = [
-            [solar[m2] + wind[m2] + hydro[m2], C3],
-            [solar[m2] + wind[m2], C2],
-            [solar[m2], C1]
-          ];
-          cum.forEach(function (cs) {
-            ctx.fillStyle = cs[1];
-            ctx.fillRect(bx, sy(cs[0]), bw2, y1 - sy(cs[0]));
-          });
-        } else {
-          ctx.fillStyle = C2;
-          ctx.fillRect(bx, sy(wind[m2]), bw2, y1 - sy(wind[m2]));
-        }
-      }
-      legend(
-        stacked ? [['solar', C1], ['wind', C2], ['hydro', C3]] : [['wind', C2]],
-        x1, y0
-      );
-      if (hoverI != null) {
-        var hxb = x0 + (x1 - x0) * (hoverI + .5) / MONTHS;
-        ctx.strokeStyle = INK; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(hxb, y0); ctx.lineTo(hxb, y1); ctx.stroke();
-        var rows = stacked
-          ? [['solar', C1, solar[hoverI]], ['wind', C2, wind[hoverI]], ['hydro', C3, hydro[hoverI]]]
-          : [['wind', C2, wind[hoverI]]];
-        readout(hxb, MONTH_NAMES[hoverI], rows, x0, x1, y0);
-      }
+      ctx.stroke();
+    });
+    legend(series.map(function (s) { return [s[0], s[1]]; }), x1, y0);
+    if (hoverI != null) {
+      var hx = sx(hoverI);
+      ctx.strokeStyle = INK; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx, y0); ctx.lineTo(hx, y1); ctx.stroke();
+      series.forEach(function (s) { marker(hx, sy(s[2][hoverI]), s[1]); });
+      readout(hx, 'hour  ' + hoverI,
+        series.map(function (s) { return [s[0], s[1], s[2][hoverI]]; }), x0, x1, y0);
     }
   }
 
@@ -207,30 +142,12 @@
     var x0 = 34, x1 = w - 10;
     var i = null;
     if (px >= x0 && px <= x1) {
-      if (kind === 'line' || kind === 'scatter') {
-        i = Math.max(0, Math.min(HOURS - 1, Math.round((px - x0) / (x1 - x0) * (HOURS - 1))));
-      } else {
-        i = Math.max(0, Math.min(MONTHS - 1, Math.floor((px - x0) / (x1 - x0) * MONTHS)));
-      }
+      i = Math.max(0, Math.min(HOURS - 1, Math.round((px - x0) / (x1 - x0) * (HOURS - 1))));
     }
     if (i !== hoverI) { hoverI = i; draw(); }
   });
   canvas.addEventListener('pointerleave', function () {
     if (hoverI != null) { hoverI = null; draw(); }
-  });
-
-  var title = document.getElementById('chart2d-title');
-  var buttons = document.querySelectorAll('#gallery .term-foot .btn');
-  Array.prototype.forEach.call(buttons, function (btn) {
-    btn.addEventListener('click', function () {
-      kind = btn.dataset.kind;
-      hoverI = null; // sample grids differ between chart types
-      Array.prototype.forEach.call(buttons, function (b) {
-        b.classList.toggle('on', b === btn);
-      });
-      if (title) title.textContent = TITLES[kind];
-      draw();
-    });
   });
 
   new ResizeObserver(resize).observe(canvas);

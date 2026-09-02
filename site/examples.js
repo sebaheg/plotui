@@ -11,8 +11,19 @@
 let Plot = null;
 let ForceLayout = null;
 let marching_cubes = null;
+let catmull_rom = null;
+let tube = null;
+let ribbon = null;
 let memory = null;
+// The only scene with an input file: 1UBQ's backbone, fetched in boot()
+// beside the engine. Null if it failed, which degrades that one card.
+let PDB = null;
 const DPR_MAX = 2;
+// Radians of yaw per frame for a scene that turns on its own. `spin` (not
+// `rotate`) because it owns the direction: it turns the way a rightward
+// drag pushes the object, so letting go of a grabbed plot does not send it
+// back the way it came.
+const SPIN_STEP = 0.004;
 const T1 = '#ec4c86', T2 = '#45c8d1', T3 = '#f0a13c', INK = '#676f76';
 
 /* ---------- deterministic data ---------- */
@@ -385,7 +396,7 @@ const EXAMPLES = {
           const now = performance.now();
           const dt = Math.min(now - last, 250);
           last = now;
-          if (!ui.dragging()) plot.rotate(0.004, 0);
+          if (!ui.dragging()) plot.spin(SPIN_STEP);
           if (az < TOTAL) {
             acc += dt;
             const out = BANDS.map(() => []);
@@ -504,7 +515,7 @@ const EXAMPLES = {
           const now = performance.now();
           const dt = Math.min(now - last, 250);
           last = now;
-          if (!ui.dragging()) plot.rotate(0.004, 0);
+          if (!ui.dragging()) plot.spin(SPIN_STEP);
           if (shown < handles.length) {
             acc += dt;
             while (acc >= REVEAL_MS && shown < handles.length) {
@@ -581,7 +592,7 @@ const EXAMPLES = {
           const now = performance.now();
           const dt = Math.min(now - lastTime, 250);
           lastTime = now;
-          if (!ui.dragging()) plot.rotate(0.004, 0);
+          if (!ui.dragging()) plot.spin(SPIN_STEP);
           if (drawn < STEPS) {
             acc += dt;
             const out = BANDS.map(() => []);
@@ -598,6 +609,208 @@ const EXAMPLES = {
             });
           }
           ui.markDirty(); // spinning even after the curve completes
+        },
+      };
+    },
+  },
+
+  protein: {
+    is3d: true,
+    // The same 1UBQ backbone file `plotui example protein` embeds, served
+    // beside this script rather than pasted in here.
+    requires: () => PDB !== null,
+    missing: 'This example needs <code>1ubq.pdb</code>, which failed to load here.',
+    setup(plot, ui) {
+      // Mirrors crates/plotui-cli/src/protein.rs constant-for-constant,
+      // reads the same file, and sweeps with the engine's own geometry
+      // (`catmull_rom`, `ribbon` and `tube` through wasm) — so this is the
+      // cartoon from `plotui example protein`. Not bit-identical the way
+      // aizawa is: the normals are worked out in doubles here and in f32
+      // there, which moves a few vertices by an ulp and nothing visible.
+      const HELIX_W = 2.1, SHEET_W = 2.4, ARROW_W = 4.2, THICKNESS = 0.45;
+      const COIL_R = 0.32, COIL_SIDES = 8;
+      const SAMPLES = 12, ARROW_SAMPLES = 18, SMOOTH_PASSES = 2;
+      const REVEAL_MS = 9000, MARGIN = 0.8;
+      const COLOR = { helix: '#e66a5c', sheet: '#f0be5a', coil: '#7c94b2' };
+      const LABEL = { helix: 'helix', sheet: 'sheet', coil: 'loop' };
+
+      const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+      const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const cross = (a, b) => [
+        a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
+      ];
+      const unit = (v, fallback) => {
+        const n = Math.hypot(v[0], v[1], v[2]);
+        return n > 1e-6 ? [v[0] / n, v[1] / n, v[2] / n] : fallback;
+      };
+
+      // --- the PDB, at its fixed column offsets ---
+      const field = (l, a, b) => l.slice(a, b).trim();
+      const seqAt = (l, a, b) => {
+        const v = parseInt(field(l, a, b), 10);
+        return Number.isNaN(v) ? null : v;
+      };
+      const lines = PDB.split(/\r?\n/);
+
+      // HELIX and SHEET give inclusive residue ranges; their sequence fields
+      // sit one column apart from each other, which is the format's doing.
+      const spans = [];
+      for (const l of lines) {
+        let a, b, fold;
+        if (l.startsWith('HELIX')) { a = seqAt(l, 21, 25); b = seqAt(l, 33, 37); fold = 'helix'; }
+        else if (l.startsWith('SHEET')) { a = seqAt(l, 22, 26); b = seqAt(l, 33, 37); fold = 'sheet'; }
+        else continue;
+        if (a !== null && b !== null) spans.push([Math.min(a, b), Math.max(a, b), fold]);
+      }
+
+      // Atoms arrive grouped by residue, so a new sequence number opens one.
+      const rows = [];
+      for (const l of lines) {
+        if (!l.startsWith('ATOM')) continue;
+        const seq = seqAt(l, 22, 26);
+        if (seq === null) continue;
+        const xyz = [30, 38, 46].map((at) => parseFloat(field(l, at, at + 8)));
+        if (xyz.some(Number.isNaN)) continue;
+        if (!rows.length || rows[rows.length - 1].seq !== seq) rows.push({ seq, ca: null, o: null });
+        const row = rows[rows.length - 1];
+        if (field(l, 12, 16) === 'CA') row.ca = xyz;
+        else if (field(l, 12, 16) === 'O') row.o = xyz;
+      }
+
+      const res = rows.filter((r) => r.ca && r.o).map((r) => {
+        const span = spans.find(([a, b]) => r.seq >= a && r.seq <= b);
+        return { ca: r.ca, o: r.o, fold: span ? span[2] : 'coil' };
+      });
+      // Recentre so the orbit sits on the molecule, not the crystal origin.
+      const mid = [0, 1, 2].map((d) => res.reduce((a, r) => a + r.ca[d], 0) / res.length);
+      for (const r of res) {
+        for (let d = 0; d < 3; d++) { r.ca[d] -= mid[d]; r.o[d] -= mid[d]; }
+      }
+
+      // --- the peptide plane, flipped and smoothed ---
+      // The flip removes the half-turn corkscrew a beta strand's alternating
+      // carbonyls would otherwise put in the ribbon; the 1-2-1 passes cancel
+      // the sheet's pleat, which the flip alone leaves at ~65 degrees per
+      // residue. Helices keep winding, which is what a helical ribbon does.
+      const nrm = [];
+      for (let i = 0; i < res.length; i++) {
+        const [a, b] = i + 1 < res.length ? [i, i + 1] : [i - 1, i];
+        const step = sub(res[b].ca, res[a].ca);
+        const prev = nrm.length ? nrm[nrm.length - 1] : [0, 0, 1];
+        let n = unit(cross(step, sub(res[i].o, res[i].ca)), prev);
+        if (nrm.length && dot(n, prev) < 0) n = [-n[0], -n[1], -n[2]];
+        nrm.push(n);
+      }
+      for (let pass = 0; pass < SMOOTH_PASSES; pass++) {
+        const src = nrm.slice();
+        for (let i = 0; i < src.length; i++) {
+          const a = src[Math.max(0, i - 1)], b = src[Math.min(src.length - 1, i + 1)];
+          nrm[i] = unit([0, 1, 2].map((d) => a[d] + 2 * src[i][d] + b[d]), src[i]);
+        }
+      }
+
+      // Runs of consecutive residues sharing one fold.
+      const els = [];
+      res.forEach((r, i) => {
+        const last = els[els.length - 1];
+        if (last && last.fold === r.fold) last.hi = i;
+        else els.push({ fold: r.fold, lo: i, hi: i });
+      });
+
+      // Direction fields interpolate linearly, never through a spline: a
+      // spline overshoots where its input turns hard, and the ribbon's face
+      // flares into spikes at every turn.
+      const resampleDirs = (v, per) => {
+        if (v.length < 2 || per === 0) return v.slice();
+        const out = [];
+        for (let i = 0; i < v.length - 1; i++) {
+          for (let k = 0; k < per; k++) {
+            const t = k / per;
+            out.push(unit([0, 1, 2].map((d) => v[i][d] * (1 - t) + v[i + 1][d] * t), v[i]));
+          }
+        }
+        out.push(v[v.length - 1]);
+        return out;
+      };
+
+      // Flat until the arrowhead, which flares wider than the ribbon before
+      // tapering to a point at the strand's C-terminal end.
+      const strandWidths = (samples) => {
+        const arrow = Math.min(ARROW_SAMPLES, Math.floor(samples / 2));
+        const base = samples - arrow;
+        const out = new Float32Array(samples);
+        for (let i = 0; i < samples; i++) {
+          if (i < base || arrow === 0) { out[i] = SHEET_W; continue; }
+          const t = (i - base) / Math.max(arrow - 1, 1);
+          out[i] = ARROW_W * (1 - t) + 0.1 * t;
+        }
+        return out;
+      };
+
+      // One element's geometry. The path runs a residue past each end so
+      // neighbours overlap and the chain reads as continuous.
+      const elementMesh = (e) => {
+        const lo = Math.max(0, e.lo - 1), hi = Math.min(e.hi + 1, res.length - 1);
+        if (hi - lo + 1 < 2) return null;
+        const path = new Float32Array((hi - lo + 1) * 3);
+        for (let i = lo; i <= hi; i++) path.set(res[i].ca, (i - lo) * 3);
+        const smooth = catmull_rom(path, SAMPLES);
+        if (e.fold === 'coil') return tube(smooth, Float32Array.of(COIL_R), COIL_SIDES);
+        const dirs = resampleDirs(nrm.slice(lo, hi + 1), SAMPLES);
+        const up = new Float32Array(dirs.length * 3);
+        dirs.forEach((d, i) => up.set(d, i * 3));
+        const widths = e.fold === 'sheet'
+          ? strandWidths(smooth.length / 3)
+          : Float32Array.of(HELIX_W);
+        return ribbon(smooth, up, widths, THICKNESS);
+      };
+
+      const labelled = new Set();
+      const pieces = [];
+      let extent = 0;
+      for (const e of els) {
+        const mesh = elementMesh(e);
+        if (!mesh) continue;
+        const xs = mesh.xs(), ys = mesh.ys(), zs = mesh.zs();
+        for (const arr of [xs, ys, zs]) {
+          for (const c of arr) extent = Math.max(extent, Math.abs(c));
+        }
+        // The legend wants one entry per fold, not one per element.
+        let name;
+        if (!labelled.has(e.fold)) { labelled.add(e.fold); name = LABEL[e.fold]; }
+        pieces.push({
+          handle: plot.add_mesh3d(xs, ys, zs, mesh.tris(), COLOR[e.fold], undefined, name),
+          residues: e.hi - e.lo + 1,
+        });
+      }
+      // Pin a cube about the centroid: the chain grows into the frame, so
+      // without this the camera would zoom out under it as it folds.
+      const r = extent + MARGIN;
+      plot.set_bounds(-r, -r, -r, r, r, r);
+      const handles = pieces.map((p) => p.handle);
+      for (let i = 1; i < handles.length; i++) plot.set_visible(handles[i], false);
+
+      // Each element is held in proportion to its length, so a long helix
+      // does not fold in as fast as the two-residue turn beside it.
+      const total = pieces.reduce((a, p) => a + p.residues, 0);
+      const dwell = pieces.map((p) => REVEAL_MS * p.residues / total);
+
+      let last = performance.now();
+      let shown = 1, acc = 0;
+      return {
+        tick() {
+          const now = performance.now();
+          const dt = Math.min(now - last, 250);
+          last = now;
+          if (!ui.dragging()) plot.spin(SPIN_STEP);
+          if (shown < handles.length) {
+            acc += dt;
+            while (shown < handles.length && acc >= dwell[shown]) {
+              acc -= dwell[shown];
+              plot.set_visible(handles[shown++], true);
+            }
+          }
+          ui.markDirty(); // spinning even after the fold completes
         },
       };
     },
@@ -634,6 +847,175 @@ const EXAMPLES = {
     },
   },
 
+  steps2d: {
+    is3d: false, hover2d: true,
+    setup(plot) {
+      // A worker pool: the count *holds* between events, so the honest shape
+      // is the right-angle path — a straight segment would draw the pool
+      // gliding between sizes it never had.
+      const rand = mulberry32(31);
+      const ts = [], workers = [], queue = [];
+      let n = 4;
+      for (let t = 0; t <= 60; t++) {
+        if (t % 5 === 0) n = Math.min(6, Math.max(2, n + (rand() < 0.5 ? 1 : -1)));
+        // The queue eases down when workers arrive and back up when they
+        // leave. Deliberately a bounded expression rather than an
+        // accumulating one: a random walk either drifts off the top of the
+        // frame or pins to its clamp, and both squash the step series this
+        // card exists to show.
+        ts.push(t);
+        workers.push(n);
+        queue.push(4.2 - (n - 4) * 0.55 + Math.sin(t / 5.5) * 1.1 + (rand() - 0.5) * 0.7);
+      }
+      plot.add_step2d(ts, workers, T2, 2.0, 'post', 'workers', undefined);
+      plot.add_line2d(ts, queue, T3, 2.0, 'queue depth', undefined);
+      return {};
+    },
+  },
+
+  hist2d: {
+    is3d: false, hover2d: true,
+    setup(plot) {
+      // Request latency: a long right tail is the whole point of plotting a
+      // distribution rather than its mean.
+      const rand = mulberry32(2029);
+      const samples = [];
+      for (let i = 0; i < 4000; i++) {
+        // Sum-of-uniforms for the body, a rare slow path for the tail.
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += rand();
+        const ms = 40 + s * 22 + (rand() < 0.06 ? rand() * 260 : 0);
+        samples.push(ms);
+      }
+      plot.add_histogram2d(samples, undefined, undefined, T2, 'latency (ms)', undefined);
+      return {};
+    },
+  },
+
+  heatmap2d: {
+    is3d: false,
+    setup(plot) {
+      // Traffic by hour and weekday — the shape a terminal is unusually good
+      // at showing, since a matrix wants width more than height.
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const rand = mulberry32(515);
+      const xs = [], ys = [], zs = [];
+      for (let h = 0; h < 24; h++) xs.push(h);
+      for (let d = 0; d < days.length; d++) ys.push(d);
+      for (let d = 0; d < days.length; d++) {
+        const weekend = d >= 5;
+        for (let h = 0; h < 24; h++) {
+          // Two commuter peaks on weekdays, one lazy hump at the weekend.
+          const morning = Math.exp(-((h - 8.5) ** 2) / 6);
+          const evening = Math.exp(-((h - 17.5) ** 2) / 8);
+          const lazy = Math.exp(-((h - 13) ** 2) / 26);
+          const base = weekend ? 0.55 * lazy : 0.85 * morning + 1.0 * evening;
+          zs.push(base * 100 + rand() * 9);
+        }
+      }
+      plot.add_heatmap2d(xs, ys, zs, 'viridis', true, 'requests/s', undefined);
+      plot.set_categories('y', days);
+      return {};
+    },
+  },
+
+  stacked2d: {
+    is3d: false, hover2d: true,
+    setup(plot, ui) {
+      // Generation mix: the question is what makes up the total, so the
+      // series have to add rather than hide one another.
+      const rand = mulberry32(88);
+      const months = [], solar = [], wind = [], hydro = [];
+      for (let m = 0; m < 12; m++) {
+        const summer = Math.cos(((m - 6) / 12) * Math.PI * 2);
+        months.push(m);
+        solar.push(14 + summer * 9 + rand() * 3);
+        wind.push(20 - summer * 6 + rand() * 4);
+        hydro.push(11 + rand() * 3);
+      }
+      plot.set_barmode('stack');
+      plot.add_bar2d(months, solar, T3, 'solar', undefined);
+      plot.add_bar2d(months, wind, T2, 'wind', undefined);
+      plot.add_bar2d(months, hydro, T1, 'hydro', undefined);
+      plot.set_categories('x',
+        ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+         'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
+
+      // The same data reads two ways; the button is the argument for having
+      // both modes rather than one.
+      const btn = ui.card.querySelector('.mode-toggle');
+      let stacked = true;
+      btn?.addEventListener('click', () => {
+        stacked = !stacked;
+        plot.set_barmode(stacked ? 'stack' : 'group');
+        btn.textContent = stacked ? 'stack' : 'group';
+        btn.setAttribute('aria-pressed', String(stacked));
+        ui.markDirty();
+      });
+      return {};
+    },
+  },
+
+  band2d: {
+    is3d: false, hover2d: true,
+    setup(plot) {
+      // A forecast and what it does not know. The band goes in first: draw
+      // order is the only layering in 2D, so adding it after the line would
+      // paint over the very thing it qualifies.
+      const rand = mulberry32(404);
+      const xs = [], mid = [], lo = [], hi = [];
+      const obsX = [], obsY = [], err = [];
+      let level = 30;
+      for (let h = 0; h <= 48; h++) {
+        level += (rand() - 0.5) * 3 + Math.sin(h / 7) * 0.9;
+        const spread = 1.6 + h * 0.16;
+        xs.push(h);
+        mid.push(level);
+        lo.push(level - spread);
+        hi.push(level + spread);
+        if (h % 6 === 0 && h <= 24) {
+          obsX.push(h);
+          obsY.push(level + (rand() - 0.5) * 2.2);
+          err.push(1.2 + rand() * 0.8);
+        }
+      }
+      plot.add_band2d(xs, lo, hi, '#1f4d55', '95% interval', undefined);
+      plot.add_line2d(xs, mid, T2, 2.0, 'forecast', undefined);
+      const obs = plot.add_scatter2d(obsX, obsY, T1, 3.0, 'observed', undefined);
+      plot.set_error_bars(obs, err, undefined, undefined, undefined);
+      return {};
+    },
+  },
+
+  box2d: {
+    is3d: false,
+    setup(plot) {
+      // Four build machines. The medians are close; the spread and the
+      // stragglers are the story, which is exactly what a box shows and a
+      // bar chart of means hides.
+      const rand = mulberry32(9001);
+      const names = ['ci-a', 'ci-b', 'ci-c', 'ci-d'];
+      const spreads = [1.0, 2.4, 0.7, 1.6];
+      const values = [], starts = [];
+      names.forEach((_, g) => {
+        starts.push(values.length);
+        const n = 90;
+        for (let i = 0; i < n; i++) {
+          let s = 0;
+          for (let k = 0; k < 4; k++) s += rand();
+          let v = 62 + (s - 2) * 6 * spreads[g];
+          // A few stragglers per machine — the points a whisker must not
+          // swallow.
+          if (rand() < 0.035) v += 20 + rand() * 45 * spreads[g];
+          values.push(v);
+        }
+      });
+      plot.add_box2d(values, starts, T2, 'vertical', 'build time (s)', undefined);
+      plot.set_categories('x', names);
+      return {};
+    },
+  },
+
   bars2d: {
     is3d: false, hover2d: true,
     setup(plot) {
@@ -665,11 +1047,18 @@ const mounted = [];
 function mountExample(card) {
   const def = EXAMPLES[card.dataset.example];
   if (!def) return;
+  // A scene with an input file that did not arrive degrades on its own,
+  // rather than taking the page down with it.
+  if (def.requires && !def.requires()) { cardFallback(card, def.missing); return; }
   const canvas = card.querySelector('.ex-canvas');
   const tip = card.querySelector('.term-tip');
   const ctx = canvas.getContext('2d');
   const scratch = document.createElement('canvas');
   const sctx = scratch.getContext('2d');
+  // A second buffer for the full-resolution legend composited over a
+  // half-res drag frame — putImageData ignores alpha, drawImage does not.
+  const overlay = document.createElement('canvas');
+  const octx = overlay.getContext('2d');
 
   const plot = new Plot();
   let dirty = true, visible = true;
@@ -711,6 +1100,17 @@ function mountExample(card) {
       ctx.clearRect(0, 0, w, h);
       ctx.imageSmoothingEnabled = true;
       ctx.drawImage(scratch, 0, 0, w, h);
+      // The legend is what the eye is fixed on while dragging, so it is
+      // rasterized at full resolution and composited on top. Without this the
+      // downscale would drop the engine's chrome scale a step and the legend
+      // would swap font, weight and padding the moment a drag started.
+      plot.render_legend_overlay(w, h);
+      if (overlay.width !== w || overlay.height !== h) {
+        overlay.width = w;
+        overlay.height = h;
+      }
+      octx.putImageData(readFrame(w, h), 0, 0);
+      ctx.drawImage(overlay, 0, 0);
     } else {
       plot.render(w, h);
       ctx.putImageData(readFrame(w, h), 0, 0);
@@ -741,6 +1141,16 @@ function mountExample(card) {
   }
 
   canvas.addEventListener('pointerdown', (e) => {
+    // The legend owns its own rows: a press there shows or hides that series
+    // and never becomes a drag or a pick. 2D cards get this too.
+    const [lx, ly] = fbCoords(e);
+    const row = plot.legend_hit(w, h, lx, ly);
+    if (row !== undefined) {
+      plot.toggle_muted(row);
+      setHover(null, e);
+      dirty = true;
+      return;
+    }
     if (!def.is3d) return;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) [panCX, panCY, pinchD] = centroidDist();
@@ -763,14 +1173,21 @@ function mountExample(card) {
     }
     if (dragging) {
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
-      if (e.shiftKey) plot.pan(dx * dpr, dy * dpr);
-      else plot.rotate(-dx * 0.006, -dy * 0.006);
+      // Through the input map, so the drag feel is stated once, in the core.
+      plot.apply_drag(dx, dy, e.shiftKey, 0.006, dpr, 0.004);
       lastX = e.clientX;
       lastY = e.clientY;
       dirty = true;
       return;
     }
     const [px, py] = fbCoords(e);
+    // Over the legend the canvas behaves like a row of buttons, not a plot.
+    const overLegend = plot.legend_hit(w, h, px, py) !== undefined;
+    canvas.style.cursor = overLegend ? 'pointer' : '';
+    if (overLegend) {
+      setHover(null, e);
+      return;
+    }
     if (def.pick) {
       let hit = null;
       if (def.pick === 'element') {
@@ -848,7 +1265,7 @@ function mountExample(card) {
     }
   }
 
-  mounted.push({ frame });
+  mounted.push({ frame, name: card.dataset.example, plot });
 }
 
 /* ---------- boot ---------- */
@@ -923,28 +1340,60 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeMax();
 });
 
+function cardFallback(card, html) {
+  const body = card.querySelector('.term-body');
+  if (body) body.innerHTML = '<div class="ex-fallback">' + html + '</div>';
+}
+
 function showFallback() {
-  for (const card of document.querySelectorAll('.ex-card .term-body')) {
-    card.innerHTML = '<div class="ex-fallback">These live examples need WebAssembly, which '
-      + 'failed to load here. The plots themselves run in any terminal — see the '
-      + '<a href="https://github.com/sebaheg/plotui">GitHub README</a> for screenshots.</div>';
+  for (const card of document.querySelectorAll('.ex-card')) {
+    cardFallback(card, 'These live examples need WebAssembly, which failed to load here. '
+      + 'The plots themselves run in any terminal — see the '
+      + '<a href="https://github.com/sebaheg/plotui">GitHub README</a> for screenshots.');
   }
 }
 
 (async () => {
+  // Started before the engine so the two overlap; a failure here leaves PDB
+  // null and only the protein card falls back.
+  const structure = fetch(new URL('./1ubq.pdb?v=1', document.baseURI))
+    .then((r) => (r.ok ? r.text() : null))
+    .catch(() => null);
   try {
-    const mod = await import('./pkg/plotui_wasm.js');
-    const wasm = await mod.default();
+    // ?v=1 flushes copies cached from before the site sent Cache-Control
+    // headers; the explicit wasm URL keeps the pair in the same version.
+    //
+    // This page has exactly one consumer of the engine, so it initialises the
+    // module itself. Anything else on this page that needs the engine must go
+    // through js/wasm-engine.js instead: wasm-bindgen's init() builds a fresh
+    // WebAssembly.Memory every call, and a second one here would leave these
+    // trace handles pointing into an instance that no longer exists.
+    const mod = await import('./pkg/plotui_wasm.js?v=1');
+    const wasm = await mod.default({ module_or_path: new URL('./pkg/plotui_wasm_bg.wasm?v=1', document.baseURI) });
     Plot = mod.Plot;
     ForceLayout = mod.ForceLayout;
     marching_cubes = mod.marching_cubes;
+    catmull_rom = mod.catmull_rom;
+    tube = mod.tube;
+    ribbon = mod.ribbon;
     memory = wasm.memory;
+    // Which engine build this page actually loaded. site/pkg/ is committed,
+    // so it can lag the source; CI gates that, and this makes it visible
+    // from the browser too.
+    fetch(new URL('./pkg/BUILD_STAMP', document.baseURI))
+      .then((r) => (r.ok ? r.text() : null))
+      .then((v) => v && console.info('plotui engine build', v.trim()))
+      .catch(() => {});
   } catch (e) {
     console.error('plotui wasm failed to load:', e);
     showFallback();
     return;
   }
+  PDB = await structure;
   document.querySelectorAll('.ex-card').forEach(mountExample);
+  // QA hook: `__plotuiCards.protein.plot.set_input_map('-yaw', '-pitch')`
+  // flips the drag feel on one card live, for comparing the two by hand.
+  window.__plotuiCards = Object.fromEntries(mounted.map((m) => [m.name, m]));
   (function tick() {
     for (const m of mounted) m.frame();
     requestAnimationFrame(tick);

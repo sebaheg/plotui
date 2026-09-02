@@ -16,10 +16,10 @@
 
 <header>
   <div class="wrap nav">
-    <a class="wordmark" href="index.html">plo<span class="t1">t</span><span class="t2">u</span><span class="t3">i.</span>xyz</a>
+    <a class="wordmark" href="/">plo<span class="t1">t</span><span class="t2">u</span><span class="t3">i.</span>xyz</a>
     <nav class="nav-links" aria-label="Main">
       <a href="#install">install</a>
-      <a class="ex" href="examples.html">examples</a>
+      <a class="ex" href="/examples">examples</a>
       <a href="https://docs.plotui.xyz">docs</a>
       <a class="gh" href="https://github.com/sebaheg/plotui">GitHub ↗</a>
     </nav>
@@ -37,7 +37,7 @@
           <strong>Bubble&nbsp;Tea</strong>. Select, rotate, pan, zoom, hover.</p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/sebaheg/plotui">Star on GitHub</a>
-          <a class="btn btn-ghost" href="#install">Install the CLI</a>
+          <a class="btn btn-ghost" href="#install">Get started</a>
         </div>
       </div>
 
@@ -77,13 +77,11 @@
       <div class="code-grid">
         <div>
           <h2>A plotting API you already know.</h2>
-          <p>Add traces and plotui does the rest. The same API in Python, Rust, and Go.</p>
+          <p>The same calls in Python, Rust, and Go, so examples translate one-to-one.</p>
           <ul class="feature-list">
-            <li><b>Automatic plot structure</b> — axes, ticks, a legend, and colors appear from your traces alone: <code style="font-family:var(--mono);font-size:.85em">name</code> a trace for the legend, and omitted colors follow a swappable color sequence.</li>
-            <li><b>2D and 3D in one object</b> — scatter, line, and bar charts; 3D scatter, lines, surfaces, and graphs. The first 3D trace switches on the orbit camera — no mode flag.</li>
-            <li><b>Interactive and pickable</b> — orbit, zoom, and pan; hover highlights points, nodes, and edges, and a click tells you exactly what was picked. The camera is scriptable too: save a view and restore it later.</li>
-            <li><b>One API, three languages</b> — the same calls in Python, Rust, and Go, down to identical error messages, so examples translate one-to-one.</li>
-          </ul>
+            <li><b>2D and 3D in one object</b> — scatter, line, and bar; 3D scatter, surfaces, and graphs. The first 3D trace turns on the orbit camera.</li>
+            <li><b>Interactive and pickable</b> — orbit, zoom, and pan; hover highlights, and a click tells you what was picked.</li>
+            <li><b>Drops in as a widget</b> — a first-class widget for Textual, Ratatui, and Bubble Tea, or drive the engine yourself from any event loop.</li>          </ul>
         </div>
         <div class="code-panel">
           <div class="lang-tabs" role="tablist" aria-label="API language">
@@ -184,9 +182,6 @@ escape, _ := plot.<span class="fn">RenderKitty</span>(cols, rows, cellW, cellH, 
           <p class="snip">github.com/sebaheg/plotui/go/teaplot</p>
         </div>
       </div>
-      <p class="fine">Same engine behind all three — <b>a plot looks and feels identical
-        whichever framework hosts it.</b></p>
-
       <h3 class="compat-head">Terminals</h3>
       <div class="compat-list">
         <div class="compat-row"><b>Kitty</b><small>placeholder</small></div>
@@ -206,10 +201,6 @@ escape, _ := plot.<span class="fn">RenderKitty</span>(cols, rows, cellW, cellH, 
         <div><dt>~ partial</dt><dd>these terminals' pixel-graphics support is new and still
           maturing — plots work, with occasional rough edges</dd></div>
       </dl>
-      <p class="fine">plotui detects your terminal and picks the best render path on its own —
-        no configuration, and it works inside <b>tmux</b> too (plots pass straight through to
-        the hosting terminal). Terminals without pixel graphics get a clear notice instead:
-        <b>plotui never degrades to a fake plot.</b></p>
     </div>
   </section>
 
@@ -220,9 +211,24 @@ escape, _ := plot.<span class="fn">RenderKitty</span>(cols, rows, cellW, cellH, 
       <p class="sec-intro">plotui does both <b>2D and 3D plotting</b> — line, scatter, bar, and
         stacked charts with automatic axes, ticks, and legend, and shaded 3D surfaces you can
         rotate. These two are no mock-ups: the real engine, compiled to WebAssembly, rasterizes
-        every frame exactly as it does in your terminal.
-        See <a href="examples.html">the examples page</a> for more.</p>
+        every frame exactly as it does in your terminal.</p>
+      <div class="cta-row" style="margin:22px 0 30px">
+        <a class="btn btn-primary" href="/examples">See all examples →</a>
+      </div>
       <div class="gallery-grid">
+        <div class="term" aria-label="Live demo: a 2D time series chart">
+          <div class="term-bar" aria-hidden="true">
+            <span class="b"></span><span class="b"></span><span class="b"></span>
+            <span class="term-title">plot.add_line(hours, mw, name="observed")</span>
+            <span style="width:49px"></span>
+          </div>
+          <div class="term-body">
+            <canvas id="chart2d"></canvas>
+            <div class="term-foot" aria-hidden="true">
+              <span class="act"><span class="key">hover</span>inspect</span>
+            </div>
+          </div>
+        </div>
         <div class="term" aria-label="Live demo: a 3D surface plot">
           <div class="term-bar" aria-hidden="true">
             <span class="b"></span><span class="b"></span><span class="b"></span>
@@ -240,22 +246,6 @@ escape, _ := plot.<span class="fn">RenderKitty</span>(cols, rows, cellW, cellH, 
             </div>
           </div>
         </div>
-        <div class="term" aria-label="Live demo: 2D chart types">
-          <div class="term-bar" aria-hidden="true">
-            <span class="b"></span><span class="b"></span><span class="b"></span>
-            <span class="term-title" id="chart2d-title">plot.add_line(hours, mw, name="observed")</span>
-            <span style="width:49px"></span>
-          </div>
-          <div class="term-body">
-            <canvas id="chart2d"></canvas>
-            <div class="term-foot">
-              <button class="btn on" type="button" data-kind="line">line</button>
-              <button class="btn" type="button" data-kind="scatter">scatter</button>
-              <button class="btn" type="button" data-kind="bar">bar</button>
-              <button class="btn" type="button" data-kind="stacked">stacked</button>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </section>
@@ -265,16 +255,11 @@ escape, _ := plot.<span class="fn">RenderKitty</span>(cols, rows, cellW, cellH, 
       <p class="sec-label"><span class="sw" style="background:var(--trace-1)"></span>streaming</p>
       <div class="stream-grid">
         <div>
-          <h2>Stream data in. Never rebuild.</h2>
+          <h2>Supports streaming data</h2>
           <p>Every <code style="font-family:var(--mono);font-size:.85em">add_*</code> call returns a
-            stable trace handle. Append through it and the cost is proportional to the <em>new</em>
-            points — not the history — while axes autoscale to the grown data on the next frame.
-            numpy arrays cross into the Rust core in one bulk copy.</p>
-          <ul class="feature-list">
-            <li><b>widget.extend(h, xs, ys)</b> — append + repaint; repeated extends between frames coalesce into one raster.</li>
-            <li><b>widget.set_visible(h, False)</b> — hide a series without losing its handle, palette slot, or picking indices. Click the legend on the right to try it.</li>
-            <li><b>Incremental bounds</b> — per-trace cached extents, so a long-running dashboard never rescans its history to draw a frame.</li>
-          </ul>
+            stable trace handle. Appends through it cost only the <em>new</em> points — not the
+            history — and axes autoscale on the next frame. numpy arrays cross into the Rust core
+            in one bulk copy.</p>
           <pre class="code" aria-label="Streaming example"><code><span class="cm"># handles come back from add_*</span>
 h = plot.<span class="fn">add_line</span>([], [], name=<span class="str">"forecast"</span>)
 o = plot.<span class="fn">add_scatter</span>([], [], name=<span class="str">"observed"</span>)
@@ -308,8 +293,6 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
               </div>
             </div>
           </div>
-          <p class="stream-note"><b>every frame:</b> the delta crosses FFI, per-trace bounds
-            update in O(new points), the Rust core re-rasterizes, one Kitty escape replaces the image.</p>
         </div>
       </div>
     </div>
@@ -318,7 +301,7 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
   <section id="install">
     <div class="wrap">
       <p class="sec-label"><span class="sw" style="background:var(--trace-3)"></span>installation</p>
-      <h2>One command. Pick yours.</h2>
+      <h2>Several install options</h2>
       <p class="sec-intro">The <b>plotui</b> CLI ships prebuilt for macOS and Linux — plot straight
         from your shell: <code style="font-family:var(--mono);font-size:.85em">seq 100 | plotui line</code>.
         Python users get the CLI bundled with the library wheel.</p>
@@ -353,14 +336,6 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
 <span class="cm"># then run a built-in demo:</span>
 <span class="ps1">❯</span> plotui example scatter</code></pre>
       </div>
-      <p class="fine">The chart opens interactively in your terminal — drag to pan, scroll to
-        zoom, <b>q</b> to quit; pipe the output onward and it prints a single frame instead.
-        <code style="font-family:var(--mono);font-size:.9em">plotui example</code> lists all the
-        demo scenes — the two live terminals on this page among them — and your own data pipes
-        straight into <code style="font-family:var(--mono);font-size:.9em">plotui
-        line</code>, <code style="font-family:var(--mono);font-size:.9em">scatter</code>, or
-        <code style="font-family:var(--mono);font-size:.9em">bar</code>.
-        Needs a <a href="#compat">terminal with Kitty graphics</a>.</p>
     </div>
   </section>
 
@@ -386,11 +361,14 @@ widget.<span class="fn">set_visible</span>(o, <span class="self">False</span>)  
   </div>
 </footer>
 
-<!-- Live canvas demos — in-browser re-creations of the terminal renderer.
-     One file per demo; edit these only to change the visualizations. -->
+<!-- Live demos. The gallery and the streaming section run the real engine
+     compiled to WebAssembly; each falls back to a hand-drawn canvas mockup
+     (gallery-*.js / stream-demo.js) only if the module fails to load. The
+     hero is a hand-drawn scene by design — it plays before the wasm bundle
+     would have finished arriving. -->
 <script src="js/hero-scatter3d.js"></script>
 <script type="module" src="js/gallery-live.js"></script>
-<script src="js/stream-demo.js"></script>
+<script type="module" src="js/stream-live.js"></script>
 <script>
 // Already on the main page: scroll to the top instead of reloading.
 document.querySelector('a.wordmark').addEventListener('click', function (e) {
