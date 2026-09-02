@@ -199,10 +199,27 @@
     display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
     gap: 48px; align-items: center;
   }
+  .stream-grid pre.code { margin-top: 28px; }
+  /* The prompt line is chrome drawn over the frame, and the engine has no
+     idea it is there — its own top margin is only a few pixels, so without
+     this the first y tick lands under the prompt text. The band comes from
+     padding on the body rather than a margin on the canvas: .term-body has
+     no padding or border of its own, so a child's top margin would collapse
+     straight through it and move the whole card down instead. The card's
+     total height is unchanged. The mockup got this for free by drawing its
+     own generous top margin. */
+  .stream-grid .term-body { padding-top: 30px; }
+  /* Full 300px, with the card growing by the padding rather than the canvas
+     shrinking into it: the engine picks its UI scale from the frame height,
+     and 270px lands the wrong side of the boundary — every axis label drops a
+     size. The band costs 30px of page, not a whole tier of legibility. */
   #stream2d { display: block; width: 100%; height: 300px; }
   /* Keep the legend inside the plot frame, clear of the y2 label column —
-     the way the real renderer lays it out. */
-  #stream-legend { right: 56px; }
+     the way the real renderer lays it out — and riding down with it. */
+  /* Opaque, not merely dark: the engine autoscales, so live data can and
+     does run under the legend — and a series read through 28% of itself is
+     worse than one honestly hidden behind a panel. */
+  #stream-legend { right: 56px; top: 34px; background: var(--bg-term); }
   .stream-note {
     font-family: var(--mono); font-size: 11px; color: var(--ink);
     margin-top: 14px;

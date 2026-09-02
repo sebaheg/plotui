@@ -23,7 +23,7 @@ plot.add_scatter(xs, ys, color=None, size=2.5, name=None, axis="y")
 ## Bars
 
 ```python
-plot.add_bar(xs, heights, color=None, name=None, axis="y")
+plot.add_bar(xs, heights, color=None, orientation="vertical", name=None, axis="y")
 ```
 
 Bars rise (or fall) from the zero baseline. Bar width is derived from the
@@ -31,15 +31,113 @@ smallest gap between x positions, so adjacent bars keep a visible gap —
 which also means `extend`-ing a bar whose x narrows that gap re-flows the
 width of every bar in the trace.
 
-**Stacked bars** are a painter's trick: draw cumulative totals first, then the
-shorter component bars on top:
+`orientation="horizontal"` lays the bars along x instead: `xs` becomes the y
+positions and the baseline is a vertical line at zero. Pair it with
+`set_categories("y", …)` for long labels, which a horizontal axis has no room
+to write and no way to rotate.
+
+### Several series
+
+By default bar series **overlay**: each draws at full width on its own
+positions, so two series on the same positions hide one another. `set_barmode`
+says what to do instead:
 
 ```python
-totals = [s + w + h for s, w, h in zip(solar, wind, hydro)]
-plot.add_bar(months, totals, name="hydro")                        # tallest first
-plot.add_bar(months, [s + w for s, w in zip(solar, wind)], name="wind")
+plot.set_barmode("stack")   # each series starts where the one below ended
+plot.set_barmode("group")   # side by side, each taking 1/n of the width
 plot.add_bar(months, solar, name="solar")
+plot.add_bar(months, wind,  name="wind")
+plot.add_bar(months, hydro, name="hydro")
 ```
+
+Stacking accumulates same-signed values only: a series that dips negative
+grows *downward* from the baseline rather than cancelling the positives into
+a net figure you cannot decompose. Positions stack when they match exactly,
+so series on different x grids stack independently. Hiding a series with
+`set_visible` takes it out of the stack and the group — the survivors close
+up rather than leaving a gap.
+
+## Steps
+
+```python
+plot.add_step(xs, ys, color=None, width=2.0, where_="post", name=None, axis="y")
+```
+
+The right-angle path between samples rather than the straight one. Use it for
+anything that *holds* its value between samples — counters, states, prices —
+where a straight segment draws a transition that never happened. `where_` is
+`"post"` (the old value holds until the next sample), `"pre"` (the new value
+applies from the previous one), or `"mid"` (the riser sits halfway between).
+
+## Histograms
+
+```python
+plot.add_histogram(values, bins=None, bin_width=None, color=None, name=None, axis="y")
+```
+
+Give `bins` for a count, `bin_width` for a fixed width, or neither for the
+Freedman–Diaconis rule, which adapts to spread rather than to sample size.
+The raw values are kept: `extend_values(handle, more)` adds observations and
+rebins, and the crosshair reads out each bar's interval and count.
+
+Bins are solved once from the whole sample and **do not change with zoom** —
+edges that shifted while panning would change the shape of the distribution
+under your hands.
+
+## Box plots
+
+```python
+plot.add_box(groups, color=None, orientation="vertical", name=None, axis="y")
+```
+
+`groups` is a list of samples, one per box. Group *i* sits at position *i*, so
+`set_categories("x", …)` names them. Boxes span the quartiles with a median
+line; whiskers reach the furthest values within 1.5·IQR, and anything beyond
+is drawn as its own point rather than being swallowed by a longer whisker —
+which is the whole reason a box plot beats a min/max range.
+
+## Bands and error bars
+
+```python
+plot.add_band(xs, lo, hi, color=None, name=None, axis="y")          # a filled ribbon
+plot.set_error_bars(handle, y_plus=…, y_minus=None, x_plus=…, x_minus=None)
+```
+
+A band fills between two boundaries at each x — a confidence interval, an
+envelope, a tolerance range. **Add it before the line it belongs to:** draw
+order is the only layering in 2D, so a band added afterwards paints over its
+own centre line.
+
+Error bars attach to a scatter or line rather than being a series of their
+own, so they take its color, stay out of the legend, and cannot drift out of
+step with the points. Omit the `minus` half for the symmetric case.
+
+## Heatmaps
+
+```python
+plot.add_heatmap(xs, ys, zs, colormap="viridis", colorbar=True, label=None, name=None)
+```
+
+`zs` is a list of rows (or a 2D NumPy array), `zs[j][i]` giving the value at
+`(xs[i], ys[j])` — the same grid shape `add_surface3d` takes. Cells centre on
+their coordinates and tile outward by half a step, so a regular grid meets
+edge to edge; a NaN value leaves a hole rather than a zero.
+
+The colorbar is on by default and spans the grid's own range. Leave it on:
+without it the colors show structure but no values.
+
+## Categorical axes
+
+```python
+plot.set_categories("x", ["Mon", "Tue", "Wed"])   # or "y"
+```
+
+Category *i* sits at position *i* and the ticks become one label per category.
+Naming categories does **not** move the range — traces still place themselves
+— so a series plotted at 0, 1, 2 lines up with the first three names, and a
+category nothing was plotted at simply falls outside the view. With more
+categories than fit, labels thin by a whole stride so the ones that remain
+stay on their own categories.
 
 ## Colors
 

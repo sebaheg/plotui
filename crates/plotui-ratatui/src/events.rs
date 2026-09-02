@@ -48,6 +48,16 @@ impl PlotState {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.contains(m) {
+                    // The legend owns its rows: a press there shows or hides
+                    // that series instead of grabbing the camera, so a click
+                    // on a row can never smear into a rotation.
+                    let (lx, ly) = self.rel(m);
+                    let (pw, ph, px, py, _) = self.geometry(lx, ly);
+                    if let Some(id) = self.plot.legend_hit(pw, ph, px, py) {
+                        let shown = self.plot.toggle_muted(id).unwrap_or(true);
+                        self.invalidate();
+                        return Some(PlotEvent::LegendToggled(id, shown));
+                    }
                     self.dragging = true;
                     self.moved = false;
                     self.last_pos = (m.column, m.row);
@@ -98,7 +108,7 @@ impl PlotState {
                     }
                 } else {
                     // Routed through the plot's input map: drag rotates
-                    // (camera-grab — drag right orbits the view right),
+                    // (trackball — drag right turns the object right),
                     // shift-drag pans, unless the host remapped it. Pan is
                     // in full-resolution image pixels, so one dragged cell
                     // is one cell's worth of pixels and the plot stays
@@ -223,6 +233,8 @@ impl PlotState {
             KeyCode::Right if shift => self.plot.camera.pan(KEY_PAN_CELLS * cw, 0.0),
             KeyCode::Up if shift => self.plot.camera.pan(0.0, -KEY_PAN_CELLS * ch),
             KeyCode::Down if shift => self.plot.camera.pan(0.0, KEY_PAN_CELLS * ch),
+            // Arrows nudge like a drag in that direction (trackball: the
+            // object follows — Left turns the object left).
             KeyCode::Left => self.plot.camera.rotate(KEY_ROTATE_STEP, 0.0),
             KeyCode::Right => self.plot.camera.rotate(-KEY_ROTATE_STEP, 0.0),
             KeyCode::Up => self.plot.camera.rotate(0.0, KEY_ROTATE_STEP),

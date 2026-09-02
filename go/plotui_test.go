@@ -281,6 +281,238 @@ func TestSurfaceGridValidation(t *testing.T) {
 	}
 }
 
+func TestAddBox(t *testing.T) {
+	p := New()
+	defer p.Close()
+	a := []float32{1, 2, 3, 4, 5, 6, 7, 8, 9, 100}
+	b := []float32{2, 4, 6, 8, 10, 12, 14, 16, 18}
+	h, err := p.AddBox([][]float32{a, b}, WithName("groups"))
+	if err != nil {
+		t.Fatalf("AddBox: %v", err)
+	}
+	if _, err := p.SetCategories("x", []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if drawnCount(t, p, 320, 240) == 0 {
+		t.Error("box plot drew nothing")
+	}
+	if _, err := p.AddBox(nil); err == nil || !strings.Contains(err.Error(), "at least one group") {
+		t.Errorf("empty groups error = %v", err)
+	}
+	if _, err := p.AddBox([][]float32{a}, WithOrientation("sideways")); err == nil ||
+		!strings.Contains(err.Error(), "orientation") {
+		t.Errorf("bad orientation error = %v", err)
+	}
+	if err := p.Extend(h, []float32{1}, []float32{1}); err == nil ||
+		!strings.Contains(err.Error(), "rebuild the plot") {
+		t.Errorf("structural error = %v", err)
+	}
+}
+
+func TestBandAndErrorBars(t *testing.T) {
+	p := New()
+	defer p.Close()
+	xs := []float32{0, 1, 2}
+	if _, err := p.AddBand(xs, []float32{1, 0, 1}, []float32{4, 5, 4}, WithName("ci")); err != nil {
+		t.Fatalf("AddBand: %v", err)
+	}
+	h, err := p.AddScatter([]float32{1, 2}, []float32{1, 1}, WithColor(RGB{255, 0, 0}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Count the series colour, not every drawn pixel: widening the axis
+	// rescales the whole frame, so totals move for unrelated reasons.
+	red := func() int {
+		rgba, err := p.RenderRGBA(240, 180)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for i := 0; i+3 < len(rgba); i += 4 {
+			if rgba[i+3] != 0 && rgba[i] == 255 && rgba[i+1] == 0 && rgba[i+2] == 0 {
+				n++
+			}
+		}
+		return n
+	}
+	before := red()
+	if err := p.SetErrorBars(h, []float32{3, 3}, nil, nil, nil); err != nil {
+		t.Fatalf("SetErrorBars: %v", err)
+	}
+	if red() <= before {
+		t.Error("error bars must add drawn area")
+	}
+	bars, _ := p.AddBar([]float32{0}, []float32{1})
+	if err := p.SetErrorBars(bars, []float32{1}, nil, nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "scatter and line") {
+		t.Errorf("wrong-kind error = %v", err)
+	}
+}
+
+func TestBarMode(t *testing.T) {
+	p := New()
+	defer p.Close()
+	if _, err := p.AddBar([]float32{0, 1}, []float32{3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.AddBar([]float32{0, 1}, []float32{2, 5}); err != nil {
+		t.Fatal(err)
+	}
+	overlay := drawnCount(t, p, 300, 300)
+	changed, err := p.SetBarMode("stack")
+	if err != nil || !changed {
+		t.Fatalf("SetBarMode: changed=%v err=%v", changed, err)
+	}
+	if drawnCount(t, p, 300, 300) == overlay {
+		t.Error("stacking must change the frame")
+	}
+	if changed, _ = p.SetBarMode("stack"); changed {
+		t.Error("setting the same mode must report no change")
+	}
+	if _, err := p.SetBarMode("pile"); err == nil || !strings.Contains(err.Error(), "barmode") {
+		t.Errorf("bad barmode error = %v", err)
+	}
+}
+
+func TestHorizontalBarsAndCategories(t *testing.T) {
+	p := New()
+	defer p.Close()
+	if _, err := p.AddBar([]float32{0, 1, 2}, []float32{3, 5, 4},
+		WithOrientation("horizontal")); err != nil {
+		t.Fatalf("horizontal bar: %v", err)
+	}
+	if _, err := p.AddBar([]float32{0}, []float32{1}, WithOrientation("sideways")); err == nil ||
+		!strings.Contains(err.Error(), "orientation") {
+		t.Errorf("bad orientation error = %v", err)
+	}
+	changed, err := p.SetCategories("y", []string{"alpha", "beta", "gamma"})
+	if err != nil || !changed {
+		t.Fatalf("SetCategories: changed=%v err=%v", changed, err)
+	}
+	if changed, _ = p.SetCategories("y", []string{"alpha", "beta", "gamma"}); changed {
+		t.Error("setting the same names must report no change")
+	}
+	if changed, _ = p.SetCategories("y", nil); !changed {
+		t.Error("clearing names must report a change")
+	}
+	if _, err := p.SetCategories("z", []string{"a"}); err == nil ||
+		!strings.Contains(err.Error(), "axis 'x' or 'y'") {
+		t.Errorf("bad axis error = %v", err)
+	}
+}
+
+func TestAddHeatmap(t *testing.T) {
+	p := New()
+	defer p.Close()
+	xs, ys := []float32{0, 1, 2}, []float32{0, 1}
+	zs := [][]float32{{0, 1, 2}, {3, 4, 5}}
+	if _, err := p.AddHeatmap(xs, ys, zs); err != nil {
+		t.Fatalf("AddHeatmap: %v", err)
+	}
+	if drawnCount(t, p, 300, 200) == 0 {
+		t.Error("heatmap drew nothing")
+	}
+	if _, err := p.AddHeatmap(xs, ys, [][]float32{{0, 1}}); err == nil ||
+		!strings.HasPrefix(err.Error(), "zs must be a 2×3 grid") {
+		t.Errorf("ragged grid error = %v", err)
+	}
+	if _, err := p.AddHeatmap(xs, ys, zs, WithColormap("heat")); err == nil ||
+		!strings.HasPrefix(err.Error(), `unknown colormap "heat"`) {
+		t.Errorf("bad colormap error = %v", err)
+	}
+	if _, err := p.AddHeatmap(xs, ys, zs, WithoutColorbar(), WithColorbarLabel("kW")); err != nil {
+		t.Errorf("colorbar options: %v", err)
+	}
+}
+
+func TestAddHistogram(t *testing.T) {
+	p := New()
+	defer p.Close()
+	values := make([]float32, 200)
+	for i := range values {
+		values[i] = float32(i % 20)
+	}
+	h, err := p.AddHistogram(values, WithBins(8))
+	if err != nil {
+		t.Fatalf("AddHistogram: %v", err)
+	}
+	if drawnCount(t, p, 240, 180) == 0 {
+		t.Error("histogram drew nothing")
+	}
+	if err := p.ExtendValues(h, []float32{500}); err != nil {
+		t.Errorf("ExtendValues: %v", err)
+	}
+	if _, err := p.AddHistogram(values, WithBins(8), WithBinWidth(1)); err == nil ||
+		!strings.Contains(err.Error(), "not both") {
+		t.Errorf("mutually exclusive knobs error = %v", err)
+	}
+	if err := p.Extend(h, []float32{1}, []float32{1}); err == nil ||
+		!strings.Contains(err.Error(), "extend_values") {
+		t.Errorf("structural error = %v", err)
+	}
+}
+
+func TestAddStep(t *testing.T) {
+	p := New()
+	defer p.Close()
+	for _, where := range []string{"pre", "post", "mid"} {
+		if _, err := p.AddStep([]float32{0, 1, 2}, []float32{0, 1, 0}, WithStep(where)); err != nil {
+			t.Errorf("AddStep(%q): %v", where, err)
+		}
+	}
+	if _, err := p.AddStep([]float32{0, 1}, []float32{0, 1}, WithStep("stairs")); err == nil ||
+		!strings.Contains(err.Error(), "step mode") {
+		t.Errorf("bad step mode error = %v", err)
+	}
+}
+
+func TestSetPointStyles(t *testing.T) {
+	p := New()
+	defer p.Close()
+	h, err := p.AddScatter([]float32{0, 1, 2}, []float32{1, 1, 1})
+	if err != nil {
+		t.Fatalf("AddScatter: %v", err)
+	}
+	if err := p.SetPointStyles(h, []RGB{{10, 200, 30}}, nil, nil); err != nil {
+		t.Errorf("colors only: %v", err)
+	}
+	if err := p.SetPointStyles(h, nil, []float32{4, 5, 6}, nil); err != nil {
+		t.Errorf("sizes only: %v", err)
+	}
+	if err := p.SetPointStyles(h, nil, nil, []string{"ring", "square", "dot"}); err != nil {
+		t.Errorf("shapes only: %v", err)
+	}
+	if err := p.SetPointStyles(h, nil, nil, []string{"blob"}); err == nil ||
+		!strings.Contains(err.Error(), "shape") {
+		t.Errorf("bad shape error = %v", err)
+	}
+	bars, _ := p.AddBar([]float32{0}, []float32{1})
+	if err := p.SetPointStyles(bars, []RGB{{1, 2, 3}}, nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "scatter") {
+		t.Errorf("wrong-kind error = %v", err)
+	}
+}
+
+func TestMeshIndexValidation(t *testing.T) {
+	p := New()
+	defer p.Close()
+	xs := []float32{0, 1, 0}
+	ys := []float32{0, 0, 1}
+	zs := []float32{0, 0, 0}
+	if _, err := p.AddMesh3D(xs, ys, zs, [][3]uint32{{0, 1, 2}}); err != nil {
+		t.Fatalf("valid mesh: %v", err)
+	}
+	if _, err := p.AddMesh3D(xs, ys, zs, [][3]uint32{{0, 1, 7}}); err == nil ||
+		!strings.HasPrefix(err.Error(), "triangle index 7 names no vertex") {
+		t.Errorf("out-of-range index error = %v", err)
+	}
+	if _, err := p.AddMesh3D(xs, ys, zs, [][3]uint32{{0, 1, 2}},
+		WithColormap("heat")); err == nil ||
+		!strings.HasPrefix(err.Error(), `unknown colormap "heat"`) {
+		t.Errorf("bad colormap error = %v", err)
+	}
+}
+
 func TestDistinctImageIDsAndCleanup(t *testing.T) {
 	a, b := New(), New()
 	defer a.Close()
@@ -396,7 +628,8 @@ func TestInputMapRemapAndSharedError(t *testing.T) {
 	}
 	// The shared bind error string, byte-identical across bindings.
 	err := p.SetInputMap("bogus", "", "", "")
-	want := `camera control must be 'yaw', 'pitch', 'pan_x', 'pan_y', 'zoom' or 'off', got "bogus"`
+	want := `camera control must be 'yaw', 'pitch', 'pan_x', 'pan_y', 'zoom' or 'off', ` +
+		`optionally prefixed with '-' to invert the axis, got "bogus"`
 	if err == nil || err.Error() != want {
 		t.Fatalf("got %v, want %s", err, want)
 	}

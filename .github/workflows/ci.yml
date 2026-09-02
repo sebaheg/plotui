@@ -20,10 +20,47 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      # The examples page fetches its own copy of the structure the protein
+      # example embeds; a drift between them would ship two different
+      # molecules from one repo.
+      - run: cmp crates/plotui-cli/src/data/1ubq.pdb site/1ubq.pdb
+      # site/pkg/ is a committed build artifact: change the engine, forget
+      # to run site/build-wasm.sh, and the website silently keeps serving
+      # the old one. Compare the stamp instead of the bundle, because wasm
+      # builds are not byte-reproducible across toolchains.
+      - name: site/pkg is built from the current source
+        run: |
+          want=$(./site/wasm-stamp.sh)
+          have=$(cat site/pkg/BUILD_STAMP 2>/dev/null || echo missing)
+          if [ "$want" != "$have" ]; then
+            echo "::error::site/pkg is stale (built from $have, source is $want)."
+            echo "Run ./site/build-wasm.sh and commit site/pkg/."
+            exit 1
+          fi
+          echo "site/pkg matches the source ($want)"
       # plotui-py is a cdylib extension module that only links through maturin,
       # so lint/test the pure crates here; the python job covers the bindings.
       - run: cargo clippy -p plotui-core -p plotui-protocol -p plotui-term -p plotui-bind -p plotui-ffi -p plotui-ratatui -p plotui --all-targets -- -D warnings
       - run: cargo test -p plotui-core -p plotui-protocol -p plotui-term -p plotui-bind -p plotui-ffi -p plotui-ratatui -p plotui
+
+  go:
+    name: Go bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      # cgo links the staticlib from target/release, so build it first.
+      - run: cargo build -p plotui-ffi --release
+      - run: go build ./...
+        working-directory: go
+      - run: go vet ./...
+        working-directory: go
+      - run: go test ./...
+        working-directory: go
 
   python:
     name: Python wheel + pytest

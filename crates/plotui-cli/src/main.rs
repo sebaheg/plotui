@@ -6,6 +6,7 @@
 //! for the crosshair, `q` to quit); when stdout is piped, or with `--static`,
 //! one frame of Kitty escapes is printed instead.
 
+mod aizawa;
 mod build;
 mod deps;
 mod examples;
@@ -13,6 +14,7 @@ mod input;
 mod interactive;
 mod lidar;
 mod mandelbulb;
+mod protein;
 mod record;
 mod render;
 
@@ -21,6 +23,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser, Subcommand};
+use plotui_core::BarMode;
 use plotui_term::RenderMode;
 
 #[derive(Parser)]
@@ -45,7 +48,14 @@ enum Chart {
     /// Scatter plot
     Scatter(Args),
     /// Bar chart
-    Bar(Args),
+    Bar(BarArgs),
+    /// Step chart — the right-angle path between samples, for series that
+    /// hold their value (counters, states, prices)
+    Step(Args),
+    /// Histogram of a column of numbers
+    Hist(HistArgs),
+    /// Box plot — one box per column, showing quartiles, whiskers and outliers
+    Box(Args),
     /// Run a built-in example scene (no input data; lists them when run bare)
     Example(ExampleArgs),
 }
@@ -82,6 +92,35 @@ struct Args {
     /// Export frame size as WxH pixels (only with --out)
     #[arg(long, default_value = "1280x720", value_parser = parse_size)]
     size: (u16, u16),
+}
+
+#[derive(clap::Args)]
+#[command(disable_help_flag = true)]
+struct BarArgs {
+    #[command(flatten)]
+    common: Args,
+    /// Lay the bars along x instead of y (readable for long category labels)
+    #[arg(long)]
+    horizontal: bool,
+    /// Stack the series on top of one another
+    #[arg(long, conflicts_with = "group")]
+    stack: bool,
+    /// Draw the series side by side within each position
+    #[arg(long)]
+    group: bool,
+}
+
+#[derive(clap::Args)]
+#[command(disable_help_flag = true)]
+struct HistArgs {
+    #[command(flatten)]
+    common: Args,
+    /// Number of bins (default: chosen from the data's spread)
+    #[arg(long)]
+    bins: Option<usize>,
+    /// Bin width (default: chosen from the data's spread)
+    #[arg(long)]
+    bin_width: Option<f64>,
 }
 
 #[derive(clap::Args)]
@@ -131,7 +170,18 @@ fn parse_size(s: &str) -> Result<(u16, u16), String> {
 pub enum ChartKind {
     Line,
     Scatter,
-    Bar,
+    Bar {
+        horizontal: bool,
+        mode: BarMode,
+    },
+    Step,
+    Box,
+    /// `None` bins by the automatic rule; the two knobs are mutually
+    /// exclusive and validated before we get here.
+    Hist {
+        bins: Option<usize>,
+        bin_width: Option<f64>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -139,7 +189,23 @@ fn main() -> ExitCode {
     let (kind, args) = match cli.chart {
         Chart::Line(a) => (ChartKind::Line, a),
         Chart::Scatter(a) => (ChartKind::Scatter, a),
-        Chart::Bar(a) => (ChartKind::Bar, a),
+        Chart::Bar(a) => {
+            let mode = match (a.stack, a.group) {
+                (true, _) => BarMode::Stack,
+                (_, true) => BarMode::Group,
+                _ => BarMode::Overlay,
+            };
+            (ChartKind::Bar { horizontal: a.horizontal, mode }, a.common)
+        }
+        Chart::Step(a) => (ChartKind::Step, a),
+        Chart::Box(a) => (ChartKind::Box, a),
+        Chart::Hist(a) => {
+            if a.bins.is_some() && a.bin_width.is_some() {
+                eprintln!("plotui: give --bins or --bin-width, not both");
+                return ExitCode::from(2);
+            }
+            (ChartKind::Hist { bins: a.bins, bin_width: a.bin_width }, a.common)
+        }
         Chart::Example(a) => return examples::run(&a),
     };
 

@@ -240,6 +240,50 @@ fn error_paths_carry_the_shared_messages() {
         );
         assert!(last_error().starts_with("zs must be a 1×1 grid"));
 
+        // Mesh tris that are not whole triples.
+        let tris = [0u32, 0, 0, 0];
+        assert_eq!(
+            plotui_add_mesh3d(
+                p,
+                xs.as_ptr(),
+                1,
+                xs.as_ptr(),
+                1,
+                xs.as_ptr(),
+                1,
+                tris.as_ptr(),
+                4,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+            ),
+            PLOTUI_ERR_INVALID_ARG
+        );
+        assert_eq!(last_error(), "tris must be flat [a, b, c] vertex triples; got 4 indices");
+
+        // Mesh index naming no vertex.
+        let tris = [0u32, 1, 2];
+        assert_eq!(
+            plotui_add_mesh3d(
+                p,
+                xs.as_ptr(),
+                1,
+                xs.as_ptr(),
+                1,
+                xs.as_ptr(),
+                1,
+                tris.as_ptr(),
+                3,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+            ),
+            PLOTUI_ERR_INVALID_ARG
+        );
+        assert_eq!(last_error(), "triangle index 1 names no vertex; the mesh has 1");
+
         // Bad shape name on a graph.
         let shape = CString::new("blob").unwrap();
         let shapes = [shape.as_ptr()];

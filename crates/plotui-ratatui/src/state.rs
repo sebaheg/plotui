@@ -269,7 +269,7 @@ impl PlotState {
     /// `auto_rotate` is on. A no-op otherwise.
     pub fn tick(&mut self) {
         if self.auto_rotate {
-            self.plot.camera.rotate(plotui_term::policy::AUTO_ROTATE_STEP, 0.0);
+            self.plot.spin(plotui_term::policy::AUTO_ROTATE_STEP);
             self.invalidate();
         }
     }

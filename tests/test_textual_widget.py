@@ -596,3 +596,108 @@ def test_plot_drag_pans_window_when_set() -> None:
             assert not app.ranges or app.ranges == [], "plain pans post no message"
 
     asyncio.run(drive())
+
+
+# --- drag routes through the apply_* hooks, not around them ---
+
+
+def _drag(widget, dx: int, dy: int, *, shift: bool = False) -> None:
+    """One drag step from the position a preceding mouse_down recorded."""
+    from types import SimpleNamespace
+
+    x0, y0 = widget._last_pos
+    widget.on_mouse_move(
+        SimpleNamespace(
+            screen_x=x0 + dx, screen_y=y0 + dy, x=x0 + dx, y=y0 + dy, shift=shift
+        )
+    )
+
+
+def test_drag_reaches_the_overridable_hooks() -> None:
+    """A subclass overrides apply_rotate/apply_pan to hook camera changes;
+    a drag must arrive there. Going straight to the core would move the
+    camera behind the subclass's back."""
+
+    class Hooked(PlotWidget):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.rotates: list[tuple[float, float]] = []
+            self.pans: list[tuple[float, float]] = []
+
+        def apply_rotate(self, d_yaw: float, d_pitch: float) -> None:
+            self.rotates.append((d_yaw, d_pitch))
+            super().apply_rotate(d_yaw, d_pitch)
+
+        def apply_pan(self, dx: float, dy: float) -> None:
+            self.pans.append((dx, dy))
+            super().apply_pan(dx, dy)
+
+    class Host(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.plot = Plot()
+            self.plot.add_graph3d([0.0, 5.0], [0.0, 5.0], [0.0, 5.0], edges=[(0, 1)])
+
+        def compose(self) -> ComposeResult:
+            yield Hooked(self.plot, id="plot", render_mode="placeholder")
+
+    async def drive() -> None:
+        app = Host()
+        async with app.run_test(size=(60, 20)) as pilot:
+            widget = app.query_one("#plot", Hooked)
+            await pilot.mouse_down("#plot", offset=(30, 10))
+            _drag(widget, 7, 3)
+            assert widget.rotates, "a plain drag must reach apply_rotate"
+            assert not widget.pans
+
+            _drag(widget, 4, 2, shift=True)
+            assert widget.pans, "a shift-drag must reach apply_pan"
+
+    asyncio.run(drive())
+
+
+def test_a_rotation_locked_view_pans_instead_of_tilting() -> None:
+    """The pan-first mapping a flat view wants: a plain drag must move the
+    camera's pan and leave yaw/pitch untouched."""
+
+    async def drive() -> None:
+        app = _Harness()
+        async with app.run_test(size=(60, 20)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            app.plot.set_input_map("pan_x", "pan_y")
+            before = app.plot.camera_state()
+            await pilot.mouse_down("#plot", offset=(30, 10))
+            _drag(widget, 7, 3)
+            after = app.plot.camera_state()
+            assert after[:2] == before[:2], "a pan-mapped drag must not rotate"
+            assert after[3] - before[3] == pytest.approx(7 * widget._cell_w)
+            assert after[4] - before[4] == pytest.approx(3 * widget._cell_h)
+
+    asyncio.run(drive())
+
+
+def test_hook_decomposition_matches_the_core_exactly() -> None:
+    """Routing through the hooks must not change what a gesture does: the
+    widget's decomposition and Plot.apply_drag land on the same camera."""
+
+    async def drive() -> None:
+        app = _Harness()
+        async with app.run_test(size=(60, 20)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            await pilot.mouse_down("#plot", offset=(30, 10))
+            _drag(widget, 7, -3)
+            through_hooks = app.plot.camera_state()
+
+            direct = Plot()
+            direct.add_graph3d([0.0, 5.0], [0.0, 5.0], [0.0, 5.0], edges=[(0, 1)])
+            direct.apply_drag(7, -3, False, 0.03, widget._cell_w, widget._cell_h, 0.15)
+            assert through_hooks == pytest.approx(direct.camera_state())
+
+    asyncio.run(drive())
+
+
+def test_input_map_reads_back_what_was_set() -> None:
+    plot = Plot()
+    assert plot.input_map() == ("yaw", "pitch", "pan_x", "pan_y")
+    plot.set_input_map("pan_x", "-pitch", "off")
+    assert plot.input_map() == ("pan_x", "-pitch", "off", "pan_y")

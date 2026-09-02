@@ -442,6 +442,249 @@ def test_surface3d_rejects_bad_grids_and_colormaps():
         Plot().add_surface3d([0.0, 1.0], [0.0, 1.0], [[0.0, 1.0], [1.0, 0.0]], colormap="magma")
 
 
+def test_add_box_groups_and_validation():
+    a = [float(i) for i in range(1, 10)] + [100.0]
+    b = [float(i) * 2 for i in range(1, 10)]
+
+    plot = Plot()
+    plot.add_box([a, b], color="red", name="groups")
+    plot.set_categories("x", ["a", "b"])
+    assert drawn_count(plot, 320, 240) > 0
+
+    # Horizontal boxes read their groups off the y axis.
+    sideways = Plot()
+    sideways.add_box([a, b], orientation="horizontal")
+    sideways.set_categories("y", ["a", "b"])
+    assert drawn_count(sideways, 320, 240) > 0
+
+    with pytest.raises(ValueError, match="at least one group"):
+        Plot().add_box([])
+    with pytest.raises(ValueError, match="orientation"):
+        Plot().add_box([a], orientation="sideways")
+
+    # It is structural: the boxes are derived, so the plot is rebuilt to change.
+    h = plot.add_box([a])
+    with pytest.raises(ValueError, match="rebuild the plot"):
+        plot.extend(h, [1.0], [1.0])
+
+
+def test_band_and_error_bars():
+    xs = [0.0, 1.0, 2.0]
+    plot = Plot()
+    plot.add_band(xs, [1.0, 0.0, 1.0], [4.0, 5.0, 4.0], color="blue", name="ci")
+    plot.add_line(xs, [2.5, 2.5, 2.5], color="red")
+    assert drawn_count(plot, 240, 180) > 0
+
+    # Error bars belong to a series and reach past its points, so the axis
+    # has to grow for them.
+    # Count the series colour, not every drawn pixel: widening the axis
+    # rescales the whole frame, so totals move for reasons unrelated to bars.
+    def red(plot, w=240, h=180):
+        rgba = plot.render_rgba(w, h)
+        return sum(
+            1
+            for i in range(0, len(rgba), 4)
+            if rgba[i + 3] and (rgba[i], rgba[i + 1], rgba[i + 2]) == (255, 0, 0)
+        )
+
+    bare = Plot()
+    h = bare.add_scatter([1.0, 2.0], [1.0, 1.0], color="red")
+    before = red(bare)
+    bare.set_error_bars(h, y_plus=[3.0, 3.0])
+    assert red(bare) > before
+
+    # Asymmetric, and x bars too.
+    bare.set_error_bars(h, y_plus=[3.0, 3.0], y_minus=[0.0, 0.0])
+    bare.set_error_bars(h, x_plus=[0.5, 0.5])
+    # Clearing both axes is how they go away.
+    bare.set_error_bars(h)
+
+    with pytest.raises(ValueError, match="scatter and line"):
+        bars = bare.add_bar([0.0], [1.0])
+        bare.set_error_bars(bars, y_plus=[1.0])
+    with pytest.raises(ValueError, match="unknown trace handle"):
+        bare.set_error_bars(99, y_plus=[1.0])
+
+
+def test_barmode_stack_and_group():
+    """Overlay hides a shorter series behind a taller one; group and stack
+    are the two ways of not doing that."""
+
+    def visible_red(mode, w=300, h=300):
+        plot = Plot()
+        assert plot.set_barmode(mode) is (mode != "overlay")
+        plot.add_bar([0.0, 1.0], [3.0, 4.0], color="red")
+        plot.add_bar([0.0, 1.0], [2.0, 5.0], color="blue")
+        rgba = plot.render_rgba(w, h)
+        return sum(
+            1
+            for i in range(0, len(rgba), 4)
+            if rgba[i + 3] and (rgba[i], rgba[i + 1], rgba[i + 2]) == (255, 0, 0)
+        )
+
+    overlay = visible_red("overlay")
+    assert visible_red("group") > overlay, "grouping must stop blue covering red"
+    assert visible_red("stack") > overlay, "stacking must too"
+
+    with pytest.raises(ValueError, match="barmode"):
+        Plot().set_barmode("pile")
+
+
+def test_horizontal_bars_and_categories():
+    def extent(plot, w=300, h=300):
+        """(widest row, tallest column) of bar-coloured pixels."""
+        rgba = plot.render_rgba(w, h)
+        hit = lambda x, y: (
+            rgba[(y * w + x) * 4 + 3]
+            and (rgba[(y * w + x) * 4], rgba[(y * w + x) * 4 + 1], rgba[(y * w + x) * 4 + 2])
+            == (255, 0, 0)
+        )
+        widest = max(sum(1 for x in range(w) if hit(x, y)) for y in range(h))
+        tallest = max(sum(1 for y in range(h) if hit(x, y)) for x in range(w))
+        return widest, tallest
+
+    vert = Plot()
+    vert.add_bar([0.0, 1.0, 2.0], [3.0, 5.0, 4.0], color="red")
+    wv, tv = extent(vert)
+    assert tv > wv, "vertical bars are tall columns"
+
+    horiz = Plot()
+    horiz.add_bar([0.0, 1.0, 2.0], [3.0, 5.0, 4.0], color="red", orientation="horizontal")
+    wh, th = extent(horiz)
+    assert wh > th, "horizontal bars are wide rows"
+
+    with pytest.raises(ValueError, match="orientation"):
+        Plot().add_bar([0.0], [1.0], orientation="sideways")
+
+    # Categories label the rows; setting them reports whether anything moved.
+    assert horiz.set_categories("y", ["alpha", "beta", "gamma"]) is True
+    assert horiz.set_categories("y", ["alpha", "beta", "gamma"]) is False
+    assert horiz.set_categories("y", []) is True
+    with pytest.raises(ValueError, match="axis 'x' or 'y'"):
+        horiz.set_categories("z", ["a"])
+
+
+def test_add_heatmap_grid_colorbar_and_holes():
+    xs, ys = [0.0, 1.0, 2.0], [0.0, 1.0]
+    zs = [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]
+
+    plot = Plot()
+    plot.add_heatmap(xs, ys, zs, name="grid")
+    solid = drawn_count(plot, 300, 200)
+    assert solid > 0
+
+    # A colorbar is added by default and takes its own margin, so the same
+    # grid without one covers more of the frame.
+    bare = Plot()
+    bare.add_heatmap(xs, ys, zs, colorbar=False)
+    assert drawn_count(bare, 300, 200) != solid
+
+    # NaN is a hole, not a zero.
+    holed = Plot()
+    holed.add_heatmap(xs, ys, [[0.0, 1.0, 2.0], [3.0, float("nan"), 5.0]], colorbar=False)
+    assert drawn_count(holed, 300, 200) < drawn_count(bare, 300, 200)
+
+    # The grid rule is the one add_surface3d already enforces.
+    with pytest.raises(ValueError, match="grid"):
+        Plot().add_heatmap(xs, ys, [[0.0, 1.0]])
+    with pytest.raises(ValueError, match="viridis, plasma"):
+        Plot().add_heatmap(xs, ys, zs, colormap="magma")
+
+
+def test_add_histogram_bins_and_streaming():
+    values = [float(i % 20) for i in range(200)]
+    plot = Plot()
+    h = plot.add_histogram(values, bins=8, color="red")
+    assert drawn_count(plot) > 0
+
+    # Streaming rebins; a new extreme widens the range and so changes pixels.
+    before = plot.render_rgba(240, 180)
+    plot.extend_values(h, [500.0])
+    assert plot.render_rgba(240, 180) != before
+
+    # The two knobs are mutually exclusive.
+    with pytest.raises(ValueError, match="not both"):
+        Plot().add_histogram(values, bins=8, bin_width=1.0)
+    with pytest.raises(ValueError, match="at least 1"):
+        Plot().add_histogram(values, bins=0)
+    with pytest.raises(ValueError, match="positive"):
+        Plot().add_histogram(values, bin_width=-1.0)
+
+    # A histogram is structural for the coordinate extend path, and says so.
+    with pytest.raises(ValueError, match="extend_values"):
+        plot.extend(h, [1.0], [1.0])
+    with pytest.raises(ValueError, match="unknown trace handle"):
+        plot.extend_values(99, [1.0])
+    line = plot.add_line([0.0], [0.0])
+    with pytest.raises(ValueError, match="histogram"):
+        plot.extend_values(line, [1.0])
+
+
+def test_add_step_modes_and_validation():
+    """A step holds its value across a flat run; a straight line never does."""
+
+    def widest_red_row(plot, w=240, h=240):
+        rgba = plot.render_rgba(w, h)
+        best = 0
+        for y in range(h):
+            row = 0
+            for x in range(w):
+                i = (y * w + x) * 4
+                if rgba[i + 3] and (rgba[i], rgba[i + 1], rgba[i + 2]) == (255, 0, 0):
+                    row += 1
+            best = max(best, row)
+        return best
+
+    straight = Plot()
+    straight.add_line([0.0, 1.0, 2.0], [0.0, 1.0, 0.0], color="red")
+    diagonal = widest_red_row(straight)
+
+    for where in ("pre", "post", "mid"):
+        stepped = Plot()
+        stepped.add_step([0.0, 1.0, 2.0], [0.0, 1.0, 0.0], color="red", where_=where)
+        assert widest_red_row(stepped) > diagonal * 4, where
+
+    with pytest.raises(ValueError, match="step mode"):
+        Plot().add_step([0.0], [0.0], where_="stairs")
+
+
+def test_set_point_styles_channels_are_independent():
+    plot = Plot()
+    h = plot.add_scatter([0.0, 1.0, 2.0], [1.0, 1.0, 1.0])
+    base = drawn_count(plot)
+
+    # Sizes alone: bigger marks must cover more pixels.
+    plot.set_point_styles(h, sizes=[8.0, 8.0, 8.0])
+    assert drawn_count(plot) > base
+
+    # Colors alone, given as tuples and as shorthand strings.
+    plot.set_point_styles(h, colors=[(10, 200, 30), "red", "#0000ff"])
+    plot.set_point_styles(h, shapes=["disc", "ring", "square"])
+
+    with pytest.raises(ValueError, match="shape"):
+        plot.set_point_styles(h, shapes=["blob"])
+    with pytest.raises(ValueError, match="scatter"):
+        bars = plot.add_bar([0.0], [1.0])
+        plot.set_point_styles(bars, colors=["red"])
+    with pytest.raises(ValueError, match="unknown trace handle"):
+        plot.set_point_styles(99, colors=["red"])
+
+
+def test_mesh3d_draws_and_rejects_bad_indices():
+    xs, ys, zs = [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]
+    plot = Plot()
+    plot.add_mesh3d(xs, ys, zs, [(0, 1, 2)], name="tri")
+    plot.set_show_box(False)
+    assert drawn_count(plot, 300, 200) > 0
+
+    with pytest.raises(ValueError, match="names no vertex"):
+        Plot().add_mesh3d(xs, ys, zs, [(0, 1, 9)])
+    with pytest.raises(ValueError, match="viridis, plasma"):
+        Plot().add_mesh3d(xs, ys, zs, [(0, 1, 2)], colormap="magma")
+    with pytest.raises((ValueError, TypeError)):
+        Plot().add_mesh3d(xs, ys, zs, [(0, 1)])
+
+
 def test_hover2d_crosshair_draws_and_clears():
     plot = demo_2d()
     plain = plot.render_rgba(300, 200)

@@ -202,6 +202,34 @@ impl Plot {
         Ok(self.inner.add_mesh3d(verts, faces, c, cmap, name))
     }
 
+    /// Style a 2D scatter point by point: `colors` as shorthand strings,
+    /// `sizes` as radii, `shapes` as silhouette names. An empty or omitted
+    /// list leaves that channel uniform.
+    pub fn set_point_styles(
+        &mut self,
+        handle: usize,
+        colors: Option<Vec<String>>,
+        sizes: Option<Vec<f32>>,
+        shapes: Option<Vec<String>>,
+    ) -> Result<(), JsError> {
+        let colors = colors.unwrap_or_default();
+        let colors: Vec<plotui_core::Rgb> = colors
+            .iter()
+            .map(|c| plotui_bind::parse_color(c))
+            .collect::<Result<_, _>>()
+            .map_err(to_js)?;
+        let shapes = shapes.unwrap_or_default();
+        let shapes: Vec<&str> = shapes.iter().map(String::as_str).collect();
+        plotui_bind::set_point_styles(
+            &mut self.inner,
+            handle,
+            colors,
+            sizes.unwrap_or_default(),
+            shapes,
+        )
+        .map_err(to_js)
+    }
+
     /// Add a 2D scatter series on `axis` "y" (default), "y2" or "y3".
     pub fn add_scatter2d(
         &mut self,
@@ -232,6 +260,129 @@ impl Plot {
         Ok(self.inner.add_line2d(xs.to_vec(), ys.to_vec(), c, width.unwrap_or(2.0), name, a))
     }
 
+    /// Add a box plot over a flat sample: `groupStarts[g]` is where group
+    /// `g` begins in `values` (CSR).
+    pub fn add_box2d(
+        &mut self,
+        values: &[f32],
+        group_starts: &[u32],
+        color: Option<String>,
+        orientation: Option<String>,
+        name: Option<String>,
+        axis: Option<String>,
+    ) -> Result<usize, JsError> {
+        plotui_bind::check_group_starts(values.len(), group_starts).map_err(to_js)?;
+        let orient = plotui_bind::parse_orient(orientation.as_deref().unwrap_or("vertical"))
+            .map_err(to_js)?;
+        let c = resolve_color(&self.inner, color.as_deref())?;
+        let a = parse_axis(axis)?;
+        Ok(self.inner.add_box2d(values.to_vec(), group_starts.to_vec(), c, orient, name, a))
+    }
+
+    /// Add a filled band between two boundaries at each x. Add it before the
+    /// line it belongs to — draw order is the only layering in 2D.
+    pub fn add_band2d(
+        &mut self,
+        xs: &[f32],
+        lo: &[f32],
+        hi: &[f32],
+        color: Option<String>,
+        name: Option<String>,
+        axis: Option<String>,
+    ) -> Result<usize, JsError> {
+        let c = resolve_color(&self.inner, color.as_deref())?;
+        let a = parse_axis(axis)?;
+        Ok(self.inner.add_band2d(xs.to_vec(), lo.to_vec(), hi.to_vec(), c, name, a))
+    }
+
+    /// Attach per-point error bars to a 2D scatter or line; empty arrays
+    /// clear that axis, and an empty `minus` mirrors `plus`.
+    pub fn set_error_bars(
+        &mut self,
+        handle: usize,
+        y_plus: Option<Vec<f32>>,
+        y_minus: Option<Vec<f32>>,
+        x_plus: Option<Vec<f32>>,
+        x_minus: Option<Vec<f32>>,
+    ) -> Result<(), JsError> {
+        let ey = plotui_bind::error_bars(y_plus.unwrap_or_default(), y_minus.unwrap_or_default());
+        let ex = plotui_bind::error_bars(x_plus.unwrap_or_default(), x_minus.unwrap_or_default());
+        plotui_bind::set_error_bars(&mut self.inner, handle, ex, ey).map_err(to_js)
+    }
+
+    /// Add a heatmap over a flat row-major grid: `zs[j * xs.len() + i]` is
+    /// the value at (xs[i], ys[j]).
+    pub fn add_heatmap2d(
+        &mut self,
+        xs: &[f32],
+        ys: &[f32],
+        zs: &[f32],
+        colormap: Option<String>,
+        colorbar: Option<bool>,
+        label: Option<String>,
+        name: Option<String>,
+    ) -> Result<usize, JsError> {
+        plotui_bind::check_surface_grid_len(xs.len(), ys.len(), zs.len()).map_err(to_js)?;
+        let cm = plotui_bind::parse_colormap(Some(colormap.as_deref().unwrap_or("viridis")))
+            .map_err(to_js)?
+            .expect("a named colormap always resolves");
+        let h = self.inner.add_heatmap2d(xs.to_vec(), ys.to_vec(), zs.to_vec(), cm, name);
+        if colorbar.unwrap_or(true) {
+            if let Some((lo, hi)) = self.inner.heatmap_range(h) {
+                self.inner.colorbar = Some(plotui_core::Colorbar { map: cm, lo, hi, label });
+            }
+        }
+        Ok(h)
+    }
+
+    /// Add a histogram of `values`; `bins` or `binWidth` (not both), or
+    /// neither for the automatic rule.
+    pub fn add_histogram2d(
+        &mut self,
+        values: &[f32],
+        bins: Option<usize>,
+        bin_width: Option<f64>,
+        color: Option<String>,
+        name: Option<String>,
+        axis: Option<String>,
+    ) -> Result<usize, JsError> {
+        let spec = plotui_bind::parse_bins(bins, bin_width).map_err(to_js)?;
+        let c = resolve_color(&self.inner, color.as_deref())?;
+        let a = parse_axis(axis)?;
+        Ok(self.inner.add_histogram2d(values.to_vec(), spec, c, name, a))
+    }
+
+    /// Append observations to a histogram and rebin.
+    pub fn extend_values(&mut self, handle: usize, values: &[f32]) -> Result<(), JsError> {
+        plotui_bind::extend_values(&mut self.inner, handle, values).map_err(to_js)
+    }
+
+    /// Add a 2D step series; `where_` is "post" (default), "pre" or "mid".
+    pub fn add_step2d(
+        &mut self,
+        xs: &[f32],
+        ys: &[f32],
+        color: Option<String>,
+        width: Option<f32>,
+        where_: Option<String>,
+        name: Option<String>,
+        axis: Option<String>,
+    ) -> Result<usize, JsError> {
+        let c = resolve_color(&self.inner, color.as_deref())?;
+        let a = parse_axis(axis)?;
+        let interp =
+            plotui_bind::parse_interp(where_.as_deref().unwrap_or("post")).map_err(to_js)?;
+        Ok(self.inner.add_step2d(
+            xs.to_vec(),
+            ys.to_vec(),
+            c,
+            width.unwrap_or(2.0),
+            interp,
+            name,
+            a,
+        ))
+    }
+
     /// Add a 2D bar series.
     pub fn add_bar2d(
         &mut self,
@@ -241,9 +392,36 @@ impl Plot {
         name: Option<String>,
         axis: Option<String>,
     ) -> Result<usize, JsError> {
+        self.add_bar2d_oriented(xs, heights, color, None, name, axis)
+    }
+
+    /// Add a 2D bar series with an explicit orientation ("vertical" or
+    /// "horizontal"). A horizontal bar reads `xs` as y positions.
+    pub fn add_bar2d_oriented(
+        &mut self,
+        xs: &[f32],
+        heights: &[f32],
+        color: Option<String>,
+        orientation: Option<String>,
+        name: Option<String>,
+        axis: Option<String>,
+    ) -> Result<usize, JsError> {
         let c = resolve_color(&self.inner, color.as_deref())?;
         let a = parse_axis(axis)?;
-        Ok(self.inner.add_bar2d(xs.to_vec(), heights.to_vec(), c, name, a))
+        let o = plotui_bind::parse_orient(orientation.as_deref().unwrap_or("vertical"))
+            .map_err(to_js)?;
+        Ok(self.inner.add_bar2d_oriented(xs.to_vec(), heights.to_vec(), c, o, name, a))
+    }
+
+    /// Set how bar series share positions: "overlay", "group" or "stack".
+    pub fn set_barmode(&mut self, mode: &str) -> Result<bool, JsError> {
+        plotui_bind::set_barmode(&mut self.inner, mode).map_err(to_js)
+    }
+
+    /// Name an axis's categories ("x" or "y"); an empty list restores
+    /// numeric ticks.
+    pub fn set_categories(&mut self, axis: &str, names: Vec<String>) -> Result<bool, JsError> {
+        plotui_bind::set_categories(&mut self.inner, axis, names).map_err(to_js)
     }
 
     /// Append points to a 2D trace by handle.
@@ -265,6 +443,14 @@ impl Plot {
     /// Show or hide a trace; returns whether visibility changed.
     pub fn set_visible(&mut self, handle: usize, visible: bool) -> Result<bool, JsError> {
         self.inner.set_visible(handle, visible).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Toggle a trace from the legend: the geometry goes but the row stays,
+    /// greyed out, so a second click brings it back. Returns whether the
+    /// trace is now shown. Pair with `legend_hit`; use `set_visible` instead
+    /// to take a trace out of the plot entirely, legend row included.
+    pub fn toggle_muted(&mut self, handle: usize) -> Result<bool, JsError> {
+        self.inner.toggle_muted(handle).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Move every node of a graph trace at once — the per-frame call of a
@@ -380,8 +566,10 @@ impl Plot {
 
     /// Remap what drag gestures do. Each argument names the camera control
     /// that gesture axis drives — "yaw", "pitch", "pan_x", "pan_y", "zoom"
-    /// or "off" — or `None` to keep its current binding. The default map is
-    /// drag = rotate (yaw/pitch), shift-drag = pan.
+    /// or "off", optionally prefixed with "-" to invert the axis — or
+    /// `None` to keep its current binding. The default map is drag = rotate
+    /// as a trackball (yaw/pitch, the drag grabs the object), shift-drag =
+    /// pan; "-yaw"/"-pitch" restore camera-grab rotation.
     pub fn set_input_map(
         &mut self,
         drag_x: Option<String>,
@@ -390,14 +578,14 @@ impl Plot {
         shift_drag_y: Option<String>,
     ) -> Result<(), JsError> {
         let mut m = self.inner.input_map;
-        for (slot, name) in [
-            (&mut m.drag_x, drag_x),
-            (&mut m.drag_y, drag_y),
-            (&mut m.shift_drag_x, shift_drag_x),
-            (&mut m.shift_drag_y, shift_drag_y),
+        for (slot, inv, name) in [
+            (&mut m.drag_x, &mut m.invert_drag_x, drag_x),
+            (&mut m.drag_y, &mut m.invert_drag_y, drag_y),
+            (&mut m.shift_drag_x, &mut m.invert_shift_drag_x, shift_drag_x),
+            (&mut m.shift_drag_y, &mut m.invert_shift_drag_y, shift_drag_y),
         ] {
             if let Some(name) = name {
-                *slot = plotui_bind::parse_camera_control(&name).map_err(to_js)?;
+                (*slot, *inv) = plotui_bind::parse_camera_control(&name).map_err(to_js)?;
             }
         }
         self.inner.input_map = m;
@@ -423,6 +611,15 @@ impl Plot {
             zoom: zoom_scale,
         };
         self.inner.apply_drag(dx, dy, shift, scales);
+    }
+
+    /// One auto-rotate step: `step` radians of yaw, turned the way a
+    /// rightward drag pushes the object, so a scene that spins on its own
+    /// and a user who grabs it agree. Negative `step` drifts the other way.
+    /// Prefer this to `rotate` for an idle spin — `rotate` takes a raw
+    /// camera delta, whose sign is the opposite one.
+    pub fn spin(&mut self, step: f64) {
+        self.inner.spin(step);
     }
 
     /// `[yaw, pitch, zoom, pan_x, pan_y]` — pass back to `set_camera_state`.
@@ -454,6 +651,14 @@ impl Plot {
         self.frame = self.inner.render_at(w, h, pan_scale).rgba();
     }
 
+    /// Just the legend, at full resolution, on a transparent frame. Composite
+    /// it over an upscaled `render_at` frame (with `drawImage`, which honours
+    /// alpha — `putImageData` would not) so a half-res drag does not change
+    /// the legend under the pointer.
+    pub fn render_legend_overlay(&mut self, w: usize, h: usize) {
+        self.frame = self.inner.render_legend_overlay(w, h).rgba();
+    }
+
     pub fn frame_ptr(&self) -> *const u8 {
         self.frame.as_ptr()
     }
@@ -463,6 +668,12 @@ impl Plot {
     }
 
     // ---- pick / hover ---------------------------------------------------
+
+    /// The trace whose legend row covers `(px, py)`, if any. Hidden traces
+    /// keep their row, so this is the hook for a click-to-toggle legend.
+    pub fn legend_hit(&self, w: usize, h: usize, px: f32, py: f32) -> Option<usize> {
+        self.inner.legend_hit(w, h, px, py)
+    }
 
     /// The 3D node under `(px, py)` framebuffer pixels, within `radius`.
     /// Picks always use full-resolution geometry regardless of `render_at`.
@@ -695,15 +906,38 @@ impl ForceLayout {
     }
 }
 
-/// A polygonised iso-surface: vertex coordinates split per axis (the shape
+/// Generated geometry: vertex coordinates split per axis (the shape
 /// `Plot.add_mesh3d` takes) plus the flat `[a0, b0, c0, a1, …]` triangle
-/// indices that join them.
+/// indices that join them. Returned by `marching_cubes`, `tube` and
+/// `ribbon`.
 #[wasm_bindgen]
 pub struct Mesh {
     xs: Vec<f32>,
     ys: Vec<f32>,
     zs: Vec<f32>,
     tris: Vec<u32>,
+}
+
+impl Mesh {
+    fn new(verts: Vec<[f32; 3]>, tris: Vec<[u32; 3]>) -> Mesh {
+        Mesh {
+            xs: verts.iter().map(|v| v[0]).collect(),
+            ys: verts.iter().map(|v| v[1]).collect(),
+            zs: verts.iter().map(|v| v[2]).collect(),
+            tris: tris.into_iter().flatten().collect(),
+        }
+    }
+}
+
+/// A flat `[x0, y0, z0, x1, …]` list as points. Paths and direction fields
+/// cross this boundary flat because that is the shape a sweep consumes;
+/// meshes come back split per axis because that is what `add_mesh3d` takes.
+fn points(what: &str, flat: &[f32]) -> Result<Vec<[f32; 3]>, JsError> {
+    let (pts, rest) = flat.as_chunks::<3>();
+    if !rest.is_empty() {
+        return Err(JsError::new(&format!("{what} must be a flat [x, y, z, ...] list")));
+    }
+    Ok(pts.to_vec())
 }
 
 #[wasm_bindgen]
@@ -746,10 +980,48 @@ pub fn marching_cubes(
         return Err(JsError::new("origin must be [x, y, z]"));
     };
     let (verts, tris) = plotui_core::marching_cubes(values, nx, ny, nz, [ox, oy, oz], cell, iso);
-    Ok(Mesh {
-        xs: verts.iter().map(|v| v[0]).collect(),
-        ys: verts.iter().map(|v| v[1]).collect(),
-        zs: verts.iter().map(|v| v[2]).collect(),
-        tris: tris.into_iter().flatten().collect(),
-    })
+    Ok(Mesh::new(verts, tris))
+}
+
+/// Resample a coarse polyline through a uniform Catmull-Rom spline:
+/// `per_segment` samples for each input segment plus the final point. The
+/// curve passes through every input point. Returns the same flat
+/// `[x, y, z, …]` shape it takes, ready to hand to `tube` or `ribbon`.
+///
+/// The spline lives only in Rust, so a browser scene and `plotui example
+/// protein` sweep the same curve.
+#[wasm_bindgen]
+pub fn catmull_rom(path: &[f32], per_segment: usize) -> Result<Vec<f32>, JsError> {
+    let pts = points("path", path)?;
+    Ok(plotui_core::catmull_rom(&pts, per_segment).into_iter().flatten().collect())
+}
+
+/// Sweep a circular cross-section of `radii` along `path`, `sides` facets
+/// around, capped at both ends.
+///
+/// `radii[i]` is the radius at point `i`; a shorter array repeats its last
+/// entry, so a one-element array is a constant radius and a per-point one
+/// tapers. The frame carried along the path is rotation-minimizing, so the
+/// section never spins about its own axis where the path twists.
+#[wasm_bindgen]
+pub fn tube(path: &[f32], radii: &[f32], sides: usize) -> Result<Mesh, JsError> {
+    let pts = points("path", path)?;
+    let (verts, tris) = plotui_core::tube(&pts, radii, sides);
+    Ok(Mesh::new(verts, tris))
+}
+
+/// Sweep a flat rectangular cross-section along `path`: `widths` across the
+/// face, `thickness` through it.
+///
+/// `up` is the flat `[x, y, z, …]` face normal per point — the direction the
+/// flat of the ribbon points. It is re-squared against the tangent, so it
+/// need only be approximate; an empty array falls back to the same
+/// rotation-minimizing frame `tube` uses. `widths` is indexed like `tube`'s
+/// `radii`, so tapering the last entries to zero gives an arrowhead.
+#[wasm_bindgen]
+pub fn ribbon(path: &[f32], up: &[f32], widths: &[f32], thickness: f32) -> Result<Mesh, JsError> {
+    let pts = points("path", path)?;
+    let ups = points("up", up)?;
+    let (verts, tris) = plotui_core::ribbon(&pts, &ups, widths, thickness);
+    Ok(Mesh::new(verts, tris))
 }

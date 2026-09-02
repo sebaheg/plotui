@@ -133,6 +133,61 @@ func (p *Plot) AddSurface3D(xs, ys []float32, zs [][]float32, opts ...TraceOptio
 	return TraceHandle(h), statusErr(status)
 }
 
+// AddMesh3D adds an indexed triangle mesh: vertices at xs/ys/zs, tris as
+// [a, b, c] vertex-index triples. Colored by height with "viridis" unless
+// WithColormap / WithoutColormap says otherwise. A triangle with an
+// out-of-range index is rejected; one with a non-finite vertex is skipped
+// at render time, the way a surface cell with a NaN corner is a hole.
+func (p *Plot) AddMesh3D(xs, ys, zs []float32, tris [][3]uint32, opts ...TraceOption) (TraceHandle, error) {
+	viridis := "viridis"
+	o, err := applyOpts(traceOpts{colormap: &viridis}, opts)
+	if err != nil {
+		return 0, err
+	}
+	xp, xn := fptr(xs)
+	yp, yn := fptr(ys)
+	zp, zn := fptr(zs)
+
+	var tp *C.uint32_t
+	if len(tris) > 0 {
+		tp = (*C.uint32_t)(unsafe.Pointer(&tris[0][0]))
+	}
+	cm := cstrOrNil(o.colormap)
+	defer freeCStr(cm)
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
+	var h C.size_t
+	status := C.plotui_add_mesh3d(p.h, xp, xn, yp, yn, zp, zn,
+		tp, C.size_t(len(tris)*3), rgbPtr(o.color), cm, name, &h)
+	return TraceHandle(h), statusErr(status)
+}
+
+// SetPointStyles styles a 2D scatter point by point. Each slice is
+// independent: colors for a categorical or colormapped cloud, sizes for a
+// bubble chart, shapes ("disc", "ring", "square", "triangle", "diamond",
+// "diamond-open", "dot") for an encoding that survives a palette change. A
+// nil or empty slice leaves that channel uniform, and a slice shorter than
+// the series styles a prefix of it.
+func (p *Plot) SetPointStyles(h TraceHandle, colors []RGB, sizes []float32, shapes []string) error {
+	var cp *C.uint8_t
+	if len(colors) > 0 {
+		cp = (*C.uint8_t)(unsafe.Pointer(&colors[0]))
+	}
+	sp, sn := fptr(sizes)
+	var cshapes []*C.char
+	var shp **C.char
+	if len(shapes) > 0 {
+		cshapes = make([]*C.char, len(shapes))
+		for i, s := range shapes {
+			cshapes[i] = C.CString(s)
+			defer C.free(unsafe.Pointer(cshapes[i]))
+		}
+		shp = &cshapes[0]
+	}
+	return statusErr(C.plotui_set_point_styles(p.h, C.size_t(h),
+		cp, C.size_t(len(colors)), sp, sn, shp, C.size_t(len(shapes))))
+}
+
 func (p *Plot) add2D(xs, ys []float32, o traceOpts,
 	call func(xp *C.float, xn C.size_t, yp *C.float, yn C.size_t, rgb *C.uint8_t, name, axis *C.char, h *C.size_t) C.int32_t,
 ) (TraceHandle, error) {
@@ -170,14 +225,225 @@ func (p *Plot) AddLine(xs, ys []float32, opts ...TraceOption) (TraceHandle, erro
 	})
 }
 
-// AddBar adds a 2D bar series: bars at xs rising from zero to heights.
-func (p *Plot) AddBar(xs, heights []float32, opts ...TraceOption) (TraceHandle, error) {
+// AddBox adds a box plot: groups is one sample per box. Group i sits at
+// position i, so SetCategories("x", ...) names the boxes (or "y" with
+// WithOrientation("horizontal")).
+//
+// Boxes span the quartiles with a median line; whiskers reach the furthest
+// values within 1.5*IQR, and anything beyond is drawn as its own point rather
+// than being swallowed by a longer whisker.
+func (p *Plot) AddBox(groups [][]float32, opts ...TraceOption) (TraceHandle, error) {
+	o, err := applyOpts(traceOpts{axis: AxisY, orient: "vertical"}, opts)
+	if err != nil {
+		return 0, err
+	}
+	if len(groups) == 0 {
+		return 0, &Error{Code: ErrInvalidArg,
+			Message: "a box plot needs at least one group of values"}
+	}
+	var values []float32
+	starts := make([]uint32, 0, len(groups))
+	for _, g := range groups {
+		starts = append(starts, uint32(len(values)))
+		values = append(values, g...)
+	}
+	vp, vn := fptr(values)
+	var sp *C.uint32_t
+	if len(starts) > 0 {
+		sp = (*C.uint32_t)(unsafe.Pointer(&starts[0]))
+	}
+	orient := C.CString(o.orient)
+	defer C.free(unsafe.Pointer(orient))
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
+	axis := C.CString(string(o.axis))
+	defer C.free(unsafe.Pointer(axis))
+	var h C.size_t
+	status := C.plotui_add_box2d(p.h, vp, vn, sp, C.size_t(len(starts)),
+		rgbPtr(o.color), orient, name, axis, &h)
+	return TraceHandle(h), statusErr(status)
+}
+
+// AddBand adds a filled band between lo and hi at each x — a confidence
+// interval, a min/max envelope, a tolerance range.
+//
+// Add it before the line it belongs to: draw order is the only layering in
+// 2D, so a band added afterwards paints over its own centre line.
+func (p *Plot) AddBand(xs, lo, hi []float32, opts ...TraceOption) (TraceHandle, error) {
 	o, err := applyOpts(traceOpts{axis: AxisY}, opts)
 	if err != nil {
 		return 0, err
 	}
+	xp, xn := fptr(xs)
+	lp, ln := fptr(lo)
+	hp, hn := fptr(hi)
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
+	axis := C.CString(string(o.axis))
+	defer C.free(unsafe.Pointer(axis))
+	var h C.size_t
+	status := C.plotui_add_band2d(p.h, xp, xn, lp, ln, hp, hn,
+		rgbPtr(o.color), name, axis, &h)
+	return TraceHandle(h), statusErr(status)
+}
+
+// SetErrorBars attaches per-point uncertainty to a 2D scatter or line. A nil
+// or empty slice clears that axis; a nil minus mirrors plus (the symmetric
+// case). Error bars belong to the series: they take its color and stay out of
+// the legend, so they cannot drift out of step with the points.
+func (p *Plot) SetErrorBars(h TraceHandle, yPlus, yMinus, xPlus, xMinus []float32) error {
+	ypp, ypn := fptr(yPlus)
+	ymp, ymn := fptr(yMinus)
+	xpp, xpn := fptr(xPlus)
+	xmp, xmn := fptr(xMinus)
+	return statusErr(C.plotui_set_error_bars(p.h, C.size_t(h),
+		ypp, ypn, ymp, ymn, xpp, xpn, xmp, xmn))
+}
+
+// AddHeatmap adds a grid of cells coloured by value: zs[j][i] is the value
+// at (xs[i], ys[j]), the same grid shape AddSurface3D takes. Cells centre on
+// their coordinates and tile outward by half a step, so a regular grid meets
+// edge to edge; a NaN value leaves a hole rather than a zero.
+//
+// A colorbar is added by default (WithoutColorbar suppresses it) spanning
+// this grid's own range — without one the colors show structure but no
+// values. WithColormap picks the ramp ("viridis" by default).
+func (p *Plot) AddHeatmap(xs, ys []float32, zs [][]float32, opts ...TraceOption) (TraceHandle, error) {
+	viridis := "viridis"
+	o, err := applyOpts(traceOpts{colormap: &viridis, colorbar: true}, opts)
+	if err != nil {
+		return 0, err
+	}
+	nx, ny := len(xs), len(ys)
+	if len(zs) != ny {
+		return 0, &Error{Code: ErrInvalidArg, Message: fmt.Sprintf(
+			"zs must be a %d×%d grid (len(ys) rows of len(xs) values); got %d rows", ny, nx, len(zs))}
+	}
+	flat := make([]float32, 0, nx*ny)
+	for j, row := range zs {
+		if len(row) != nx {
+			return 0, &Error{Code: ErrInvalidArg, Message: fmt.Sprintf(
+				"zs must be a %d×%d grid (len(ys) rows of len(xs) values); row %d has %d", ny, nx, j, len(row))}
+		}
+		flat = append(flat, row...)
+	}
+	xp, xn := fptr(xs)
+	yp, yn := fptr(ys)
+	zp, zn := fptr(flat)
+	cm := cstrOrNil(o.colormap)
+	defer freeCStr(cm)
+	label := cstrOrNil(o.colorbarLabel)
+	defer freeCStr(label)
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
+	var h C.size_t
+	status := C.plotui_add_heatmap2d(p.h, xp, xn, yp, yn, zp, zn,
+		cm, C.bool(o.colorbar), label, name, &h)
+	return TraceHandle(h), statusErr(status)
+}
+
+// AddHistogram adds a histogram of values. WithBins sets a bin count and
+// WithBinWidth a fixed width — give one or neither (neither takes the
+// Freedman-Diaconis rule, which adapts to spread rather than sample size).
+// The raw values are kept, so ExtendValues can add observations later.
+//
+// Bins are solved once from the whole sample and do not change with zoom:
+// edges that shifted while panning would change the shape of the
+// distribution under the reader's hands.
+func (p *Plot) AddHistogram(values []float32, opts ...TraceOption) (TraceHandle, error) {
+	o, err := applyOpts(traceOpts{axis: AxisY}, opts)
+	if err != nil {
+		return 0, err
+	}
+	vp, vn := fptr(values)
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
+	axis := C.CString(string(o.axis))
+	defer C.free(unsafe.Pointer(axis))
+	var h C.size_t
+	status := C.plotui_add_histogram2d(p.h, vp, vn,
+		C.size_t(o.bins), C.double(o.binWidth), rgbPtr(o.color), name, axis, &h)
+	return TraceHandle(h), statusErr(status)
+}
+
+// ExtendValues appends observations to a histogram and rebins. Unlike Extend
+// on a coordinate series this is not an O(delta) update: one new value can
+// move the range and every bin edge with it.
+func (p *Plot) ExtendValues(h TraceHandle, values []float32) error {
+	vp, vn := fptr(values)
+	return statusErr(C.plotui_extend_values(p.h, C.size_t(h), vp, vn))
+}
+
+// SetBarMode sets how several bar series on one axis share their positions:
+// "overlay" (the default — each draws at full width, so equal positions
+// overplot), "group" (side by side, each taking 1/n of the width), or
+// "stack" (each starting where the one below ended).
+//
+// Stacking accumulates same-signed values only, so a mix of positive and
+// negative heights grows both ways from the baseline instead of cancelling
+// into a net figure the reader cannot decompose.
+func (p *Plot) SetBarMode(mode string) (bool, error) {
+	m := C.CString(mode)
+	defer C.free(unsafe.Pointer(m))
+	var changed C.bool
+	status := C.plotui_set_barmode(p.h, m, &changed)
+	return bool(changed), statusErr(status)
+}
+
+// SetCategories names an axis's categories ("x" or "y"): category i sits at
+// position i, and the ticks become one label per category instead of a
+// numeric ladder. An empty slice restores numbers. The bool reports whether
+// anything changed, so a caller can skip a repaint.
+//
+// Naming categories does not move the range — traces still place themselves —
+// so a series plotted at 0, 1, 2 lines up with the first three names. Pair
+// SetCategories("y", ...) with WithOrientation("horizontal") for readable
+// long labels.
+func (p *Plot) SetCategories(axis string, names []string) (bool, error) {
+	ax := C.CString(axis)
+	defer C.free(unsafe.Pointer(ax))
+	var cnames []*C.char
+	var np **C.char
+	if len(names) > 0 {
+		cnames = make([]*C.char, len(names))
+		for i, s := range names {
+			cnames[i] = C.CString(s)
+			defer C.free(unsafe.Pointer(cnames[i]))
+		}
+		np = &cnames[0]
+	}
+	var changed C.bool
+	status := C.plotui_set_categories(p.h, ax, np, C.size_t(len(names)), &changed)
+	return bool(changed), statusErr(status)
+}
+
+// AddStep adds a 2D step series: the right-angle path between samples
+// rather than the straight one. Use it for anything that holds its value
+// between samples — counters, states, prices — where a straight segment
+// would draw a transition that never happened. WithStep picks the corner
+// ("post" by default, or "pre" / "mid").
+func (p *Plot) AddStep(xs, ys []float32, opts ...TraceOption) (TraceHandle, error) {
+	o, err := applyOpts(traceOpts{width: 2.0, axis: AxisY, step: "post"}, opts)
+	if err != nil {
+		return 0, err
+	}
+	where := C.CString(o.step)
+	defer C.free(unsafe.Pointer(where))
+	return p.add2D(xs, ys, o, func(xp *C.float, xn C.size_t, yp *C.float, yn C.size_t, rgb *C.uint8_t, name, axis *C.char, h *C.size_t) C.int32_t {
+		return C.plotui_add_step2d(p.h, xp, xn, yp, yn, rgb, C.float(o.width), where, name, axis, h)
+	})
+}
+
+// AddBar adds a 2D bar series: bars at xs rising from zero to heights.
+func (p *Plot) AddBar(xs, heights []float32, opts ...TraceOption) (TraceHandle, error) {
+	o, err := applyOpts(traceOpts{axis: AxisY, orient: "vertical"}, opts)
+	if err != nil {
+		return 0, err
+	}
+	orient := C.CString(o.orient)
+	defer C.free(unsafe.Pointer(orient))
 	return p.add2D(xs, heights, o, func(xp *C.float, xn C.size_t, yp *C.float, yn C.size_t, rgb *C.uint8_t, name, axis *C.char, h *C.size_t) C.int32_t {
-		return C.plotui_add_bar2d(p.h, xp, xn, yp, yn, rgb, name, axis, h)
+		return C.plotui_add_bar2d_oriented(p.h, xp, xn, yp, yn, rgb, orient, name, axis, h)
 	})
 }
 

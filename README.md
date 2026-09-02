@@ -9,9 +9,10 @@ drops into a [Textual](https://textual.textualize.io/),
 [Bubble Tea](https://github.com/charmbracelet/bubbletea) app as a first-class
 widget, with the rendering engine written in Rust so it stays fast in 2D and 3D.
 
-> Status: **early scaffold.** Working today: 2D scatter/line/bar charts with
-> axes, ticks, and a legend; a 3D scatter/graph engine; a Kitty-image raw demo;
-> and a Textual widget. See the roadmap below.
+> Status: **early scaffold.** Working today: 2D scatter/line/step/bar,
+> histogram, box, heatmap, and band charts with axes, ticks, categorical
+> labels, a colorbar and a legend; a 3D scatter/graph/surface/mesh engine; a
+> Kitty-image raw demo; and a Textual widget.
 
 ## Architecture
 
@@ -81,7 +82,10 @@ cargo binstall plotui                           # prebuilt, via cargo-binstall
 ```bash
 seq 1 100 | LC_ALL=C awk '{print $1, sin($1/10)}' | plotui line
 plotui scatter -H -d, data.csv                  # header row + comma-delimited
-plotui bar counts.tsv
+plotui bar counts.tsv                           # --horizontal, --stack, --group
+plotui step states.txt                          # holds its value between samples
+plotui hist samples.txt                         # binned automatically
+plotui box -H measurements.tsv                  # one box per column
 plotui example scatter                          # built-in demo scenes, no data needed
 plotui example deps                             # plotui's own dependency graph, laid
                                                 # out live by a force simulation
@@ -205,58 +209,13 @@ interaction in a subclass, override the `apply_rotate` / `apply_pan` /
 routes through — do **not** override the Textual `on_*` handlers (Textual
 dispatches those to every class in the MRO, so both would run).
 
-## Roadmap
-
-- [x] Flicker-free Kitty placement via Unicode-placeholder virtual placement
-      (fixed image id, atomic replace) — wire the pixel path into the Textual widget
-- [x] 2D traces: scatter, line, bar; axes, ticks, tick labels, legend
-- [x] Independent right-hand y-axes (`axis="y2"`/`"y3"`) with tinted tick labels
-- [x] Time axes: datetime x input (numpy `datetime64`, pandas, `datetime`,
-      ISO-8601 CLI columns) with calendar-boundary ticks and date readouts
-- [x] Range slider (Plotly-style): an x-window with windowed y-autoscale and
-      an interactive overview strip — engine-drawn, so identical in every
-      frontend (`plotui example timeseries`, `--range-slider`,
-      `PlotWidget(..., range_slider=True)`)
-- [ ] 2D step trace; axis titles
-- [ ] Axis cube with labels
-- [x] Interactive hover / pick for 3D graph nodes *and* edges (opt-in via
-      `PlotWidget(..., pickable=True)`: hover lights the element up white,
-      click posts `ElementPicked`)
-- [ ] Hover / pick for 2D traces; spatial index for large graphs
-- [x] Streaming append: trace handles, `extend`, `set_visible`, incremental bounds
-- [x] numpy fast-path input (one bulk copy, no per-element conversion)
-- [ ] Rolling window (`max_points`) for endless streams
-- [x] Graceful render-path auto-detection (placeholder / direct Kitty, with a
-      supported-terminals notice elsewhere and a `PLOTUI_RENDER` override)
-- [ ] Sixel + iTerm2 OSC 1337 encoders for terminals without Kitty graphics
-- [x] Prebuilt wheels (maturin + GitHub Actions): `pip install plotui` — macOS
-      arm64/x86_64, Linux x86_64/aarch64, abi3 ≥ 3.9; the wheel bundles the
-      CLI binary
-- [x] Ratatui frontend (native): `plotui-ratatui` — StatefulWidget + app-owned
-      PlotState, full parity with the Textual widget
-      (`cargo run -p plotui-ratatui --example demo`)
-- [x] Bubble Tea frontend (cgo): `go/` bindings over the `plotui-ffi` C ABI +
-      the `teaplot` component for Bubble Tea v2 (see `go/README.md`)
-- [x] CLI: `plotui line|scatter|bar` from stdin or a file — interactive on a
-      TTY, one static frame when piped; installed via curl, Homebrew, cargo,
-      or pip (see Install above)
-- [x] CLI examples:
-      `plotui example scatter|graph|stream|timeseries|deps|lidar|mandelbulb`
-      — self-contained demo scenes, no input data needed
-- [x] Force-directed graphs: a `ForceLayout` simulation in the core (exposed
-      in Python, Go, and JS) plus in-place graph mutation — move, recolor,
-      and grow a live graph without rebuilds (`plotui example deps`)
-- [x] 3D surfaces and triangle meshes: Gouraud-shaded geometry with height
-      colormaps, plus a `marching_cubes` helper that turns a sampled scalar
-      field into a mesh (`plotui example mandelbulb`; meshes in Rust and JS
-      so far, Python to follow)
-- [x] Animation export: `--out file.mp4|gif|webm` records any animated
-      example headlessly via ffmpeg (`plotui example lidar --out demo.mp4`);
-      `--out file.png` takes one frame of any chart or example
-- [ ] CLI v2: `--follow` streaming, `scatter3d`, histogram/density/count
-      transforms
-- [ ] Prebuilt static libs for the Go bindings (today: local source build)
-
 ## License
 
-MIT
+MIT, except for one embedded asset: chart text is set in
+[Martian Mono](https://github.com/evilmartians/mono) (Copyright 2020 The
+Martian Mono Project Authors), used under the SIL Open Font License 1.1. The
+glyph outlines are compiled into `plotui-core` as
+`crates/plotui-core/src/glyphs.rs`; the license travels with them in
+`crates/plotui-core/fonts/MartianMono-OFL.txt`. The font carries no Reserved
+Font Name, and nothing about the OFL reaches your code — it covers the font
+data, not the crate.

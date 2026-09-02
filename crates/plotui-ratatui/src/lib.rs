@@ -62,6 +62,9 @@ pub enum PlotEvent {
     ElementPicked(Option<(ElementKind, usize)>),
     /// The hovered element changed (`pickable: true` only).
     ElementHovered(Option<(ElementKind, usize)>),
+    /// A legend row was clicked: the trace handle and whether it is now
+    /// shown. The widget has already applied it.
+    LegendToggled(usize, bool),
     /// The 2D x window changed through a finished gesture (a released strip
     /// drag, a track jump, a scroll zoom, or an `[`/`]` key), carrying the
     /// new window (`None` = full extent).

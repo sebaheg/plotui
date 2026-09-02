@@ -498,6 +498,67 @@ pub unsafe extern "C" fn plotui_add_surface3d(
         PLOTUI_OK
     })
 }
+/// Vertices are `(xs[i], ys[i], zs[i])`, truncated to the shortest of the
+/// three; `tris` is a flat run of `[a, b, c]` vertex-index triples, so
+/// `ntris` must be a multiple of 3 and every index must name a vertex.
+/// `colormap` NULL means a solid color.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_mesh3d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    zs: *const f32,
+    nz: usize,
+    tris: *const u32,
+    ntris: usize,
+    rgb: *const u8,
+    colormap: *const c_char,
+    name: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys, zs) = match (slice(xs, nx), slice(ys, ny), slice(zs, nz)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(s), ..) | (_, Err(s), _) | (.., Err(s)) => return s,
+        };
+        let tris = match slice(tris, ntris) {
+            Ok(t) => t,
+            Err(s) => return s,
+        };
+        let verts = plotui_bind::zip3(xs, ys, zs);
+        if let Err(e) = plotui_bind::check_mesh_indices(verts.len(), tris) {
+            return bind_status(e);
+        }
+        let faces: Vec<[u32; 3]> = tris.as_chunks::<3>().0.to_vec();
+        let cm = match opt_str(colormap) {
+            Ok(name) => match plotui_bind::parse_colormap(name) {
+                Ok(cm) => cm,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let name = match opt_str(name) {
+            Ok(n) => n.map(str::to_string),
+            Err(s) => return s,
+        };
+        let color = p.plot.resolve_color(opt_rgb(rgb));
+        let h = p.plot.add_mesh3d(verts, faces, color, cm, name);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn add_2d(
@@ -582,6 +643,456 @@ pub unsafe extern "C" fn plotui_add_line2d(
     guard(|| {
         add_2d(p, xs, nx, ys, ny, rgb, name, axis, out_handle, |plot, xs, ys, c, name, ax| {
             plot.add_line2d(xs, ys, c, width, name, ax)
+        })
+    })
+}
+
+/// A box plot over a flat sample: `group_starts[g]` is where group `g` begins
+/// in `values` (CSR — ascending, starting at 0, none past the end).
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+/// "y3" (NULL = "y").
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_box2d(
+    p: *mut PlotuiPlot,
+    values: *const f32,
+    n: usize,
+    group_starts: *const u32,
+    n_groups: usize,
+    rgb: *const u8,
+    orientation: *const c_char,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (values, starts) = match (slice(values, n), slice(group_starts, n_groups)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(s), _) | (_, Err(s)) => return s,
+        };
+        if let Err(e) = plotui_bind::check_group_starts(values.len(), starts) {
+            return bind_status(e);
+        }
+        let orient = match opt_str(orientation) {
+            Ok(o) => match plotui_bind::parse_orient(o.unwrap_or("vertical")) {
+                Ok(o) => o,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let name = match opt_str(name) {
+            Ok(n) => n.map(str::to_string),
+            Err(s) => return s,
+        };
+        let axis = match opt_str(axis) {
+            Ok(a) => match axis_of(a) {
+                Ok(a) => a,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let color = p.plot.resolve_color(opt_rgb(rgb));
+        let h = p.plot.add_box2d(values.to_vec(), starts.to_vec(), color, orient, name, axis);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// A filled band between `lo` and `hi` at each x. Add it before the line it
+/// belongs to — draw order is the only layering in 2D.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+/// "y3" (NULL = "y").
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_band2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    lo: *const f32,
+    nlo: usize,
+    hi: *const f32,
+    nhi: usize,
+    rgb: *const u8,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, lo, hi) = match (slice(xs, nx), slice(lo, nlo), slice(hi, nhi)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(s), ..) | (_, Err(s), _) | (.., Err(s)) => return s,
+        };
+        let name = match opt_str(name) {
+            Ok(n) => n.map(str::to_string),
+            Err(s) => return s,
+        };
+        let axis = match opt_str(axis) {
+            Ok(a) => match axis_of(a) {
+                Ok(a) => a,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let color = p.plot.resolve_color(opt_rgb(rgb));
+        let h = p.plot.add_band2d(xs.to_vec(), lo.to_vec(), hi.to_vec(), color, name, axis);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// Attach per-point error bars to a 2D scatter or line. A zero length (or
+/// NULL) clears that axis; an empty `minus` mirrors `plus`.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_set_error_bars(
+    p: *mut PlotuiPlot,
+    handle: usize,
+    y_plus: *const f32,
+    n_yp: usize,
+    y_minus: *const f32,
+    n_ym: usize,
+    x_plus: *const f32,
+    n_xp: usize,
+    x_minus: *const f32,
+    n_xm: usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let arrs =
+            (slice(y_plus, n_yp), slice(y_minus, n_ym), slice(x_plus, n_xp), slice(x_minus, n_xm));
+        let (yp, ym, xp, xm) = match arrs {
+            (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+            (Err(s), ..) | (_, Err(s), ..) | (.., Err(s), _) | (.., Err(s)) => return s,
+        };
+        let ey = plotui_bind::error_bars(yp.to_vec(), ym.to_vec());
+        let ex = plotui_bind::error_bars(xp.to_vec(), xm.to_vec());
+        match plotui_bind::set_error_bars(&mut p.plot, handle, ex, ey) {
+            Ok(()) => PLOTUI_OK,
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// A heatmap over a flat row-major grid: `zs[j * nx + i]` is the value at
+/// `(xs[i], ys[j])`; `nz` must equal `nx * ny`. `colormap` NULL means
+/// "viridis". With `colorbar` true the plot's colorbar is set to this grid's
+/// own value range.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_heatmap2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    zs: *const f32,
+    nz: usize,
+    colormap: *const c_char,
+    colorbar: bool,
+    label: *const c_char,
+    name: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys, zs) = match (slice(xs, nx), slice(ys, ny), slice(zs, nz)) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(s), ..) | (_, Err(s), _) | (.., Err(s)) => return s,
+        };
+        if let Err(e) = plotui_bind::check_surface_grid_len(nx, ny, nz) {
+            return bind_status(e);
+        }
+        let cm = match opt_str(colormap) {
+            Ok(n) => match plotui_bind::parse_colormap(Some(n.unwrap_or("viridis"))) {
+                Ok(Some(cm)) => cm,
+                Ok(None) => plotui_core::Colormap::Viridis,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let (label, name) = match (opt_str(label), opt_str(name)) {
+            (Ok(l), Ok(n)) => (l.map(str::to_string), n.map(str::to_string)),
+            (Err(s), _) | (_, Err(s)) => return s,
+        };
+        let h = p.plot.add_heatmap2d(xs.to_vec(), ys.to_vec(), zs.to_vec(), cm, name);
+        if colorbar {
+            if let Some((lo, hi)) = p.plot.heatmap_range(h) {
+                p.plot.colorbar = Some(plotui_core::Colorbar { map: cm, lo, hi, label });
+            }
+        }
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// A histogram of `values`. `bins` is a bin count and `bin_width` a fixed
+/// width; pass 0 for the one you are not using, and 0 for both to take the
+/// automatic rule. Giving both is an error.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+/// "y3" (NULL = "y").
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_histogram2d(
+    p: *mut PlotuiPlot,
+    values: *const f32,
+    n: usize,
+    bins: usize,
+    bin_width: f64,
+    rgb: *const u8,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let values = match slice(values, n) {
+            Ok(v) => v,
+            Err(s) => return s,
+        };
+        let spec = match plotui_bind::parse_bins(
+            (bins > 0).then_some(bins),
+            (bin_width > 0.0).then_some(bin_width),
+        ) {
+            Ok(s) => s,
+            Err(e) => return bind_status(e),
+        };
+        let name = match opt_str(name) {
+            Ok(n) => n.map(str::to_string),
+            Err(s) => return s,
+        };
+        let axis = match opt_str(axis) {
+            Ok(a) => match axis_of(a) {
+                Ok(a) => a,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let color = p.plot.resolve_color(opt_rgb(rgb));
+        let h = p.plot.add_histogram2d(values.to_vec(), spec, color, name, axis);
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// Append observations to a histogram and rebin.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_extend_values(
+    p: *mut PlotuiPlot,
+    handle: usize,
+    values: *const f32,
+    n: usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let values = match slice(values, n) {
+            Ok(v) => v,
+            Err(s) => return s,
+        };
+        match plotui_bind::extend_values(&mut p.plot, handle, values) {
+            Ok(()) => PLOTUI_OK,
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// A 2D bar series with an explicit orientation: "vertical" (NULL =
+/// "vertical") or "horizontal". A horizontal bar reads `xs` as y positions.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+/// "y3" (NULL = "y").
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_bar2d_oriented(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    heights: *const f32,
+    nh: usize,
+    rgb: *const u8,
+    orientation: *const c_char,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let orient = match opt_str(orientation) {
+            Ok(o) => match plotui_bind::parse_orient(o.unwrap_or("vertical")) {
+                Ok(o) => o,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        add_2d(p, xs, nx, heights, nh, rgb, name, axis, out_handle, |plot, xs, ys, c, name, ax| {
+            plot.add_bar2d_oriented(xs, ys, c, orient, name, ax)
+        })
+    })
+}
+
+/// Set how several bar traces share their positions: "overlay", "group" or
+/// "stack". Writes whether anything changed to `out_changed` when non-NULL.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_barmode(
+    p: *mut PlotuiPlot,
+    mode: *const c_char,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let mode = match opt_str(mode) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                set_error("barmode must not be null");
+                return PLOTUI_ERR_NULL;
+            }
+            Err(s) => return s,
+        };
+        match plotui_bind::set_barmode(&mut p.plot, mode) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Name an axis's categories: `axis` is "x" or "y", `names` is `n` C strings
+/// (pass 0 to clear back to numeric ticks). Writes whether anything changed
+/// to `out_changed` when non-NULL.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_categories(
+    p: *mut PlotuiPlot,
+    axis: *const c_char,
+    names: *const *const c_char,
+    n: usize,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let axis = match opt_str(axis) {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                set_error("axis must not be null");
+                return PLOTUI_ERR_NULL;
+            }
+            Err(s) => return s,
+        };
+        let ptrs = match slice(names, n) {
+            Ok(v) => v,
+            Err(s) => return s,
+        };
+        let mut owned = Vec::with_capacity(ptrs.len());
+        for &np in ptrs {
+            match opt_str(np) {
+                Ok(Some(s)) => owned.push(s.to_string()),
+                Ok(None) => {
+                    set_error("category name must not be null");
+                    return PLOTUI_ERR_NULL;
+                }
+                Err(s) => return s,
+            }
+        }
+        match plotui_bind::set_categories(&mut p.plot, axis, owned) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// A 2D step series: the right-angle path between samples. `where_` is
+/// "post" (NULL = "post"), "pre" or "mid".
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+/// "y3" (NULL = "y").
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_step2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    rgb: *const u8,
+    width: f32,
+    where_: *const c_char,
+    name: *const c_char,
+    axis: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let interp = match opt_str(where_) {
+            Ok(w) => match plotui_bind::parse_interp(w.unwrap_or("post")) {
+                Ok(i) => i,
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        add_2d(p, xs, nx, ys, ny, rgb, name, axis, out_handle, |plot, xs, ys, c, name, ax| {
+            plot.add_step2d(xs, ys, c, width, interp, name, ax)
         })
     })
 }
@@ -693,6 +1204,59 @@ pub unsafe extern "C" fn plotui_set_graph_positions(
         match p.plot.set_graph_positions(handle, plotui_bind::zip3(xs, ys, zs)) {
             Ok(()) => PLOTUI_OK,
             Err(e) => trace_status(e),
+        }
+    })
+}
+
+/// Style a 2D scatter point by point. Each channel is independent: a NULL
+/// pointer (or zero length) leaves it uniform. `rgbs` is `n_colors` packed
+/// RGB triples, `shapes` is `n_shapes` silhouette names.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_set_point_styles(
+    p: *mut PlotuiPlot,
+    handle: usize,
+    rgbs: *const u8,
+    n_colors: usize,
+    sizes: *const f32,
+    n_sizes: usize,
+    shapes: *const *const c_char,
+    n_shapes: usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let colors = match slice(rgbs, n_colors * 3) {
+            Ok(bytes) => bytes.as_chunks::<3>().0.to_vec(),
+            Err(s) => return s,
+        };
+        let sizes = match slice(sizes, n_sizes) {
+            Ok(v) => v.to_vec(),
+            Err(s) => return s,
+        };
+        let shape_ptrs = match slice(shapes, n_shapes) {
+            Ok(v) => v,
+            Err(s) => return s,
+        };
+        let mut names = Vec::with_capacity(shape_ptrs.len());
+        for &sp in shape_ptrs {
+            match opt_str(sp) {
+                Ok(Some(n)) => names.push(n),
+                Ok(None) => {
+                    set_error("shape name must not be null");
+                    return PLOTUI_ERR_NULL;
+                }
+                Err(s) => return s,
+            }
+        }
+        match plotui_bind::set_point_styles(&mut p.plot, handle, colors, sizes, names) {
+            Ok(()) => PLOTUI_OK,
+            Err(e) => bind_status(e),
         }
     })
 }
@@ -1292,9 +1856,11 @@ pub unsafe extern "C" fn plotui_reset(p: *mut PlotuiPlot) {
 }
 
 /// Remap what drag gestures do. Each name is a camera control — "yaw",
-/// "pitch", "pan_x", "pan_y", "zoom" or "off" — or NULL to keep that
-/// axis's current binding. The default map is drag = rotate (yaw/pitch),
-/// shift-drag = pan. Returns 0, or -1 with `plotui_last_error()` set.
+/// "pitch", "pan_x", "pan_y", "zoom" or "off", optionally prefixed with
+/// '-' to invert the axis — or NULL to keep that axis's current binding.
+/// The default map is drag = rotate as a trackball (yaw/pitch, the drag
+/// grabs the object), shift-drag = pan; "-yaw"/"-pitch" restore
+/// camera-grab rotation. Returns 0, or -1 with `plotui_last_error()` set.
 ///
 /// # Safety
 /// `p` must be a live plot handle; names must be NULL or valid C strings.
@@ -1308,15 +1874,18 @@ pub unsafe extern "C" fn plotui_set_input_map(
 ) -> i32 {
     let Ok(p) = plot_mut(p) else { return -1 };
     let mut m = p.plot.input_map;
-    for (slot, ptr) in [
-        (&mut m.drag_x, drag_x),
-        (&mut m.drag_y, drag_y),
-        (&mut m.shift_drag_x, shift_drag_x),
-        (&mut m.shift_drag_y, shift_drag_y),
+    for (slot, inv, ptr) in [
+        (&mut m.drag_x, &mut m.invert_drag_x, drag_x),
+        (&mut m.drag_y, &mut m.invert_drag_y, drag_y),
+        (&mut m.shift_drag_x, &mut m.invert_shift_drag_x, shift_drag_x),
+        (&mut m.shift_drag_y, &mut m.invert_shift_drag_y, shift_drag_y),
     ] {
         match opt_str(ptr) {
             Ok(Some(name)) => match plotui_bind::parse_camera_control(name) {
-                Ok(c) => *slot = c,
+                Ok((c, i)) => {
+                    *slot = c;
+                    *inv = i;
+                }
                 Err(e) => return bind_status(e),
             },
             Ok(None) => {}
