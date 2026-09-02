@@ -90,9 +90,11 @@ func (p *Plot) Pan(dx, dy float64) { C.plotui_pan(p.h, C.double(dx), C.double(dy
 func (p *Plot) Reset()             { C.plotui_reset(p.h) }
 
 // SetInputMap remaps what drag gestures do. Each name is a camera control —
-// "yaw", "pitch", "pan_x", "pan_y", "zoom" or "off" — or "" to keep that
-// axis's current binding. The default map is drag = rotate (yaw/pitch),
-// shift-drag = pan.
+// "yaw", "pitch", "pan_x", "pan_y", "zoom" or "off", optionally prefixed
+// with "-" to invert the axis — or "" to keep that axis's current binding.
+// The default map is drag = rotate as a trackball (yaw/pitch, the drag
+// grabs the object), shift-drag = pan; "-yaw"/"-pitch" restore camera-grab
+// rotation.
 func (p *Plot) SetInputMap(dragX, dragY, shiftDragX, shiftDragY string) error {
 	opt := func(s string) *C.char {
 		if s == "" {

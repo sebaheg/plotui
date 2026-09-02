@@ -20,9 +20,13 @@ PlotWidget(
 
 ## Input
 
-Drag rotates, **shift-drag** pans, scroll zooms, **double-click** resets.
-Arrow keys rotate, `+`/`-` zoom, `r` resets. All of it routes through the
-plot's camera — subclass and override to change the bindings.
+Drag rotates as a trackball (the drag grabs the object), **shift-drag**
+pans, scroll zooms, **double-click** resets. Arrow keys rotate, `+`/`-`
+zoom, `r` resets. All of it routes through the plot's camera — subclass and
+override to change the bindings, or invert an axis with
+`plot.set_input_map("-yaw", "-pitch")` for the camera-grab feel. With
+`auto_rotate`, the idle spin turns the way a rightward drag pushes the
+object, and inverting the drag axis inverts the spin with it.
 
 ## Picking messages
 

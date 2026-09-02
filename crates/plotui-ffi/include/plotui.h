@@ -181,6 +181,29 @@ int32_t plotui_add_surface3d(struct PlotuiPlot *p,
                              size_t *out_handle);
 
 /**
+ * Vertices are `(xs[i], ys[i], zs[i])`, truncated to the shortest of the
+ * three; `tris` is a flat run of `[a, b, c]` vertex-index triples, so
+ * `ntris` must be a multiple of 3 and every index must name a vertex.
+ * `colormap` NULL means a solid color.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_add_mesh3d(struct PlotuiPlot *p,
+                          const float *xs,
+                          size_t nx,
+                          const float *ys,
+                          size_t ny,
+                          const float *zs,
+                          size_t nz,
+                          const uint32_t *tris,
+                          size_t ntris,
+                          const uint8_t *rgb,
+                          const char *colormap,
+                          const char *name,
+                          size_t *out_handle);
+
+/**
  * # Safety
  * Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
  * "y3" (NULL = "y").
@@ -207,6 +230,174 @@ int32_t plotui_add_line2d(struct PlotuiPlot *p,
                           size_t ny,
                           const uint8_t *rgb,
                           float width,
+                          const char *name,
+                          const char *axis,
+                          size_t *out_handle);
+
+/**
+ * A box plot over a flat sample: `group_starts[g]` is where group `g` begins
+ * in `values` (CSR — ascending, starting at 0, none past the end).
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+ * "y3" (NULL = "y").
+ */
+int32_t plotui_add_box2d(struct PlotuiPlot *p,
+                         const float *values,
+                         size_t n,
+                         const uint32_t *group_starts,
+                         size_t n_groups,
+                         const uint8_t *rgb,
+                         const char *orientation,
+                         const char *name,
+                         const char *axis,
+                         size_t *out_handle);
+
+/**
+ * A filled band between `lo` and `hi` at each x. Add it before the line it
+ * belongs to — draw order is the only layering in 2D.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+ * "y3" (NULL = "y").
+ */
+int32_t plotui_add_band2d(struct PlotuiPlot *p,
+                          const float *xs,
+                          size_t nx,
+                          const float *lo,
+                          size_t nlo,
+                          const float *hi,
+                          size_t nhi,
+                          const uint8_t *rgb,
+                          const char *name,
+                          const char *axis,
+                          size_t *out_handle);
+
+/**
+ * Attach per-point error bars to a 2D scatter or line. A zero length (or
+ * NULL) clears that axis; an empty `minus` mirrors `plus`.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_error_bars(struct PlotuiPlot *p,
+                              size_t handle,
+                              const float *y_plus,
+                              size_t n_yp,
+                              const float *y_minus,
+                              size_t n_ym,
+                              const float *x_plus,
+                              size_t n_xp,
+                              const float *x_minus,
+                              size_t n_xm);
+
+/**
+ * A heatmap over a flat row-major grid: `zs[j * nx + i]` is the value at
+ * `(xs[i], ys[j])`; `nz` must equal `nx * ny`. `colormap` NULL means
+ * "viridis". With `colorbar` true the plot's colorbar is set to this grid's
+ * own value range.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_add_heatmap2d(struct PlotuiPlot *p,
+                             const float *xs,
+                             size_t nx,
+                             const float *ys,
+                             size_t ny,
+                             const float *zs,
+                             size_t nz,
+                             const char *colormap,
+                             bool colorbar,
+                             const char *label,
+                             const char *name,
+                             size_t *out_handle);
+
+/**
+ * A histogram of `values`. `bins` is a bin count and `bin_width` a fixed
+ * width; pass 0 for the one you are not using, and 0 for both to take the
+ * automatic rule. Giving both is an error.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+ * "y3" (NULL = "y").
+ */
+int32_t plotui_add_histogram2d(struct PlotuiPlot *p,
+                               const float *values,
+                               size_t n,
+                               size_t bins,
+                               double bin_width,
+                               const uint8_t *rgb,
+                               const char *name,
+                               const char *axis,
+                               size_t *out_handle);
+
+/**
+ * Append observations to a histogram and rebin.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_extend_values(struct PlotuiPlot *p, size_t handle, const float *values, size_t n);
+
+/**
+ * A 2D bar series with an explicit orientation: "vertical" (NULL =
+ * "vertical") or "horizontal". A horizontal bar reads `xs` as y positions.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+ * "y3" (NULL = "y").
+ */
+int32_t plotui_add_bar2d_oriented(struct PlotuiPlot *p,
+                                  const float *xs,
+                                  size_t nx,
+                                  const float *heights,
+                                  size_t nh,
+                                  const uint8_t *rgb,
+                                  const char *orientation,
+                                  const char *name,
+                                  const char *axis,
+                                  size_t *out_handle);
+
+/**
+ * Set how several bar traces share their positions: "overlay", "group" or
+ * "stack". Writes whether anything changed to `out_changed` when non-NULL.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_barmode(struct PlotuiPlot *p, const char *mode, bool *out_changed);
+
+/**
+ * Name an axis's categories: `axis` is "x" or "y", `names` is `n` C strings
+ * (pass 0 to clear back to numeric ticks). Writes whether anything changed
+ * to `out_changed` when non-NULL.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_categories(struct PlotuiPlot *p,
+                              const char *axis,
+                              const char *const *names,
+                              size_t n,
+                              bool *out_changed);
+
+/**
+ * A 2D step series: the right-angle path between samples. `where_` is
+ * "post" (NULL = "post"), "pre" or "mid".
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions. `axis` is "y", "y2" or
+ * "y3" (NULL = "y").
+ */
+int32_t plotui_add_step2d(struct PlotuiPlot *p,
+                          const float *xs,
+                          size_t nx,
+                          const float *ys,
+                          size_t ny,
+                          const uint8_t *rgb,
+                          float width,
+                          const char *where_,
                           const char *name,
                           const char *axis,
                           size_t *out_handle);
@@ -258,6 +449,23 @@ int32_t plotui_set_graph_positions(struct PlotuiPlot *p,
                                    size_t ny,
                                    const float *zs,
                                    size_t nz);
+
+/**
+ * Style a 2D scatter point by point. Each channel is independent: a NULL
+ * pointer (or zero length) leaves it uniform. `rgbs` is `n_colors` packed
+ * RGB triples, `shapes` is `n_shapes` silhouette names.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_point_styles(struct PlotuiPlot *p,
+                                size_t handle,
+                                const uint8_t *rgbs,
+                                size_t n_colors,
+                                const float *sizes,
+                                size_t n_sizes,
+                                const char *const *shapes,
+                                size_t n_shapes);
 
 /**
  * Recolor a graph trace in place — the host-side highlight primitive.
@@ -511,9 +719,11 @@ void plotui_reset(struct PlotuiPlot *p);
 
 /**
  * Remap what drag gestures do. Each name is a camera control — "yaw",
- * "pitch", "pan_x", "pan_y", "zoom" or "off" — or NULL to keep that
- * axis's current binding. The default map is drag = rotate (yaw/pitch),
- * shift-drag = pan. Returns 0, or -1 with `plotui_last_error()` set.
+ * "pitch", "pan_x", "pan_y", "zoom" or "off", optionally prefixed with
+ * '-' to invert the axis — or NULL to keep that axis's current binding.
+ * The default map is drag = rotate as a trackball (yaw/pitch, the drag
+ * grabs the object), shift-drag = pan; "-yaw"/"-pitch" restore
+ * camera-grab rotation. Returns 0, or -1 with `plotui_last_error()` set.
  *
  * # Safety
  * `p` must be a live plot handle; names must be NULL or valid C strings.

@@ -70,9 +70,10 @@ export class ForceLayout {
 if (Symbol.dispose) ForceLayout.prototype[Symbol.dispose] = ForceLayout.prototype.free;
 
 /**
- * A polygonised iso-surface: vertex coordinates split per axis (the shape
+ * Generated geometry: vertex coordinates split per axis (the shape
  * `Plot.add_mesh3d` takes) plus the flat `[a0, b0, c0, a1, …]` triangle
- * indices that join them.
+ * indices that join them. Returned by `marching_cubes`, `tube` and
+ * `ribbon`.
  */
 export class Mesh {
     static __wrap(ptr) {
@@ -196,6 +197,36 @@ export class Plot {
         wasm.__wbg_plot_free(ptr, 0);
     }
     /**
+     * Add a filled band between two boundaries at each x. Add it before the
+     * line it belongs to — draw order is the only layering in 2D.
+     * @param {Float32Array} xs
+     * @param {Float32Array} lo
+     * @param {Float32Array} hi
+     * @param {string | null} [color]
+     * @param {string | null} [name]
+     * @param {string | null} [axis]
+     * @returns {number}
+     */
+    add_band2d(xs, lo, hi, color, name, axis) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(lo, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArrayF32ToWasm0(hi, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        var ptr4 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len4 = WASM_VECTOR_LEN;
+        var ptr5 = isLikeNone(axis) ? 0 : passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_band2d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
      * Add a 2D bar series.
      * @param {Float32Array} xs
      * @param {Float32Array} heights
@@ -216,6 +247,66 @@ export class Plot {
         var ptr4 = isLikeNone(axis) ? 0 : passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len4 = WASM_VECTOR_LEN;
         const ret = wasm.plot_add_bar2d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Add a 2D bar series with an explicit orientation ("vertical" or
+     * "horizontal"). A horizontal bar reads `xs` as y positions.
+     * @param {Float32Array} xs
+     * @param {Float32Array} heights
+     * @param {string | null} [color]
+     * @param {string | null} [orientation]
+     * @param {string | null} [name]
+     * @param {string | null} [axis]
+     * @returns {number}
+     */
+    add_bar2d_oriented(xs, heights, color, orientation, name, axis) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(heights, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(orientation) ? 0 : passStringToWasm0(orientation, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        var ptr4 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len4 = WASM_VECTOR_LEN;
+        var ptr5 = isLikeNone(axis) ? 0 : passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_bar2d_oriented(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Add a box plot over a flat sample: `groupStarts[g]` is where group
+     * `g` begins in `values` (CSR).
+     * @param {Float32Array} values
+     * @param {Uint32Array} group_starts
+     * @param {string | null} [color]
+     * @param {string | null} [orientation]
+     * @param {string | null} [name]
+     * @param {string | null} [axis]
+     * @returns {number}
+     */
+    add_box2d(values, group_starts, color, orientation, name, axis) {
+        const ptr0 = passArrayF32ToWasm0(values, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(group_starts, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(orientation) ? 0 : passStringToWasm0(orientation, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        var ptr4 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len4 = WASM_VECTOR_LEN;
+        var ptr5 = isLikeNone(axis) ? 0 : passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_box2d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -248,6 +339,63 @@ export class Plot {
         var ptr5 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len5 = WASM_VECTOR_LEN;
         const ret = wasm.plot_add_graph3d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, isLikeNone(size) ? Number.MAX_SAFE_INTEGER : Math.fround(size), ptr5, len5);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Add a heatmap over a flat row-major grid: `zs[j * xs.len() + i]` is
+     * the value at (xs[i], ys[j]).
+     * @param {Float32Array} xs
+     * @param {Float32Array} ys
+     * @param {Float32Array} zs
+     * @param {string | null} [colormap]
+     * @param {boolean | null} [colorbar]
+     * @param {string | null} [label]
+     * @param {string | null} [name]
+     * @returns {number}
+     */
+    add_heatmap2d(xs, ys, zs, colormap, colorbar, label, name) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArrayF32ToWasm0(zs, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(colormap) ? 0 : passStringToWasm0(colormap, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        var ptr4 = isLikeNone(label) ? 0 : passStringToWasm0(label, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len4 = WASM_VECTOR_LEN;
+        var ptr5 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_heatmap2d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, isLikeNone(colorbar) ? 0xFFFFFF : colorbar ? 1 : 0, ptr4, len4, ptr5, len5);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Add a histogram of `values`; `bins` or `binWidth` (not both), or
+     * neither for the automatic rule.
+     * @param {Float32Array} values
+     * @param {number | null} [bins]
+     * @param {number | null} [bin_width]
+     * @param {string | null} [color]
+     * @param {string | null} [name]
+     * @param {string | null} [axis]
+     * @returns {number}
+     */
+    add_histogram2d(values, bins, bin_width, color, name, axis) {
+        const ptr0 = passArrayF32ToWasm0(values, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(axis) ? 0 : passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_histogram2d(this.__wbg_ptr, ptr0, len0, isLikeNone(bins) ? Number.MAX_SAFE_INTEGER : (bins) >>> 0, !isLikeNone(bin_width), isLikeNone(bin_width) ? 0 : bin_width, ptr1, len1, ptr2, len2, ptr3, len3);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -399,6 +547,36 @@ export class Plot {
         return ret[0] >>> 0;
     }
     /**
+     * Add a 2D step series; `where_` is "post" (default), "pre" or "mid".
+     * @param {Float32Array} xs
+     * @param {Float32Array} ys
+     * @param {string | null} [color]
+     * @param {number | null} [width]
+     * @param {string | null} [where_]
+     * @param {string | null} [name]
+     * @param {string | null} [axis]
+     * @returns {number}
+     */
+    add_step2d(xs, ys, color, width, where_, name, axis) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(where_) ? 0 : passStringToWasm0(where_, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len3 = WASM_VECTOR_LEN;
+        var ptr4 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len4 = WASM_VECTOR_LEN;
+        var ptr5 = isLikeNone(axis) ? 0 : passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_step2d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, isLikeNone(width) ? Number.MAX_SAFE_INTEGER : Math.fround(width), ptr3, len3, ptr4, len4, ptr5, len5);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
      * Add a 3D surface over the grid `(xs[i], ys[j])` with flat heights
      * `zs[j * xs.len() + i]`. Colormapped ("viridis" by default, or
      * "plasma"), or solid when a `color` is given without a `colormap`.
@@ -515,6 +693,19 @@ export class Plot {
         }
     }
     /**
+     * Append observations to a histogram and rebin.
+     * @param {number} handle
+     * @param {Float32Array} values
+     */
+    extend_values(handle, values) {
+        const ptr0 = passArrayF32ToWasm0(values, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_extend_values(this.__wbg_ptr, handle, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * Append points to a 2D trace by handle.
      * @param {number} handle
      * @param {Float32Array} xs
@@ -580,6 +771,19 @@ export class Plot {
     jump_x_window(w, h, px) {
         const ret = wasm.plot_jump_x_window(this.__wbg_ptr, w, h, px);
         return ret !== 0;
+    }
+    /**
+     * The trace whose legend row covers `(px, py)`, if any. Hidden traces
+     * keep their row, so this is the hook for a click-to-toggle legend.
+     * @param {number} w
+     * @param {number} h
+     * @param {number} px
+     * @param {number} py
+     * @returns {number | undefined}
+     */
+    legend_hit(w, h, px, py) {
+        const ret = wasm.plot_legend_hit(this.__wbg_ptr, w, h, px, py);
+        return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
     }
     constructor() {
         const ret = wasm.plot_new();
@@ -733,6 +937,17 @@ export class Plot {
     render_at(w, h, pan_scale) {
         wasm.plot_render_at(this.__wbg_ptr, w, h, pan_scale);
     }
+    /**
+     * Just the legend, at full resolution, on a transparent frame. Composite
+     * it over an upscaled `render_at` frame (with `drawImage`, which honours
+     * alpha — `putImageData` would not) so a half-res drag does not change
+     * the legend under the pointer.
+     * @param {number} w
+     * @param {number} h
+     */
+    render_legend_overlay(w, h) {
+        wasm.plot_render_legend_overlay(this.__wbg_ptr, w, h);
+    }
     reset() {
         wasm.plot_reset(this.__wbg_ptr);
     }
@@ -742,6 +957,20 @@ export class Plot {
      */
     rotate(d_yaw, d_pitch) {
         wasm.plot_rotate(this.__wbg_ptr, d_yaw, d_pitch);
+    }
+    /**
+     * Set how bar series share positions: "overlay", "group" or "stack".
+     * @param {string} mode
+     * @returns {boolean}
+     */
+    set_barmode(mode) {
+        const ptr0 = passStringToWasm0(mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_barmode(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
     }
     /**
      * Pin the 3D data frame to `(lo, hi)` corners so the view stops
@@ -769,6 +998,24 @@ export class Plot {
         }
     }
     /**
+     * Name an axis's categories ("x" or "y"); an empty list restores
+     * numeric ticks.
+     * @param {string} axis
+     * @param {string[]} names
+     * @returns {boolean}
+     */
+    set_categories(axis, names) {
+        const ptr0 = passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayJsValueToWasm0(names, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_categories(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * Swap the color sequence for traces added without an explicit color:
      * a built-in name ("plotui", "muted", "vivid"), or a list of color
      * shorthand strings. Traces already added keep their colors.
@@ -781,6 +1028,29 @@ export class Plot {
         var ptr1 = isLikeNone(colors) ? 0 : passArrayJsValueToWasm0(colors, wasm.__wbindgen_malloc);
         var len1 = WASM_VECTOR_LEN;
         const ret = wasm.plot_set_colorway(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Attach per-point error bars to a 2D scatter or line; empty arrays
+     * clear that axis, and an empty `minus` mirrors `plus`.
+     * @param {number} handle
+     * @param {Float32Array | null} [y_plus]
+     * @param {Float32Array | null} [y_minus]
+     * @param {Float32Array | null} [x_plus]
+     * @param {Float32Array | null} [x_minus]
+     */
+    set_error_bars(handle, y_plus, y_minus, x_plus, x_minus) {
+        var ptr0 = isLikeNone(y_plus) ? 0 : passArrayF32ToWasm0(y_plus, wasm.__wbindgen_malloc);
+        var len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(y_minus) ? 0 : passArrayF32ToWasm0(y_minus, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(x_plus) ? 0 : passArrayF32ToWasm0(x_plus, wasm.__wbindgen_malloc);
+        var len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(x_minus) ? 0 : passArrayF32ToWasm0(x_minus, wasm.__wbindgen_malloc);
+        var len3 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_error_bars(this.__wbg_ptr, handle, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -856,8 +1126,10 @@ export class Plot {
     /**
      * Remap what drag gestures do. Each argument names the camera control
      * that gesture axis drives — "yaw", "pitch", "pan_x", "pan_y", "zoom"
-     * or "off" — or `None` to keep its current binding. The default map is
-     * drag = rotate (yaw/pitch), shift-drag = pan.
+     * or "off", optionally prefixed with "-" to invert the axis — or
+     * `None` to keep its current binding. The default map is drag = rotate
+     * as a trackball (yaw/pitch, the drag grabs the object), shift-drag =
+     * pan; "-yaw"/"-pitch" restore camera-grab rotation.
      * @param {string | null} [drag_x]
      * @param {string | null} [drag_y]
      * @param {string | null} [shift_drag_x]
@@ -873,6 +1145,27 @@ export class Plot {
         var ptr3 = isLikeNone(shift_drag_y) ? 0 : passStringToWasm0(shift_drag_y, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len3 = WASM_VECTOR_LEN;
         const ret = wasm.plot_set_input_map(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Style a 2D scatter point by point: `colors` as shorthand strings,
+     * `sizes` as radii, `shapes` as silhouette names. An empty or omitted
+     * list leaves that channel uniform.
+     * @param {number} handle
+     * @param {string[] | null} [colors]
+     * @param {Float32Array | null} [sizes]
+     * @param {string[] | null} [shapes]
+     */
+    set_point_styles(handle, colors, sizes, shapes) {
+        var ptr0 = isLikeNone(colors) ? 0 : passArrayJsValueToWasm0(colors, wasm.__wbindgen_malloc);
+        var len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(sizes) ? 0 : passArrayF32ToWasm0(sizes, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(shapes) ? 0 : passArrayJsValueToWasm0(shapes, wasm.__wbindgen_malloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_point_styles(this.__wbg_ptr, handle, ptr0, len0, ptr1, len1, ptr2, len2);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -986,6 +1279,32 @@ export class Plot {
         return ret !== 0;
     }
     /**
+     * One auto-rotate step: `step` radians of yaw, turned the way a
+     * rightward drag pushes the object, so a scene that spins on its own
+     * and a user who grabs it agree. Negative `step` drifts the other way.
+     * Prefer this to `rotate` for an idle spin — `rotate` takes a raw
+     * camera delta, whose sign is the opposite one.
+     * @param {number} step
+     */
+    spin(step) {
+        wasm.plot_spin(this.__wbg_ptr, step);
+    }
+    /**
+     * Toggle a trace from the legend: the geometry goes but the row stays,
+     * greyed out, so a second click brings it back. Returns whether the
+     * trace is now shown. Pair with `legend_hit`; use `set_visible` instead
+     * to take a trace out of the plot entirely, legend row included.
+     * @param {number} handle
+     * @returns {boolean}
+     */
+    toggle_muted(handle) {
+        const ret = wasm.plot_toggle_muted(this.__wbg_ptr, handle);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * @returns {number}
      */
     vertex_count() {
@@ -1027,6 +1346,30 @@ export class Plot {
 if (Symbol.dispose) Plot.prototype[Symbol.dispose] = Plot.prototype.free;
 
 /**
+ * Resample a coarse polyline through a uniform Catmull-Rom spline:
+ * `per_segment` samples for each input segment plus the final point. The
+ * curve passes through every input point. Returns the same flat
+ * `[x, y, z, …]` shape it takes, ready to hand to `tube` or `ribbon`.
+ *
+ * The spline lives only in Rust, so a browser scene and `plotui example
+ * protein` sweep the same curve.
+ * @param {Float32Array} path
+ * @param {number} per_segment
+ * @returns {Float32Array}
+ */
+export function catmull_rom(path, per_segment) {
+    const ptr0 = passArrayF32ToWasm0(path, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.catmull_rom(ptr0, len0, per_segment);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
  * Polygonise a sampled scalar field: the `field == iso` surface of
  * `values[(k * ny + j) * nx + i]`, sampled at `origin + [i, j, k] * cell`.
  *
@@ -1049,6 +1392,60 @@ export function marching_cubes(values, nx, ny, nz, origin, cell, iso) {
     const ptr1 = passArrayF32ToWasm0(origin, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.marching_cubes(ptr0, len0, nx, ny, nz, ptr1, len1, cell, iso);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Mesh.__wrap(ret[0]);
+}
+
+/**
+ * Sweep a flat rectangular cross-section along `path`: `widths` across the
+ * face, `thickness` through it.
+ *
+ * `up` is the flat `[x, y, z, …]` face normal per point — the direction the
+ * flat of the ribbon points. It is re-squared against the tangent, so it
+ * need only be approximate; an empty array falls back to the same
+ * rotation-minimizing frame `tube` uses. `widths` is indexed like `tube`'s
+ * `radii`, so tapering the last entries to zero gives an arrowhead.
+ * @param {Float32Array} path
+ * @param {Float32Array} up
+ * @param {Float32Array} widths
+ * @param {number} thickness
+ * @returns {Mesh}
+ */
+export function ribbon(path, up, widths, thickness) {
+    const ptr0 = passArrayF32ToWasm0(path, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(up, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArrayF32ToWasm0(widths, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.ribbon(ptr0, len0, ptr1, len1, ptr2, len2, thickness);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Mesh.__wrap(ret[0]);
+}
+
+/**
+ * Sweep a circular cross-section of `radii` along `path`, `sides` facets
+ * around, capped at both ends.
+ *
+ * `radii[i]` is the radius at point `i`; a shorter array repeats its last
+ * entry, so a one-element array is a constant radius and a per-point one
+ * tapers. The frame carried along the path is rotation-minimizing, so the
+ * section never spins about its own axis where the path twists.
+ * @param {Float32Array} path
+ * @param {Float32Array} radii
+ * @param {number} sides
+ * @returns {Mesh}
+ */
+export function tube(path, radii, sides) {
+    const ptr0 = passArrayF32ToWasm0(path, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(radii, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.tube(ptr0, len0, ptr1, len1, sides);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

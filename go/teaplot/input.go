@@ -28,8 +28,8 @@ func (m Model) motion(mouse tea.Mouse) (Model, tea.Cmd) {
 		if dx != 0 || dy != 0 {
 			m.moved = true
 		}
-		// Routed through the plot's input map: drag rotates (camera-grab —
-		// drag right orbits the view right), shift-drag pans, unless the
+		// Routed through the plot's input map: drag rotates (trackball —
+		// drag right turns the object right), shift-drag pans, unless the
 		// host remapped it via SetInputMap. Pan is in full-resolution image
 		// pixels, so one dragged cell is one cell's worth of pixels and the
 		// plot stays under the pointer.

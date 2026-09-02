@@ -744,23 +744,55 @@ fn hidden_trace_renders_like_never_added_2d() {
     let ys: Vec<f32> = xs.iter().map(|x| x * 0.5 + 1.0).collect();
     let y2: Vec<f32> = xs.iter().map(|x| 100.0 - x * 3.0).collect();
 
+    // An *unnamed* trace has no legend row to leave behind, so hiding it is
+    // indistinguishable from never adding it: geometry, bounds contribution,
+    // and the right-axis column + tint all go.
     let mut bare = Plot::new();
     bare.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, Some("a".into()), YAxis::Primary);
 
     let mut toggled = Plot::new();
     toggled.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, Some("a".into()), YAxis::Primary);
-    let h =
-        toggled.add_line2d(xs.clone(), y2.clone(), PALETTE[1], 2.0, Some("b".into()), YAxis::Y2);
+    let h = toggled.add_line2d(xs.clone(), y2.clone(), PALETTE[1], 2.0, None, YAxis::Y2);
     let before = hash(&toggled.render(240, 160));
 
-    // Hiding the y2 trace releases its geometry, legend row, bounds
-    // contribution, AND the right-axis column + tint.
     assert!(toggled.set_visible(h, false).unwrap());
     assert!(!toggled.set_visible(h, false).unwrap(), "second hide is a no-op");
     assert_eq!(hash(&toggled.render(240, 160)), hash(&bare.render(240, 160)));
 
     assert!(toggled.set_visible(h, true).unwrap());
     assert_eq!(hash(&toggled.render(240, 160)), before, "re-show restores the original frame");
+}
+
+/// Muting and hiding both drop the geometry, and differ only in the legend:
+/// `set_visible(false)` takes the series out of the plot completely, while
+/// `set_muted(true)` keeps a greyed row — the thing a click brings back.
+#[test]
+fn muting_keeps_the_legend_row_that_hiding_removes() {
+    let xs: Vec<f32> = (0..=10).map(|i| i as f32).collect();
+    let ys: Vec<f32> = xs.iter().map(|x| x * 0.5 + 1.0).collect();
+    let y2: Vec<f32> = xs.iter().map(|x| 100.0 - x * 3.0).collect();
+
+    let mut bare = Plot::new();
+    bare.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, Some("a".into()), YAxis::Primary);
+
+    let mut p = Plot::new();
+    p.add_line2d(xs.clone(), ys.clone(), PALETTE[0], 2.0, Some("a".into()), YAxis::Primary);
+    let h = p.add_line2d(xs.clone(), y2.clone(), PALETTE[1], 2.0, Some("b".into()), YAxis::Y2);
+    let before = hash(&p.render(240, 160));
+
+    // Hidden: indistinguishable from never adding b, legend row included.
+    p.set_visible(h, false).unwrap();
+    assert_eq!(hash(&p.render(240, 160)), hash(&bare.render(240, 160)));
+    p.set_visible(h, true).unwrap();
+
+    // Muted: b's geometry and right axis go, but its row stays behind.
+    assert!(!p.set_muted(h, true).unwrap(), "set_muted reports the new shown state");
+    let muted = hash(&p.render(240, 160));
+    assert_ne!(muted, before, "muting drops b's geometry");
+    assert_ne!(muted, hash(&bare.render(240, 160)), "muting keeps b's legend row");
+
+    assert!(p.toggle_muted(h).unwrap(), "toggling back shows it");
+    assert_eq!(hash(&p.render(240, 160)), before, "unmuting restores the original frame");
 }
 
 #[test]
@@ -879,6 +911,11 @@ fn direct_trace_push_falls_back_without_panicking() {
         ys: vec![0.5],
         color: [1, 2, 3],
         size: 4.0,
+        colors: None,
+        sizes: None,
+        shapes: None,
+        err_x: None,
+        err_y: None,
         name: None,
         axis: YAxis::Primary,
     });
@@ -1347,4 +1384,102 @@ fn graph_mutator_error_paths() {
     assert_eq!(p.extend_graph(s, &[], &[], &[]), Err(TraceError::WrongKind));
     // The failed calls must not have desynced anything: a good call still works.
     assert!(p.set_graph_positions(h, vec![[0.5; 3], [1.5; 3]]).is_ok());
+}
+
+/// A click on a legend row resolves to that row's trace, in both render
+/// paths, and toggling it round-trips the frame. The rows are found by
+/// probing the box the renderer actually drew, so this also pins that
+/// hit-testing and drawing agree on where the legend is.
+#[test]
+fn legend_rows_are_clickable_and_toggle() {
+    let (w, h) = (600usize, 400usize);
+
+    // 3D: two named traces, so the legend has two distinguishable rows.
+    let mut p = Plot::new();
+    let a = p.add_scatter3d(
+        vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+        PALETTE[0],
+        3.0,
+        Some("alpha".into()),
+    );
+    let b = p.add_scatter3d(
+        vec![[-1.0, 0.0, 1.0], [0.5, -1.0, 0.0]],
+        PALETTE[1],
+        3.0,
+        Some("beta".into()),
+    );
+
+    // Sweep the top-right corner for the two rows the legend drew there.
+    let mut seen = std::collections::BTreeMap::new();
+    for y in 0..h {
+        for x in (w / 2)..w {
+            if let Some(id) = p.legend_hit(w, h, x as f32, y as f32) {
+                seen.entry(id).or_insert((x, y));
+            }
+        }
+    }
+    assert_eq!(seen.keys().copied().collect::<Vec<_>>(), vec![a, b], "both rows are hittable");
+    // The rows are stacked in trace order: alpha's row sits above beta's.
+    assert!(seen[&a].1 < seen[&b].1, "alpha's row is above beta's");
+
+    let before = hash(&p.render(w, h));
+    let (bx, by) = seen[&b];
+    let hit = p.legend_hit(w, h, bx as f32, by as f32).expect("row b");
+    assert_eq!(hit, b);
+    assert!(!p.toggle_muted(hit).unwrap(), "first toggle mutes");
+    let muted = hash(&p.render(w, h));
+    assert_ne!(muted, before, "muting b changes the frame");
+    // Still hittable while muted — that is how it comes back.
+    assert_eq!(p.legend_hit(w, h, bx as f32, by as f32), Some(b));
+    assert!(p.toggle_muted(hit).unwrap(), "second toggle shows");
+    assert_eq!(hash(&p.render(w, h)), before, "toggling back restores the frame");
+
+    // 2D anchors the legend to the plot frame, not the image; the same probe
+    // must still find both rows.
+    let mut q = Plot::new();
+    let xs: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    let c =
+        q.add_line2d(xs.clone(), xs.clone(), PALETTE[0], 2.0, Some("up".into()), YAxis::Primary);
+    let d = q.add_line2d(
+        xs.clone(),
+        xs.iter().map(|x| 8.0 - x).collect(),
+        PALETTE[1],
+        2.0,
+        Some("down".into()),
+        YAxis::Primary,
+    );
+    let mut seen2 = std::collections::BTreeSet::new();
+    for y in 0..h {
+        for x in (w / 2)..w {
+            if let Some(id) = q.legend_hit(w, h, x as f32, y as f32) {
+                seen2.insert(id);
+            }
+        }
+    }
+    assert_eq!(seen2.into_iter().collect::<Vec<_>>(), vec![c, d], "2D rows are hittable too");
+}
+
+/// The legend overlay is the legend and nothing else: transparent everywhere
+/// the panel is not, and byte-identical to the legend in a full render.
+#[test]
+fn legend_overlay_matches_the_rendered_legend() {
+    let (w, h) = (500usize, 320usize);
+    let mut p = Plot::new();
+    p.show_box = false;
+    p.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], PALETTE[0], 3.0, Some("one".into()));
+
+    let overlay = p.render_legend_overlay(w, h).rgba();
+    let lit: Vec<usize> =
+        overlay.chunks(4).enumerate().filter(|(_, px)| px[3] > 0).map(|(i, _)| i).collect();
+    assert!(!lit.is_empty(), "the overlay must carry the legend");
+    // Everything drawn sits in the top-right corner where the legend goes.
+    for i in &lit {
+        let (x, y) = (i % w, i / w);
+        assert!(x > w / 2 && y < h / 2, "overlay pixel ({x},{y}) is outside the legend corner");
+    }
+    // And those pixels match what a full render puts there.
+    let full = p.render(w, h).rgba();
+    for i in &lit {
+        assert_eq!(&full[i * 4..i * 4 + 3], &overlay[i * 4..i * 4 + 3], "pixel {i} differs");
+    }
 }

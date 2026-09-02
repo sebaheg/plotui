@@ -3,8 +3,22 @@ title: 3D plots
 description: Scatter clouds, pickable graphs, trajectories, Gouraud-shaded surfaces, and triangle meshes under one orbit camera.
 ---
 
-Any 3D trace switches the whole plot to the orbit camera: drag rotates,
-shift-drag pans, scroll zooms, double-click resets. All 3D traces share one
+Any 3D trace switches the whole plot to the orbit camera: drag rotates as a
+trackball — the drag grabs the object, so dragging right turns it right —
+shift-drag pans, scroll zooms, double-click resets. Prefer the opposite,
+camera-grab feel? Every frontend's `set_input_map` accepts a `-` prefix to
+invert an axis: `set_input_map("-yaw", "-pitch")`.
+
+For a view that turns on its own, call `spin(step)` rather than
+`rotate(step, 0)`. It owns the direction — a positive step turns the object
+the way a rightward drag pushes it, and `set_input_map("-yaw")` inverts the
+two together. A spin that runs *against* the drag is the one camera bug you
+cannot see coming: on a point cloud or a wireframe nobody can tell which way
+the scene is turning, so it goes unnoticed until something opaque is on
+screen, and then it reads as the drag being inverted — you push the object
+right, let go, and it walks back the way it came.
+
+All 3D traces share one
 (x, y, z) space — no axis is special — with a bounding-box wireframe for
 orientation (`set_show_box(False)` hides it) and depth fog for distance
 cueing. Named 3D traces get the same legend as 2D charts, and colors follow
@@ -144,15 +158,35 @@ stored once and shaded once. Each vertex takes its normal from the facets
 that meet there, which is what makes a mesh of shared vertices read as a
 smooth surface rather than a field of facets; shading is two-sided, so
 either winding draws and there is no backface to cull. The colormap runs
-over the mesh's own z range. Triangles with a NaN vertex or an out-of-range
-index are skipped, the way a surface cell with a NaN corner is a hole. Mesh
-vertices are not pickable, so adding a mesh never shifts existing node
-indices.
+over the mesh's own z range. A triangle with a NaN vertex is skipped, the way
+a surface cell with a NaN corner is a hole; an index naming no vertex is
+rejected outright, because a silently dropped face is a data bug worth
+hearing about. Mesh vertices are not pickable, so adding a mesh never shifts
+existing node indices.
 
 `marching_cubes(values, nx, ny, nz, origin, cell, iso)` turns a sampled
 scalar field into exactly these two arrays, sharing vertices along cell
 edges so the result shades smoothly across cells.
 
+`catmull_rom`, `tube` and `ribbon` cover the other way meshes get made:
+sweeping a cross-section along a path. `catmull_rom(path, per_segment)`
+resamples a coarse polyline into a smooth one — control points a spline
+passes through, not near. `tube(path, radii, sides)` and `ribbon(path, up,
+widths, thickness)` then sweep a circle or a flat rectangle along it, both
+carrying a rotation-minimizing frame so the section does not spin about its
+own axis wherever the path twists. Radii and widths are per point, so a
+tube tapers and a ribbon can end in an arrowhead; `ribbon` also takes a
+per-point face normal, for callers with a real orientation to impose rather
+than an arbitrary one. All three are available in Rust and JavaScript,
+alongside `marching_cubes`.
+
 Meshes are available in Rust and JavaScript today; the Python binding above
 is the shape it will take. Run `plotui example mandelbulb` to see one — the
-Mandelbulb fractal, polygonised and revealed slice by slice.
+Mandelbulb fractal, polygonised and revealed slice by slice — or `plotui
+example protein`, which sweeps ubiquitin's backbone into a cartoon: helices
+and strands as ribbons turned by the peptide plane, loops as tubes, folding
+in from the N terminus. That example is worth reading as well as running.
+Everything about proteins in it — PDB column offsets, which fold a residue
+belongs to, the flip and smoothing that keep a pleated beta strand from
+corkscrewing — lives in the example, not in plotui. The library draws
+geometry; the domain stays in the caller.

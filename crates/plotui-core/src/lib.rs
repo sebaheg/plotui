@@ -12,15 +12,16 @@
 //! unit-tested by hashing pixel buffers.
 
 mod font;
-mod hershey;
+mod glyphs;
 mod layout;
 mod marching;
+mod ribbon;
 mod ticks;
 
-pub use font::{draw_text, draw_text_aa, text_width, CHAR_H, CHAR_W};
-pub use hershey::{draw_text_hershey, hershey_text_width};
+pub use font::{draw_text, draw_text_aa, draw_text_at, text_width, text_width_at, CHAR_H, CHAR_W};
 pub use layout::ForceLayout;
 pub use marching::marching_cubes;
+pub use ribbon::{catmull_rom, ribbon, tube};
 pub use ticks::{
     civil_from_days, date_ticks, days_from_civil, format_datetime, format_tick, nice_ticks,
 };
@@ -71,6 +72,229 @@ impl Shape {
             Shape::Ring | Shape::Dot => Shape::Disc,
             Shape::DiamondOpen => Shape::Diamond,
             other => other,
+        }
+    }
+}
+
+/// Half a box's width in category units. Boxes sit one unit apart (group `g`
+/// at position `g`), so 0.3 leaves a visible gutter between neighbours the way
+/// `bar_halfwidth`'s 40% does.
+const BOX_HALF_WIDTH: f64 = 0.3;
+
+/// Split the flat sample into its groups. A `group_starts` that runs past the
+/// end, or backwards, yields an empty group rather than panicking — the
+/// bindings validate it, but the renderer must not be the thing that trusts
+/// them.
+fn box_groups<'a>(
+    values: &'a [f32],
+    group_starts: &'a [u32],
+) -> impl Iterator<Item = &'a [f32]> + 'a {
+    (0..group_starts.len()).map(move |g| {
+        let a = group_starts[g] as usize;
+        let b = group_starts.get(g + 1).map_or(values.len(), |v| *v as usize);
+        if a <= b && b <= values.len() {
+            &values[a..b]
+        } else {
+            &[]
+        }
+    })
+}
+
+/// One group's five-number summary plus its outliers — everything a box
+/// needs, solved once from the sample.
+#[derive(Clone, Debug, PartialEq)]
+struct BoxStats {
+    q1: f64,
+    median: f64,
+    q3: f64,
+    /// Whisker ends: the most extreme values still inside Tukey's fence, not
+    /// the fence itself. A whisker that stopped at the fence would claim data
+    /// exists where none does.
+    lo: f64,
+    hi: f64,
+    outliers: Vec<f64>,
+}
+
+impl BoxStats {
+    /// Every value the box occupies on the value axis: the whiskers, the
+    /// quartiles, and each outlier. Bounds fold all of these in, so an
+    /// outlier can never fall outside the frame that is supposed to show it.
+    fn spans(&self) -> impl Iterator<Item = f64> + '_ {
+        [self.lo, self.q1, self.median, self.q3, self.hi]
+            .into_iter()
+            .chain(self.outliers.iter().copied())
+    }
+}
+
+/// Tukey's rule: quartiles by linear interpolation, whiskers to the furthest
+/// points within 1.5·IQR of the box, everything beyond drawn individually.
+///
+/// Drawing outliers as points rather than extending the whiskers to the
+/// extremes is the whole reason a box plot beats a min/max range: it
+/// separates the bulk of a distribution from the handful of values arguing
+/// with it.
+fn box_stats(values: &[f32]) -> Option<BoxStats> {
+    let mut v: Vec<f64> = values.iter().map(|&x| x as f64).filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    // Linear interpolation between order statistics (the "type 7" quantile
+    // every mainstream stats package defaults to).
+    let q = |p: f64| -> f64 {
+        let h = (v.len() - 1) as f64 * p;
+        let (lo, frac) = (h.floor(), h - h.floor());
+        let i = lo as usize;
+        v[i] + frac * (v[(i + 1).min(v.len() - 1)] - v[i])
+    };
+    let (q1, median, q3) = (q(0.25), q(0.5), q(0.75));
+    let fence = 1.5 * (q3 - q1);
+    let (lo_fence, hi_fence) = (q1 - fence, q3 + fence);
+    let lo = *v.iter().find(|x| **x >= lo_fence).unwrap_or(&v[0]);
+    let hi = *v.iter().rev().find(|x| **x <= hi_fence).unwrap_or(&v[v.len() - 1]);
+    let outliers = v.iter().copied().filter(|x| *x < lo_fence || *x > hi_fence).collect();
+    Some(BoxStats { q1, median, q3, lo, hi, outliers })
+}
+
+/// Per-point uncertainty on one axis: `plus` above (or right of) each point,
+/// `minus` below. `minus: None` mirrors `plus`, which is the symmetric case
+/// almost every measurement reports.
+///
+/// Shorter than the series means the remaining points simply carry no bar,
+/// rather than the series being truncated — the same padding rule per-point
+/// styling uses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ErrBars {
+    pub plus: Vec<f32>,
+    pub minus: Option<Vec<f32>>,
+}
+
+impl ErrBars {
+    /// The `(low, high)` offsets at point `i`, or `None` where this point has
+    /// no bar or a non-finite one.
+    fn at(&self, i: usize) -> Option<(f64, f64)> {
+        let up = *self.plus.get(i)? as f64;
+        let down = match &self.minus {
+            Some(m) => *m.get(i)? as f64,
+            None => up,
+        };
+        (up.is_finite() && down.is_finite()).then_some((down.abs(), up.abs()))
+    }
+}
+
+/// How several bar traces on one axis share their positions.
+///
+/// This is a plot-level setting, not a per-trace one, because the answer is
+/// inherently about the *set*: a bar cannot know it is the second of three
+/// without being told, and its width and offset both depend on how many
+/// others there are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BarMode {
+    /// Every trace draws at full width on its own position. Two traces on the
+    /// same positions overplot — the later one wins the z tie and hides the
+    /// first — which is why this is rarely what you want with more than one
+    /// bar series, but it is what plotui has always done.
+    #[default]
+    Overlay,
+    /// Traces sit side by side within each position's slot, each taking
+    /// `1/n` of the width.
+    Group,
+    /// Traces stack, each starting where the one below it ended. Only the
+    /// same-signed part accumulates, so a mix of positive and negative values
+    /// grows in both directions from the baseline rather than cancelling into
+    /// a misleading total.
+    Stack,
+}
+
+impl BarMode {
+    /// The wire names, in declaration order — what frontends accept.
+    pub const NAMES: [&'static str; 3] = ["overlay", "group", "stack"];
+
+    pub fn parse(name: &str) -> Option<BarMode> {
+        Some(match name {
+            "overlay" => BarMode::Overlay,
+            "group" => BarMode::Group,
+            "stack" => BarMode::Stack,
+            _ => return None,
+        })
+    }
+}
+
+/// Which axis a bar grows along.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Orient {
+    /// Bars stand on the x axis and rise along y — the default.
+    #[default]
+    Vertical,
+    /// Bars sit on the y axis and run along x. The roles of the two axes swap
+    /// wholesale: the categories are on y, the measured values on x, and the
+    /// baseline is a vertical line at zero. Worth it for long category names,
+    /// which a horizontal axis has no room to write and no way to rotate.
+    Horizontal,
+}
+
+impl Orient {
+    /// The wire names, in declaration order — what frontends accept.
+    pub const NAMES: [&'static str; 2] = ["vertical", "horizontal"];
+
+    pub fn parse(name: &str) -> Option<Orient> {
+        Some(match name {
+            "vertical" | "v" => Orient::Vertical,
+            "horizontal" | "h" => Orient::Horizontal,
+            _ => return None,
+        })
+    }
+
+    fn is_horizontal(self) -> bool {
+        matches!(self, Orient::Horizontal)
+    }
+}
+
+/// How a 2D line gets from one sample to the next.
+///
+/// `Linear` draws the straight segment. The three step modes draw the
+/// right-angle path instead, which is the honest shape for anything that
+/// *holds* a value between samples — a counter, a state machine, a price
+/// between ticks. Drawing those linearly invents a ramp that never happened,
+/// so the mode is a correctness choice more than a style one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Interp {
+    #[default]
+    Linear,
+    /// The new value applies from the previous sample: step up, then across.
+    Pre,
+    /// The old value holds until the next sample: across, then step.
+    Post,
+    /// The step falls halfway between the two samples.
+    Mid,
+}
+
+impl Interp {
+    /// The wire names, in declaration order — what frontends accept.
+    pub const NAMES: [&'static str; 4] = ["linear", "pre", "post", "mid"];
+
+    pub fn parse(name: &str) -> Option<Interp> {
+        Some(match name {
+            "linear" => Interp::Linear,
+            "pre" => Interp::Pre,
+            "post" => Interp::Post,
+            "mid" => Interp::Mid,
+            _ => return None,
+        })
+    }
+
+    /// The corner between two samples, or `None` for a straight segment.
+    /// Two corners for `Mid` (the riser sits between the samples), one for
+    /// `Pre`/`Post`.
+    fn corners(self, a: (f64, f64), b: (f64, f64)) -> [Option<(f64, f64)>; 2] {
+        match self {
+            Interp::Linear => [None, None],
+            Interp::Pre => [Some((a.0, b.1)), None],
+            Interp::Post => [Some((b.0, a.1)), None],
+            Interp::Mid => {
+                let mx = (a.0 + b.0) * 0.5;
+                [Some((mx, a.1)), Some((mx, b.1))]
+            }
         }
     }
 }
@@ -268,6 +492,50 @@ impl Framebuffer {
         self.put(x, y, z, c);
     }
 
+    /// Mix `c` into the pixel already there with coverage `a` (0..1), honoring
+    /// bounds, clip, and the z-buffer. Unlike `put`, this reads the pixel back,
+    /// so it only makes sense for overlays drawn after the geometry beneath
+    /// them — the rounded panel edges are what need it.
+    ///
+    /// Coverage is per-pixel alpha we cannot actually export: [`Self::rgba`]
+    /// has one bit of alpha, drawn or not. So over an *undrawn* pixel a
+    /// partial write would blend toward stale black and fringe the panel dark
+    /// against a light host background; there the edge snaps to a hard one
+    /// instead. Antialiasing only happens where there is real colour beneath.
+    #[inline]
+    pub(crate) fn blend_px(&mut self, x: i32, y: i32, z: f32, c: Rgb, a: f32) {
+        if a <= 0.0 {
+            return;
+        }
+        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+            return;
+        }
+        if let Some((cx0, cy0, cx1, cy1)) = self.clip {
+            if x < cx0 || x > cx1 || y < cy0 || y > cy1 {
+                return;
+            }
+        }
+        let i = y as usize * self.w + x as usize;
+        if z > self.depth[i] {
+            return;
+        }
+        if a >= 1.0 || !self.drawn[i] {
+            if a < 0.5 {
+                return;
+            }
+            self.depth[i] = z;
+            self.color[i] = c;
+            self.drawn[i] = true;
+            return;
+        }
+        let under = self.color[i];
+        let mix =
+            |u: u8, o: u8| (u as f32 + (o as f32 - u as f32) * a).round().clamp(0.0, 255.0) as u8;
+        self.depth[i] = z;
+        self.color[i] = [mix(under[0], c[0]), mix(under[1], c[1]), mix(under[2], c[2])];
+        self.drawn[i] = true;
+    }
+
     /// Filled axis-aligned rectangle over the inclusive pixel range.
     pub fn rect_fill(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, z: f32, c: Rgb) {
         let (x0, x1) = (x0.min(x1), x0.max(x1));
@@ -402,6 +670,55 @@ impl Framebuffer {
         }
     }
 
+    /// Fill the ribbon between two boundaries — a confidence band, a stacked
+    /// layer, one side of a violin. `cols` is the band in framebuffer pixels,
+    /// one `(x, y_lo, y_hi)` per sample; the area between successive columns
+    /// is filled by linearly interpolating both edges across it.
+    ///
+    /// A column with any non-finite component breaks the band the way a
+    /// non-finite vertex breaks a line into runs: the runs either side of it
+    /// are filled, the span across it is not.
+    ///
+    /// The sweep walks one pixel column at a time rather than emitting two
+    /// triangles per quad, because a band is the one shape that must not
+    /// vanish where it matters most: a confidence interval pinches toward
+    /// zero exactly where the estimate is most certain, and a triangle whose
+    /// height falls below a pixel centre covers nothing at all. Every column
+    /// drawn here is at least one pixel tall, so a band stays continuous as
+    /// it narrows. The sweep assumes x is monotonic between samples, which
+    /// every caller guarantees by construction.
+    pub fn fill_between(&mut self, cols: &[(f64, f64, f64)], z: f32, c: Rgb) {
+        let finite = |v: &(f64, f64, f64)| v.0.is_finite() && v.1.is_finite() && v.2.is_finite();
+        for pair in cols.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if !finite(&a) || !finite(&b) {
+                continue;
+            }
+            let (l, r) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+            // Clamp the sweep to the framebuffer. An x-windowed plot can map a
+            // column thousands of pixels off screen, and the clip test inside
+            // `put` would reject each write only after we had walked to it.
+            let x_start = l.0.floor().max(0.0) as i32;
+            let x_end = r.0.ceil().min(self.w as f64 - 1.0) as i32;
+            if x_end < x_start {
+                continue;
+            }
+            let span = r.0 - l.0;
+            for x in x_start..=x_end {
+                let t = if span > 0.0 {
+                    (((x as f64 + 0.5) - l.0) / span).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let lo = l.1 + (r.1 - l.1) * t;
+                let hi = l.2 + (r.2 - l.2) * t;
+                let (y0, y1) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                // `rect_fill` is inclusive, so a pinched column is still 1px.
+                self.rect_fill(x, y0.round() as i32, x, y1.round() as i32, z, c);
+            }
+        }
+    }
+
     /// Flatten to RGBA8. Background pixels are transparent so the plot floats
     /// over the terminal's own background.
     pub fn rgba(&self) -> Vec<u8> {
@@ -507,16 +824,22 @@ pub enum CameraControl {
 
 /// Which camera control each drag-gesture axis drives — hosts override
 /// fields on [`Plot::input_map`] to remap gestures in code. The default is
-/// the house feel: dragging rotates (horizontal orbits, vertical tilts),
-/// shift-dragging pans. A pan-first UI would set
+/// the house feel: dragging rotates as a trackball (the drag grabs the
+/// object), shift-dragging pans. A pan-first UI would set
 /// `drag_x: PanX, drag_y: PanY`; axis-swapped rotation is
-/// `drag_x: Pitch, drag_y: Yaw`.
+/// `drag_x: Pitch, drag_y: Yaw`. The `invert_*` flags flip the sign an
+/// axis applies — `invert_drag_x: true, invert_drag_y: true` restores the
+/// camera-grab rotation (drag right orbits the view right).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct InputMap {
     pub drag_x: CameraControl,
     pub drag_y: CameraControl,
     pub shift_drag_x: CameraControl,
     pub shift_drag_y: CameraControl,
+    pub invert_drag_x: bool,
+    pub invert_drag_y: bool,
+    pub invert_shift_drag_x: bool,
+    pub invert_shift_drag_y: bool,
 }
 
 impl Default for InputMap {
@@ -526,6 +849,10 @@ impl Default for InputMap {
             drag_y: CameraControl::Pitch,
             shift_drag_x: CameraControl::PanX,
             shift_drag_y: CameraControl::PanY,
+            invert_drag_x: false,
+            invert_drag_y: false,
+            invert_shift_drag_x: false,
+            invert_shift_drag_y: false,
         }
     }
 }
@@ -629,6 +956,71 @@ impl Map2d {
     }
 }
 
+/// [`nice_ticks`] in the `(positions, labels)` shape [`date_ticks`] returns,
+/// so every axis in [`Layout2d`] carries its labels rather than the step they
+/// were formatted from. Labels are the only thing the renderer needs, and a
+/// label list is the one shape a calendar, log or categorical axis can also
+/// produce — a step cannot describe any of them.
+fn numeric_ticks(lo: f64, hi: f64, target: usize) -> (Vec<f64>, Vec<String>) {
+    let (t, step) = nice_ticks(lo, hi, target);
+    let labels = t.iter().map(|v| format_tick(*v, step)).collect();
+    (t, labels)
+}
+
+/// Ticks for a categorical axis: one per category at its own integer
+/// position, labelled by name. Only categories inside the visible range are
+/// emitted, and they thin by a whole stride when more would fit than `target`
+/// — dropping every second label keeps the ones that remain where they
+/// belong, which sub-sampling to exactly `target` would not.
+fn category_ticks(names: &[String], lo: f64, hi: f64, target: usize) -> (Vec<f64>, Vec<String>) {
+    if names.is_empty() || !lo.is_finite() || !hi.is_finite() {
+        return (Vec::new(), Vec::new());
+    }
+    let first = lo.ceil().max(0.0);
+    let last = hi.floor().min(names.len() as f64 - 1.0);
+    if last < first {
+        return (Vec::new(), Vec::new());
+    }
+    let (first, last) = (first as usize, last as usize);
+    let stride = (last - first + 1).div_ceil(target.max(1));
+    let mut pos = Vec::new();
+    let mut labels = Vec::new();
+    for i in (first..=last).step_by(stride) {
+        pos.push(i as f64);
+        labels.push(names[i].clone());
+    }
+    (pos, labels)
+}
+
+/// A colormap's legend: the ramp drawn as a labelled strip beside the plot,
+/// so a colormapped trace says what its colors *mean*. Without one a heatmap
+/// is decorative — the reader can see structure but cannot read a value.
+///
+/// `lo`/`hi` are the data range the ramp spans, which the caller sets from
+/// whatever it mapped through the colormap; the strip's own ticks come from
+/// the same ladder as an axis, so the numbers read alike.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Colorbar {
+    pub map: Colormap,
+    pub lo: f64,
+    pub hi: f64,
+    /// A caption above the strip. There is no rotated text, so it sits over
+    /// the ramp rather than alongside it, and the frame gives up a line of
+    /// top margin to make room.
+    pub label: Option<String>,
+}
+
+/// The colorbar's solved geometry: the gradient strip's rect and its ticks in
+/// data units, positioned by the same top-is-`hi` convention as a y axis.
+struct CbarLayout {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    ticks: Vec<f64>,
+    labels: Vec<String>,
+}
+
 /// The solved 2D frame geometry: plot rect, per-axis maps, and ticks with
 /// their rendered labels. Produced by `Plot::layout_2d` and consumed by the
 /// renderer, so anything that must agree with what is on screen (hit tests,
@@ -644,12 +1036,13 @@ struct Layout2d {
     xticks: Vec<f64>,
     xlabels: Vec<String>,
     yticks: Vec<f64>,
-    ystep: f64,
+    ylabels: Vec<String>,
     rticks: [Vec<f64>; RIGHT_AXES],
-    rsteps: [f64; RIGHT_AXES],
+    rlabels: [Vec<String>; RIGHT_AXES],
     col_x: [i32; RIGHT_AXES], // label column offset from x1
     has_right: [bool; RIGHT_AXES],
     strip: Option<StripLayout>,
+    cbar: Option<CbarLayout>,
 }
 
 /// The range-slider strip's solved geometry: its rect, the full-extent
@@ -711,12 +1104,12 @@ fn edge_glow(fb: &mut Framebuffer, a: [f32; 3], b: [f32; 3], r: f32) {
 }
 
 #[inline]
-fn vsub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn vsub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 #[inline]
-fn vcross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn vcross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
@@ -727,6 +1120,207 @@ fn shade(c: Rgb, f: f32) -> Rgb {
         (c[1] as f32 * f).clamp(0.0, 255.0) as u8,
         (c[2] as f32 * f).clamp(0.0, 255.0) as u8,
     ]
+}
+
+/// The shared geometry of the overlay panels — the legend and the crosshair
+/// readout — so the two never drift apart. Proportions come from the website
+/// hero's legend and are expressed against the text cell, so they hold at
+/// every render scale: roomy side padding, a swatch a little shorter than a
+/// line, and ~1.75 lines of leading between rows.
+#[derive(Clone, Copy)]
+struct PanelStyle {
+    /// Padding inside the box: `x` at the sides, `y` above and below the rows.
+    pad_x: i32,
+    pad_y: i32,
+    /// Swatch → label gap.
+    gap: i32,
+    /// Swatch side, and the baseline-to-baseline row pitch.
+    swatch: i32,
+    row_h: i32,
+    /// Row pitch minus the text cell: the air between two rows.
+    leading: i32,
+    /// Corner radius of the box, and the border width.
+    radius: f32,
+    stroke: f32,
+    /// How far the box sits from the edge it is anchored to — a touch more
+    /// horizontally, like the hero's 16px/12px.
+    inset: i32,
+    inset_x: i32,
+    /// Cap height for the stroke font, which takes over above scale 1.
+    cap_height: f32,
+}
+
+impl PanelStyle {
+    fn new(s: i32) -> Self {
+        let ch = CHAR_H * s;
+        let unit = |f: f32| (ch as f32 * f).round().max(1.0) as i32;
+        let row_h = unit(1.75);
+        Self {
+            pad_x: unit(1.2),
+            pad_y: unit(0.6),
+            gap: unit(0.75),
+            swatch: unit(0.75),
+            row_h,
+            leading: row_h - ch,
+            radius: ch as f32 * 0.42,
+            stroke: s as f32,
+            inset: unit(1.2),
+            inset_x: unit(1.5),
+            // At scale 1 the 5×7 bitmap font is the crispest thing there is;
+            // any larger, the Hershey stroke font renders smooth instead of
+            // blocky.
+            cap_height: ch as f32 - s as f32 * 0.5,
+        }
+    }
+
+    /// Box width and height for `rows` rows of `text_w`-wide labels. The last
+    /// row's leading is trimmed so the bottom padding matches the top.
+    fn box_size(&self, rows: i32, text_w: i32) -> (i32, i32) {
+        (
+            self.pad_x + self.swatch + self.gap + text_w + self.pad_x,
+            2 * self.pad_y + rows * self.row_h - self.leading,
+        )
+    }
+
+    /// Left edge of the label column, relative to the box's left edge.
+    fn text_dx(&self) -> i32 {
+        self.pad_x + self.swatch + self.gap
+    }
+
+    /// The rounded box itself.
+    fn frame(&self, fb: &mut Framebuffer, b: (i32, i32, i32, i32), z: f32, chrome: &Chrome) {
+        rounded_panel(fb, b.0, b.1, b.2, b.3, self.radius, self.stroke, z, chrome.bg, chrome.frame);
+    }
+
+    /// A series chip, centred on the text cell whose top-left is `(bx0, ey)`.
+    fn chip(&self, fb: &mut Framebuffer, bx0: i32, ey: i32, s: i32, z: f32, color: Rgb) {
+        let sy = ey + (CHAR_H * s - self.swatch + s) / 2;
+        let sx = bx0 + self.pad_x;
+        let r = (self.swatch as f32 * 0.22).max(1.0);
+        rounded_panel(
+            fb,
+            sx,
+            sy,
+            sx + self.swatch - 1,
+            sy + self.swatch - 1,
+            r,
+            0.0,
+            z,
+            color,
+            color,
+        );
+    }
+
+    /// Width of `text` at this panel's cap height.
+    fn measure(&self, text: &str) -> i32 {
+        text_width_at(text, self.cap_height)
+    }
+
+    /// One label, drawn against the panel's own opaque fill — the one place
+    /// text sits on a known background, so it can be antialiased.
+    #[allow(clippy::too_many_arguments)]
+    fn label(&self, fb: &mut Framebuffer, x: i32, y: i32, text: &str, z: f32, ink: Rgb, bg: Rgb) {
+        draw_text_at(fb, x, y, text, self.cap_height, z, ink, bg);
+    }
+}
+
+/// One legend row: the trace it stands for, its label and swatch colour, and
+/// whether that trace is currently drawn.
+struct LegendRow<'a> {
+    trace: usize,
+    name: &'a str,
+    color: Rgb,
+    visible: bool,
+}
+
+/// The legend's pixel box and the rows in it, for one render size. Built once
+/// and used by both the drawing pass and [`Plot::legend_hit`], so what is on
+/// screen and what a click resolves to can never disagree.
+struct LegendBox<'a> {
+    ps: PanelStyle,
+    bx0: i32,
+    by0: i32,
+    bx1: i32,
+    by1: i32,
+    rows: Vec<LegendRow<'a>>,
+}
+
+impl LegendBox<'_> {
+    /// The trace whose row covers `(px, py)`, if the point is in the box. The
+    /// whole row pitch counts, leading included, so the gaps between rows are
+    /// not dead zones for a mouse.
+    fn row_at(&self, px: f32, py: f32) -> Option<usize> {
+        let (x, y) = (px.round() as i32, py.round() as i32);
+        if x < self.bx0 || x > self.bx1 || y < self.by0 || y > self.by1 {
+            return None;
+        }
+        let from_first_row = y - (self.by0 + self.ps.pad_y);
+        let i = (from_first_row.max(0) / self.ps.row_h) as usize;
+        self.rows.get(i.min(self.rows.len() - 1)).map(|r| r.trace)
+    }
+}
+
+/// Pull a colour most of the way to `bg` — how a toggled-off legend row reads
+/// as off without leaving a hole where the row was.
+#[inline]
+fn fade(c: Rgb, bg: Rgb) -> Rgb {
+    const T: f32 = 0.62;
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * T).round() as u8;
+    [mix(c[0], bg[0]), mix(c[1], bg[1]), mix(c[2], bg[2])]
+}
+
+/// Drain a colour to its own luminance — series identity off, shape kept.
+#[inline]
+fn desaturate(c: Rgb) -> Rgb {
+    let y = (0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32).round() as u8;
+    [y, y, y]
+}
+
+/// A rounded rectangle over the inclusive pixel box, filled with `fill` and
+/// outlined by a `stroke`-wide border drawn *inside* the shape in `border`.
+/// The outer edge is antialiased against whatever is already on the buffer, so
+/// this belongs on top of finished geometry — the overlay panels and their
+/// colour chips, where a hard 90° corner is the one thing that reads as
+/// unfinished. Pass `border == fill` for a plain chip.
+#[allow(clippy::too_many_arguments)]
+fn rounded_panel(
+    fb: &mut Framebuffer,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    r: f32,
+    stroke: f32,
+    z: f32,
+    fill: Rgb,
+    border: Rgb,
+) {
+    let (x0, x1) = (x0.min(x1), x0.max(x1));
+    let (y0, y1) = (y0.min(y1), y0.max(y1));
+    // Pixel centres live at +0.5, so the shape spans [x0, x1 + 1].
+    let (cx, cy) = ((x0 + x1 + 1) as f32 * 0.5, (y0 + y1 + 1) as f32 * 0.5);
+    let (hx, hy) = ((x1 + 1 - x0) as f32 * 0.5, (y1 + 1 - y0) as f32 * 0.5);
+    let r = r.clamp(0.0, hx.min(hy));
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            // Signed distance to the rounded rect: negative inside.
+            let qx = (x as f32 + 0.5 - cx).abs() - (hx - r);
+            let qy = (y as f32 + 0.5 - cy).abs() - (hy - r);
+            let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+            let d = qx.max(qy).min(0.0) + outside - r;
+            let cov = (0.5 - d).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+            let edge = (d + stroke + 0.5).clamp(0.0, 1.0);
+            let c = [
+                (fill[0] as f32 + (border[0] as f32 - fill[0] as f32) * edge) as u8,
+                (fill[1] as f32 + (border[1] as f32 - fill[1] as f32) * edge) as u8,
+                (fill[2] as f32 + (border[2] as f32 - fill[2] as f32) * edge) as u8,
+            ];
+            fb.blend_px(x, y, z, c, cov);
+        }
+    }
 }
 
 /// Stroke a projected 3D segment with the given half-width, interpolating
@@ -867,6 +1461,22 @@ pub enum Trace {
         ys: Vec<f32>,
         color: Rgb,
         size: f32,
+        /// Per-point color override; falls back to `color` where absent.
+        /// Short lists pad rather than truncate the series, so a partial
+        /// mapping never silently drops points.
+        colors: Option<Vec<Rgb>>,
+        /// Per-point radius override, in the same units as `size`.
+        sizes: Option<Vec<f32>>,
+        /// Per-point marker silhouette; discs where absent. Shape is a second
+        /// channel alongside color, which is what lets a categorical scatter
+        /// stay readable in a colorblind-safe palette — or in a terminal
+        /// whose palette the user has themed out from under it.
+        shapes: Option<Vec<Shape>>,
+        /// Per-point uncertainty; see [`ErrBars`]. Set through
+        /// [`Plot::set_error_bars`] rather than at construction, so the
+        /// bindings' shared two-array add path stays intact.
+        err_x: Option<ErrBars>,
+        err_y: Option<ErrBars>,
         name: Option<String>,
         axis: YAxis,
     },
@@ -875,13 +1485,69 @@ pub enum Trace {
         ys: Vec<f32>,
         color: Rgb,
         width: f32,
+        /// How the stroke gets between samples; see [`Interp`].
+        interp: Interp,
+        /// Per-point uncertainty; see [`ErrBars`].
+        err_x: Option<ErrBars>,
+        err_y: Option<ErrBars>,
+        name: Option<String>,
+        axis: YAxis,
+    },
+    Box2d {
+        /// Every group's values, concatenated. Flat rather than nested so the
+        /// shape crosses the C ABI without a second level of indirection —
+        /// the same trick `Mesh3d`'s flat triangle indices use.
+        values: Vec<f32>,
+        /// Where each group starts in `values`; `group_starts[g]..
+        /// group_starts[g + 1]` is group `g`, with the last group running to
+        /// the end. CSR, in other words.
+        group_starts: Vec<u32>,
+        color: Rgb,
+        orient: Orient,
+        name: Option<String>,
+        axis: YAxis,
+    },
+    Band2d {
+        /// The sweep axis, shared by both boundaries.
+        xs: Vec<f32>,
+        /// The two boundaries at each x. Which is higher does not matter —
+        /// the fill is between them — so a band whose edges cross is drawn,
+        /// not rejected.
+        lo: Vec<f32>,
+        hi: Vec<f32>,
+        color: Rgb,
+        name: Option<String>,
+        axis: YAxis,
+    },
+    Heatmap2d {
+        /// Grid axes: `zs[j * xs.len() + i]` is the value at (xs[i], ys[j]) —
+        /// the same row-major shape [`Trace::Surface3d`] uses, so the two
+        /// share one validation rule in the bindings. A non-finite value is
+        /// a hole, the way a surface cell with a non-finite corner is.
+        xs: Vec<f32>,
+        ys: Vec<f32>,
+        zs: Vec<f32>,
+        colormap: Colormap,
+        name: Option<String>,
+    },
+    Histogram2d {
+        /// The raw sample, kept rather than pre-binned: it is what lets
+        /// `extend_values` stream new observations and rebin, and what lets
+        /// the crosshair report a bin's interval and count.
+        values: Vec<f32>,
+        bins: BinSpec,
+        color: Rgb,
         name: Option<String>,
         axis: YAxis,
     },
     Bar2d {
+        /// The category positions. With [`Orient::Horizontal`] these are y
+        /// coordinates, not x — the field keeps its name because it is still
+        /// the axis the bars are spaced along.
         xs: Vec<f32>,
         heights: Vec<f32>,
         color: Rgb,
+        orient: Orient,
         name: Option<String>,
         axis: YAxis,
     },
@@ -899,16 +1565,69 @@ pub enum Trace {
     },
 }
 
+/// The 3D variants as an or-pattern, for the 2D code paths that must name
+/// them explicitly rather than fall through a `_`.
+///
+/// Every 2D path below (axis binding, both bounds scans, both renderers, both
+/// crosshair passes) matches exhaustively on purpose: a new 2D trace that
+/// forgot one of them would compile and then silently contribute no extent,
+/// draw nothing, or ignore its y-axis binding. Spelling the 3D variants out
+/// once here is what turns each of those omissions into a compile error.
+/// A new *3D* variant belongs in this list — the same seven sites will point
+/// here until it is added.
+macro_rules! traces_3d {
+    () => {
+        Trace::Scatter3d { .. }
+            | Trace::Graph3d { .. }
+            | Trace::Line3d { .. }
+            | Trace::Surface3d { .. }
+            | Trace::Mesh3d { .. }
+    };
+}
+
 impl Trace {
-    fn is_3d(&self) -> bool {
-        matches!(
-            self,
+    /// Whether this trace lives in the 3D scene. One 3D trace switches the
+    /// whole plot to the orbit camera (see [`Plot::is_3d`]).
+    pub fn is_3d(&self) -> bool {
+        matches!(self, traces_3d!())
+    }
+
+    /// Why this trace cannot be appended to: its wire name and the reason its
+    /// shape is fixed, or `None` when it extends freely. Graphs, surfaces and
+    /// meshes qualify because indices or grid dimensions tie their arrays
+    /// together, so appending to one array alone would leave the trace
+    /// inconsistent.
+    ///
+    /// Core supplies the facts and the bindings phrase them, so the message a
+    /// user sees stays identical across Python, Go, C and JavaScript. The
+    /// match is exhaustive on purpose: a new structural trace that forgot this
+    /// would silently accept `extend` and corrupt itself.
+    pub fn structural_reason(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Trace::Graph3d { .. } => Some(("graph3d", "edges reference node indices")),
+            Trace::Surface3d { .. } => Some(("surface3d", "a fixed grid")),
+            Trace::Mesh3d { .. } => Some(("mesh3d", "triangles reference vertex indices")),
+            Trace::Heatmap2d { .. } => Some(("heatmap", "a fixed grid")),
+            Trace::Box2d { .. } => Some((
+                "box",
+                "its boxes are derived from grouped samples; rebuild the plot to change them",
+            )),
+            Trace::Histogram2d { .. } => {
+                Some(("histogram", "its bars are derived from a sample; append with extend_values"))
+            }
             Trace::Scatter3d { .. }
-                | Trace::Graph3d { .. }
-                | Trace::Line3d { .. }
-                | Trace::Surface3d { .. }
-                | Trace::Mesh3d { .. }
-        )
+            | Trace::Line3d { .. }
+            | Trace::Scatter2d { .. }
+            | Trace::Line2d { .. }
+            | Trace::Bar2d { .. }
+            | Trace::Band2d { .. } => None,
+        }
+    }
+
+    /// Whether [`Self::structural_reason`] applies — the trace must be rebuilt
+    /// rather than appended to.
+    pub fn is_structural(&self) -> bool {
+        self.structural_reason().is_some()
     }
 
     fn name(&self) -> Option<&str> {
@@ -920,6 +1639,10 @@ impl Trace {
             | Trace::Scatter2d { name, .. }
             | Trace::Line2d { name, .. }
             | Trace::Bar2d { name, .. }
+            | Trace::Histogram2d { name, .. }
+            | Trace::Heatmap2d { name, .. }
+            | Trace::Band2d { name, .. }
+            | Trace::Box2d { name, .. }
             | Trace::Mesh3d { name, .. } => name.as_deref(),
         }
     }
@@ -930,12 +1653,18 @@ impl Trace {
             | Trace::Line3d { color, .. }
             | Trace::Scatter2d { color, .. }
             | Trace::Line2d { color, .. }
-            | Trace::Bar2d { color, .. } => *color,
+            | Trace::Bar2d { color, .. }
+            | Trace::Histogram2d { color, .. }
+            | Trace::Band2d { color, .. }
+            | Trace::Box2d { color, .. } => *color,
             // A colormapped surface has no single color; its legend swatch is
             // a sample from the upper half of the ramp.
             Trace::Surface3d { color, colormap, .. } | Trace::Mesh3d { color, colormap, .. } => {
                 colormap.map_or(*color, |m| m.sample(0.75))
             }
+            // A colormapped grid has no single color; its legend swatch is a
+            // sample from the upper half of the ramp, as surfaces do.
+            Trace::Heatmap2d { colormap, .. } => colormap.sample(0.75),
             Trace::Graph3d { node_colors, .. } => {
                 node_colors.first().copied().unwrap_or([120, 180, 230])
             }
@@ -946,8 +1675,14 @@ impl Trace {
         match self {
             Trace::Scatter2d { axis, .. }
             | Trace::Line2d { axis, .. }
-            | Trace::Bar2d { axis, .. } => *axis,
-            _ => YAxis::Primary,
+            | Trace::Bar2d { axis, .. }
+            | Trace::Histogram2d { axis, .. }
+            | Trace::Band2d { axis, .. }
+            | Trace::Box2d { axis, .. } => *axis,
+            // A grid spans both axes itself; binding it to a second y scale
+            // would ask which of two scales its rows are measured against.
+            Trace::Heatmap2d { .. } => YAxis::Primary,
+            traces_3d!() => YAxis::Primary,
         }
     }
 }
@@ -1043,16 +1778,135 @@ impl std::fmt::Display for TraceError {
     }
 }
 
-/// Cached raw (unpadded) extent of one trace, in the same terms the full
-/// scans use: [`CachedBounds::B2`] mirrors `bounds_2d`'s per-point rule (a
-/// point counts only when both coordinates are finite; bars contribute
-/// `x ± hw` and `h.min(0) / h.max(0)`), [`CachedBounds::B3`] mirrors
-/// `extent_points` (scatter/graph vertices unfiltered, line/surface vertices
-/// finite-only). Empty traces keep the infinite sentinels, which are the
-/// identity of the min/max union.
+/// Half the spacing of a grid axis: the smallest positive gap between
+/// consecutive coordinates, halved, so neighbouring cells meet without
+/// overlapping. Mirrors [`bar_halfwidth`]'s rule, and its fallback for a
+/// single coordinate.
+fn grid_half_step(vs: &[f32]) -> f64 {
+    let mut gap = f64::INFINITY;
+    for w in vs.windows(2) {
+        let d = (w[1] - w[0]).abs() as f64;
+        if d > 0.0 {
+            gap = gap.min(d);
+        }
+    }
+    if gap.is_finite() {
+        gap * 0.5
+    } else {
+        0.5
+    }
+}
+
+/// How a histogram chooses its bins.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BinSpec {
+    /// Exactly this many bins across the data's range.
+    Count(usize),
+    /// Bins of this width, starting at the smallest value.
+    Width(f64),
+    /// Freedman–Diaconis (`2·IQR/n^⅓`), which adapts to spread rather than
+    /// to count, falling back to Sturges when the IQR is zero — as it is for
+    /// heavily tied data, where FD would ask for infinitely many bins.
+    Auto,
+}
+
+/// The most bins any rule may ask for. A terminal plot has a few hundred
+/// pixels of width; past this the bars are thinner than a pixel and the
+/// histogram stops being readable before it stops being correct.
+const MAX_BINS: usize = 200;
+
+/// A histogram's solved bins: uniform `width` from `lo`, one count each.
+#[derive(Clone, Debug, PartialEq)]
+struct Bins {
+    lo: f64,
+    width: f64,
+    counts: Vec<u32>,
+}
+
+impl Bins {
+    /// The half-open interval `[lo, hi)` of bin `i`.
+    fn edges(&self, i: usize) -> (f64, f64) {
+        (self.lo + i as f64 * self.width, self.lo + (i + 1) as f64 * self.width)
+    }
+
+    fn center(&self, i: usize) -> f64 {
+        self.lo + (i as f64 + 0.5) * self.width
+    }
+
+    fn hi(&self) -> f64 {
+        self.lo + self.counts.len() as f64 * self.width
+    }
+}
+
+/// Bin a sample into counts. Non-finite values are dropped, the way a
+/// non-finite coordinate drops a point elsewhere; the largest value lands in
+/// the last bin rather than falling off the end of the half-open interval.
+fn bin_values(values: &[f32], spec: BinSpec) -> Bins {
+    let mut v: Vec<f64> = values.iter().map(|&x| x as f64).filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return Bins { lo: 0.0, width: 1.0, counts: Vec::new() };
+    }
+    v.sort_by(f64::total_cmp);
+    let (min, max) = (v[0], v[v.len() - 1]);
+    let span = max - min;
+    let n = v.len();
+    let k = match spec {
+        BinSpec::Count(k) => k.clamp(1, MAX_BINS),
+        BinSpec::Width(w) if w > 0.0 && span > 0.0 => {
+            ((span / w).ceil() as usize).clamp(1, MAX_BINS)
+        }
+        BinSpec::Width(_) => 1,
+        BinSpec::Auto => {
+            let q = |p: f64| v[(((n - 1) as f64) * p).round() as usize];
+            let iqr = q(0.75) - q(0.25);
+            let fd = 2.0 * iqr / (n as f64).cbrt();
+            if fd > 0.0 && span > 0.0 {
+                ((span / fd).ceil() as usize).clamp(1, MAX_BINS)
+            } else {
+                ((n as f64).log2().ceil() as usize + 1).clamp(1, MAX_BINS)
+            }
+        }
+    };
+    // An explicit width is honoured exactly; the other rules divide the span.
+    let width = match spec {
+        BinSpec::Width(w) if w > 0.0 => w,
+        _ if span > 0.0 => span / k as f64,
+        _ => 1.0,
+    };
+    let mut counts = vec![0u32; k];
+    for x in v {
+        let i = ((x - min) / width).floor();
+        let i = if i < 0.0 { 0 } else { (i as usize).min(k - 1) };
+        counts[i] += 1;
+    }
+    Bins { lo: min, width, counts }
+}
+
+/// Cached raw extent of one trace, in the same terms the full scans use:
+/// [`CachedBounds::B2`] mirrors `bounds_2d`'s per-point rule (a point counts
+/// only when both coordinates are finite; bars contribute `x ± hw` and
+/// `h.min(0) / h.max(0)`), [`CachedBounds::B3`] mirrors `extent_points`
+/// (scatter/graph vertices unfiltered, line/surface vertices finite-only).
+/// Empty traces keep the infinite sentinels, which are the identity of the
+/// min/max union.
 enum CachedBounds {
-    B2 { xlo: f64, xhi: f64, ylo: f64, yhi: f64, hw: Option<f64> },
-    B3 { lo: [f32; 3], hi: [f32; 3] },
+    /// `pad` is the `(x, y)` half-extent already folded into the box for a
+    /// trace whose marks are wider than their sample point — a bar's shared
+    /// half-width, later a grid cell's half-size on each axis. It is kept
+    /// rather than recomputed so the renderer reads back exactly the number
+    /// the range was built from and the two can never disagree; `None` is a
+    /// trace whose extent is its points.
+    B2 {
+        xlo: f64,
+        xhi: f64,
+        ylo: f64,
+        yhi: f64,
+        pad: Option<(f64, f64)>,
+    },
+    B3 {
+        lo: [f32; 3],
+        hi: [f32; 3],
+    },
 }
 
 /// Per-trace bookkeeping kept parallel to [`Plot::traces`]: visibility plus
@@ -1061,48 +1915,206 @@ enum CachedBounds {
 /// methods; consumers fall back to the full scans whenever `meta` has fallen
 /// out of sync with a directly-mutated `traces` field.
 struct TraceMeta {
+    /// The host's own show/hide ([`Plot::set_visible`]): a trace switched off
+    /// this way is gone from the plot entirely, legend row included.
     visible: bool,
+    /// Toggled off from the legend ([`Plot::toggle_muted`]): the geometry
+    /// goes, but the row stays — greyed out, and it is the way back on.
+    muted: bool,
     /// Pickable nodes this trace contributes to the flat node index space.
     node_len: usize,
     /// Vertices this trace contributes to `vertex_count` (extent rule).
     vert_len: usize,
     bounds: CachedBounds,
+    /// A histogram's solved bins, cached with the same discipline as
+    /// `CachedBounds`: the renderer reads back exactly the bins the bounds
+    /// were computed from, so bars and axis can never disagree. `None` for
+    /// every other trace, and whenever the cache is stale.
+    bins: Option<Bins>,
 }
 
 /// One full scan of a trace, replicating exactly what `bounds_2d` /
 /// `extent_points` would see for it.
 fn compute_meta(t: &Trace) -> TraceMeta {
     match t {
-        Trace::Scatter2d { xs, ys, .. } | Trace::Line2d { xs, ys, .. } => {
+        Trace::Scatter2d { xs, ys, err_x, err_y, .. }
+        | Trace::Line2d { xs, ys, err_x, err_y, .. } => {
             let mut b = b2_empty(None);
             b2_seen_xy(&mut b, xs, ys, 0);
-            TraceMeta { visible: true, node_len: 0, vert_len: 0, bounds: b }
+            b2_seen_errors(&mut b, xs, ys, err_x.as_ref(), err_y.as_ref());
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: 0,
+                bounds: b,
+                bins: None,
+            }
         }
-        Trace::Bar2d { xs, heights, .. } => {
+        Trace::Box2d { values, group_starts, orient, .. } => {
+            // A box is centred on its group index and half a slot wide, so the
+            // category axis pads like a bar; the value axis spans whiskers and
+            // outliers alike — an outlier off the edge of the frame would be
+            // the one point you most needed to see.
+            let hw = BOX_HALF_WIDTH;
+            let pad = if orient.is_horizontal() { (0.0, hw) } else { (hw, 0.0) };
+            let mut b = b2_empty(Some(pad));
+            if let CachedBounds::B2 { xlo, xhi, ylo, yhi, .. } = &mut b {
+                for (g, group) in box_groups(values, group_starts).enumerate() {
+                    let Some(st) = box_stats(group) else { continue };
+                    let cat = g as f64;
+                    let mut val_lo = st.lo.min(st.q1);
+                    let mut val_hi = st.hi.max(st.q3);
+                    for o in &st.outliers {
+                        val_lo = val_lo.min(*o);
+                        val_hi = val_hi.max(*o);
+                    }
+                    let ((a0, a1), (b0, b1)) = if orient.is_horizontal() {
+                        ((val_lo, val_hi), (cat - hw, cat + hw))
+                    } else {
+                        ((cat - hw, cat + hw), (val_lo, val_hi))
+                    };
+                    *xlo = xlo.min(a0);
+                    *xhi = xhi.max(a1);
+                    *ylo = ylo.min(b0);
+                    *yhi = yhi.max(b1);
+                }
+            }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: 0,
+                bounds: b,
+                bins: None,
+            }
+        }
+        Trace::Band2d { xs, lo, hi, .. } => {
+            let mut b = b2_empty(None);
+            // Both boundaries are folded in, so the axis fits the whole
+            // ribbon rather than one of its edges.
+            b2_seen_xy(&mut b, xs, lo, 0);
+            b2_seen_xy(&mut b, xs, hi, 0);
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: 0,
+                bounds: b,
+                bins: None,
+            }
+        }
+        Trace::Heatmap2d { xs, ys, zs, .. } => {
+            // Cells are centred on their grid coordinates, so the drawn extent
+            // reaches half a cell beyond the outermost centres on both axes —
+            // the two-axis generalisation of a bar's half-width.
+            let (hx, hy) = (grid_half_step(xs), grid_half_step(ys));
+            let mut b = b2_empty(Some((hx, hy)));
+            if let CachedBounds::B2 { xlo, xhi, ylo, yhi, .. } = &mut b {
+                for (j, &y) in ys.iter().enumerate() {
+                    for (i, &x) in xs.iter().enumerate() {
+                        let v = zs.get(j * xs.len() + i).copied().unwrap_or(f32::NAN);
+                        if x.is_finite() && y.is_finite() && v.is_finite() {
+                            *xlo = xlo.min(x as f64 - hx);
+                            *xhi = xhi.max(x as f64 + hx);
+                            *ylo = ylo.min(y as f64 - hy);
+                            *yhi = yhi.max(y as f64 + hy);
+                        }
+                    }
+                }
+            }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: 0,
+                bounds: b,
+                bins: None,
+            }
+        }
+        Trace::Histogram2d { values, bins, .. } => {
+            let b = bin_values(values, *bins);
+            // The bars tile the range edge to edge, so the extent is the outer
+            // edges themselves — no half-width to pad by — and y runs from the
+            // zero baseline to the tallest bin.
+            let top = b.counts.iter().copied().max().unwrap_or(0) as f64;
+            let bounds = if b.counts.is_empty() {
+                b2_empty(None)
+            } else {
+                CachedBounds::B2 { xlo: b.lo, xhi: b.hi(), ylo: 0.0, yhi: top, pad: None }
+            };
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: 0,
+                bounds,
+                bins: Some(b),
+            }
+        }
+        Trace::Bar2d { xs, heights, orient, .. } => {
             let hw = bar_halfwidth(xs) as f64;
-            let mut b = b2_empty(Some(hw));
-            b2_seen_bars(&mut b, xs, heights, 0, hw);
-            TraceMeta { visible: true, node_len: 0, vert_len: 0, bounds: b }
+            // Bars widen along their category axis only; along the value axis
+            // they span the baseline to the height.
+            let pad = if orient.is_horizontal() { (0.0, hw) } else { (hw, 0.0) };
+            let mut b = b2_empty(Some(pad));
+            b2_seen_bars(&mut b, xs, heights, 0, hw, *orient);
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: 0,
+                bounds: b,
+                bins: None,
+            }
         }
         Trace::Scatter3d { pts, .. } => {
             let mut b = b3_empty();
             b3_seen_all(&mut b, pts);
-            TraceMeta { visible: true, node_len: pts.len(), vert_len: pts.len(), bounds: b }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: pts.len(),
+                vert_len: pts.len(),
+                bounds: b,
+                bins: None,
+            }
         }
         Trace::Graph3d { nodes, .. } => {
             let mut b = b3_empty();
             b3_seen_all(&mut b, nodes);
-            TraceMeta { visible: true, node_len: nodes.len(), vert_len: nodes.len(), bounds: b }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: nodes.len(),
+                vert_len: nodes.len(),
+                bounds: b,
+                bins: None,
+            }
         }
         Trace::Line3d { pts, .. } => {
             let mut b = b3_empty();
             let n = b3_seen_finite(&mut b, pts);
-            TraceMeta { visible: true, node_len: 0, vert_len: n, bounds: b }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: n,
+                bounds: b,
+                bins: None,
+            }
         }
         Trace::Mesh3d { verts, .. } => {
             let mut b = b3_empty();
             let n = b3_seen_finite(&mut b, verts);
-            TraceMeta { visible: true, node_len: 0, vert_len: n, bounds: b }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: n,
+                bounds: b,
+                bins: None,
+            }
         }
         Trace::Surface3d { xs, ys, zs, .. } => {
             let mut b = b3_empty();
@@ -1119,18 +2131,25 @@ fn compute_meta(t: &Trace) -> TraceMeta {
                     }
                 }
             }
-            TraceMeta { visible: true, node_len: 0, vert_len: n, bounds: b }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: 0,
+                vert_len: n,
+                bounds: b,
+                bins: None,
+            }
         }
     }
 }
 
-fn b2_empty(hw: Option<f64>) -> CachedBounds {
+fn b2_empty(pad: Option<(f64, f64)>) -> CachedBounds {
     CachedBounds::B2 {
         xlo: f64::INFINITY,
         xhi: f64::NEG_INFINITY,
         ylo: f64::INFINITY,
         yhi: f64::NEG_INFINITY,
-        hw,
+        pad,
     }
 }
 
@@ -1153,19 +2172,96 @@ fn b2_seen_xy(b: &mut CachedBounds, xs: &[f32], ys: &[f32], from: usize) {
     }
 }
 
+/// Draw one point's error bars: a spine through the point and a cap at each
+/// end. Caps are what make a bar read as an interval rather than as a stray
+/// line through the mark, so they are not decoration.
+#[allow(clippy::too_many_arguments)]
+fn draw_error_bars(
+    fb: &mut Framebuffer,
+    m: &Map2d,
+    x: f64,
+    y: f64,
+    err_x: Option<(f64, f64)>,
+    err_y: Option<(f64, f64)>,
+    s: i32,
+    c: Rgb,
+) {
+    let cap = (2 * s).max(2);
+    let (px, py) = (m.sx(x).round() as i32, m.sy(y).round() as i32);
+    if let Some((down, up)) = err_y {
+        let (a, b) = (m.sy(y + up).round() as i32, m.sy(y - down).round() as i32);
+        fb.rect_fill(px, a, px, b, 0.0, c);
+        fb.rect_fill(px - cap, a, px + cap, a, 0.0, c);
+        fb.rect_fill(px - cap, b, px + cap, b, 0.0, c);
+    }
+    if let Some((down, up)) = err_x {
+        let (a, b) = (m.sx(x - down).round() as i32, m.sx(x + up).round() as i32);
+        fb.rect_fill(a, py, b, py, 0.0, c);
+        fb.rect_fill(a, py - cap, a, py + cap, 0.0, c);
+        fb.rect_fill(b, py - cap, b, py + cap, 0.0, c);
+    }
+}
+
+/// Widen a `B2` by each point's error bars. Bars reach past the point they
+/// qualify, so an axis sized to the points alone would clip their caps.
+fn b2_seen_errors(
+    b: &mut CachedBounds,
+    xs: &[f32],
+    ys: &[f32],
+    err_x: Option<&ErrBars>,
+    err_y: Option<&ErrBars>,
+) {
+    if err_x.is_none() && err_y.is_none() {
+        return;
+    }
+    let CachedBounds::B2 { xlo, xhi, ylo, yhi, .. } = b else { return };
+    for i in 0..xs.len().min(ys.len()) {
+        let (x, y) = (xs[i] as f64, ys[i] as f64);
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        if let Some((down, up)) = err_x.and_then(|e| e.at(i)) {
+            *xlo = xlo.min(x - down);
+            *xhi = xhi.max(x + up);
+        }
+        if let Some((down, up)) = err_y.and_then(|e| e.at(i)) {
+            *ylo = ylo.min(y - down);
+            *yhi = yhi.max(y + up);
+        }
+    }
+}
+
 /// Fold bar extents from index `from` into a `B2`: `x ± hw` on x, the span
 /// from the zero baseline to `h` on y — the same contributions `bounds_2d`
 /// makes for bars.
-fn b2_seen_bars(b: &mut CachedBounds, xs: &[f32], heights: &[f32], from: usize, hw: f64) {
+fn b2_seen_bars(
+    b: &mut CachedBounds,
+    xs: &[f32],
+    heights: &[f32],
+    from: usize,
+    hw: f64,
+    orient: Orient,
+) {
     let CachedBounds::B2 { xlo, xhi, ylo, yhi, .. } = b else { return };
     for i in from..xs.len().min(heights.len()) {
         let (x, h) = (xs[i] as f64, heights[i] as f64);
-        if x.is_finite() && h.is_finite() {
-            *xlo = xlo.min(x - hw);
-            *xhi = xhi.max(x + hw);
-            *ylo = ylo.min(h.min(0.0));
-            *yhi = yhi.max(h.max(0.0));
+        if !x.is_finite() || !h.is_finite() {
+            continue;
         }
+        // The category axis carries the half-width; the value axis spans the
+        // zero baseline to the height. Which axis is which is the whole of
+        // the orientation.
+        let (cat_lo, cat_hi) = (x - hw, x + hw);
+        let (val_lo, val_hi) = (h.min(0.0), h.max(0.0));
+        let ((a_lo, a_hi), (b_lo, b_hi)) = if orient.is_horizontal() {
+            ((val_lo, val_hi), (cat_lo, cat_hi))
+        } else {
+            ((cat_lo, cat_hi), (val_lo, val_hi))
+        };
+        *xlo = xlo.min(a_lo);
+        *xhi = xhi.max(a_hi);
+        *ylo = ylo.min(b_lo);
+        *yhi = yhi.max(b_hi);
     }
 }
 
@@ -1246,6 +2342,27 @@ pub struct Plot {
     /// second-accurate for years.
     pub x_epoch: Option<f64>,
     /// Axis/grid/legend colours; see [`Chrome`].
+    /// Names for a categorical x axis: category `i` sits at position `i`, and
+    /// ticks become one label per category rather than a numeric ladder.
+    /// Supplying names does not move the range — traces still place
+    /// themselves, so a series plotted at 0, 1, 2 lines up with the first
+    /// three names and a category nothing was plotted at simply falls outside
+    /// the view. Takes precedence over [`Self::x_epoch`]: an axis of names is
+    /// not a calendar.
+    pub x_categories: Option<Vec<String>>,
+    /// Names for a categorical primary y axis; the y counterpart of
+    /// [`Self::x_categories`], for the sideways charts (horizontal bars,
+    /// box-by-group, timelines). The right-hand axes stay numeric — they exist
+    /// to carry a second *scale*, which a list of names has no notion of.
+    pub y_categories: Option<Vec<String>>,
+    /// The colormap legend beside the plot; `None` draws none. Set by whoever
+    /// owns the mapping — a heatmap knows its own value range, and a
+    /// colormapped scatter knows the range it binned its colors over — so the
+    /// core never has to guess which trace the ramp belongs to.
+    /// How several bar traces on one axis share their positions; see
+    /// [`BarMode`]. The default keeps plotui's original overlay behaviour.
+    pub barmode: BarMode,
+    pub colorbar: Option<Colorbar>,
     pub chrome: Chrome,
     /// Per-trace visibility + incremental bounds cache, parallel to `traces`.
     /// Private on purpose: it is maintained by the mutating methods, and every
@@ -1274,6 +2391,10 @@ impl Default for Plot {
             x_window: None,
             range_slider: false,
             x_epoch: None,
+            x_categories: None,
+            barmode: BarMode::default(),
+            colorbar: None,
+            y_categories: None,
             chrome: Chrome::default(),
             meta: Vec::new(),
             colorway: COLORWAY_PLOTUI.to_vec(),
@@ -1309,9 +2430,17 @@ impl Plot {
         self.meta.len() == self.traces.len()
     }
 
-    /// Desync-safe visibility: a trace the cache does not know about yet is
-    /// treated as visible.
+    /// Desync-safe visibility — is this trace drawn? A trace the cache does
+    /// not know about yet is treated as visible. Muting hides the geometry
+    /// exactly like hiding does; the two differ only in the legend.
     fn is_visible(&self, i: usize) -> bool {
+        self.meta.get(i).is_none_or(|m| m.visible && !m.muted)
+    }
+
+    /// Does this trace get a legend row? Host-hidden traces do not exist as
+    /// far as the chrome is concerned; muted ones keep their row so there is
+    /// something to click to bring them back.
+    fn in_legend(&self, i: usize) -> bool {
         self.meta.get(i).is_none_or(|m| m.visible)
     }
 
@@ -1425,9 +2554,9 @@ impl Plot {
                 self.meta[id].visible = visible;
                 Ok(())
             }
-            Trace::Graph3d { .. } | Trace::Surface3d { .. } | Trace::Mesh3d { .. } => {
-                Err(TraceError::Structural)
-            }
+            // Structural kinds are named once, on the trace itself, so this
+            // path cannot drift from what the bindings report.
+            t if t.is_structural() => Err(TraceError::Structural),
             _ => Err(TraceError::WrongKind),
         }
     }
@@ -1602,6 +2731,57 @@ impl Plot {
         Ok(changed)
     }
 
+    /// Hide or show a trace *from the legend*, keeping its row on screen —
+    /// greyed out while muted, so a click can bring it back. Returns whether
+    /// the trace is now shown.
+    ///
+    /// This is deliberately not [`Self::set_visible`]: that one takes a trace
+    /// out of the plot completely, legend row and all, which is what a host
+    /// staging a reveal or filtering a stream wants. Muting is what a viewer
+    /// clicking the legend wants.
+    pub fn set_muted(&mut self, id: TraceId, muted: bool) -> Result<bool, TraceError> {
+        self.resync_meta();
+        let m = self.meta.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        m.muted = muted;
+        Ok(!m.muted)
+    }
+
+    /// Flip [`Self::set_muted`], returning whether the trace is now shown.
+    pub fn toggle_muted(&mut self, id: TraceId) -> Result<bool, TraceError> {
+        self.resync_meta();
+        let m = self.meta.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        m.muted = !m.muted;
+        Ok(!m.muted)
+    }
+
+    /// The trace whose legend row covers `(px, py)` in a render of this size,
+    /// if any — the hook for a clickable legend. Hidden traces keep their row,
+    /// so this is how a host offers show/hide:
+    ///
+    /// ```no_run
+    /// # use plotui_core::Plot;
+    /// # let (mut plot, w, h, x, y) = (Plot::new(), 800, 600, 0.0, 0.0);
+    /// if let Some(id) = plot.legend_hit(w, h, x, y) {
+    ///     plot.toggle_muted(id).ok();
+    /// }
+    /// ```
+    pub fn legend_hit(&self, px_w: usize, px_h: usize, px: f32, py: f32) -> Option<TraceId> {
+        let (x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
+        self.legend_box(x1, y0, s, three_d)?.row_at(px, py)
+    }
+
+    /// Just the legend, drawn into an otherwise transparent framebuffer of
+    /// this size. For hosts that drop resolution during interaction (see
+    /// [`Self::render_at`]): render the geometry small, scale it up, then
+    /// composite this on top, and the legend stays pixel-identical instead of
+    /// changing font and weight the moment a drag starts.
+    pub fn render_legend_overlay(&self, px_w: usize, px_h: usize) -> Framebuffer {
+        let mut fb = Framebuffer::new(px_w, px_h);
+        let (x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
+        self.draw_legend(&mut fb, 0, y0, x1, s, 0.0, three_d);
+        fb
+    }
+
     /// Project every node (flat-index order, same list as [`Self::pick`])
     /// through the exact projector `render` uses. Returns screen-space
     /// `[x_px, y_px, depth]` per node — the hook for frontends that overlay
@@ -1642,7 +2822,73 @@ impl Plot {
         name: Option<String>,
         axis: YAxis,
     ) -> TraceId {
-        self.push_trace(Trace::Scatter2d { xs, ys, color, size, name, axis })
+        self.push_trace(Trace::Scatter2d {
+            xs,
+            ys,
+            color,
+            size,
+            colors: None,
+            sizes: None,
+            shapes: None,
+            err_x: None,
+            err_y: None,
+            name,
+            axis,
+        })
+    }
+
+    /// [`add_scatter2d`](Self::add_scatter2d) with per-point styling. Each
+    /// array is optional and independent: give colors alone for a categorical
+    /// or colormapped cloud, sizes alone for a bubble chart, shapes alone for
+    /// a palette-free encoding, or any combination. An array shorter than the
+    /// series falls back to the uniform value for the remaining points.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_scatter2d_styled(
+        &mut self,
+        xs: Vec<f32>,
+        ys: Vec<f32>,
+        color: Rgb,
+        size: f32,
+        colors: Option<Vec<Rgb>>,
+        sizes: Option<Vec<f32>>,
+        shapes: Option<Vec<Shape>>,
+        name: Option<String>,
+        axis: YAxis,
+    ) -> TraceId {
+        self.push_trace(Trace::Scatter2d {
+            xs,
+            ys,
+            color,
+            size,
+            colors,
+            sizes,
+            shapes,
+            err_x: None,
+            err_y: None,
+            name,
+            axis,
+        })
+    }
+
+    /// Replace a scatter's per-point styling in place; `None` clears an array
+    /// back to the trace's uniform value. The bindings set styling through
+    /// this rather than through wider constructors, so the shared two-array
+    /// `add_2d` path stays intact across the C ABI and Go.
+    pub fn set_point_styles(
+        &mut self,
+        id: TraceId,
+        colors: Option<Vec<Rgb>>,
+        sizes: Option<Vec<f32>>,
+        shapes: Option<Vec<Shape>>,
+    ) -> Result<(), TraceError> {
+        self.resync_meta();
+        match self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)? {
+            Trace::Scatter2d { colors: c, sizes: sz, shapes: sh, .. } => {
+                (*c, *sz, *sh) = (colors, sizes, shapes);
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
     }
 
     pub fn add_line2d(
@@ -1654,7 +2900,184 @@ impl Plot {
         name: Option<String>,
         axis: YAxis,
     ) -> TraceId {
-        self.push_trace(Trace::Line2d { xs, ys, color, width, name, axis })
+        self.push_trace(Trace::Line2d {
+            xs,
+            ys,
+            color,
+            width,
+            interp: Interp::Linear,
+            err_x: None,
+            err_y: None,
+            name,
+            axis,
+        })
+    }
+
+    /// [`add_line2d`](Self::add_line2d) drawn as a step function. Use it for
+    /// any series that holds its value between samples — counters, states,
+    /// prices — where a straight segment would draw a transition that never
+    /// happened.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_step2d(
+        &mut self,
+        xs: Vec<f32>,
+        ys: Vec<f32>,
+        color: Rgb,
+        width: f32,
+        interp: Interp,
+        name: Option<String>,
+        axis: YAxis,
+    ) -> TraceId {
+        self.push_trace(Trace::Line2d {
+            xs,
+            ys,
+            color,
+            width,
+            interp,
+            err_x: None,
+            err_y: None,
+            name,
+            axis,
+        })
+    }
+
+    /// Add a box plot: `values` is every group's sample concatenated, and
+    /// `group_starts[g]` is where group `g` begins in it (CSR). Group `g` sits
+    /// at position `g`, so [`Plot::x_categories`] (or `y_categories` when
+    /// horizontal) names the boxes.
+    ///
+    /// Boxes span the quartiles with a median line; whiskers reach the
+    /// furthest values within 1.5·IQR, and anything beyond is drawn as its own
+    /// point rather than being swallowed by a longer whisker.
+    pub fn add_box2d(
+        &mut self,
+        values: Vec<f32>,
+        group_starts: Vec<u32>,
+        color: Rgb,
+        orient: Orient,
+        name: Option<String>,
+        axis: YAxis,
+    ) -> TraceId {
+        self.push_trace(Trace::Box2d { values, group_starts, color, orient, name, axis })
+    }
+
+    /// Add a filled band between two boundaries at each x — a confidence
+    /// interval, a min/max envelope, a tolerance range.
+    ///
+    /// Add it *before* the line it belongs to: 2D draw order is the only
+    /// layering there is, so a band added afterwards would paint over its own
+    /// centre line.
+    pub fn add_band2d(
+        &mut self,
+        xs: Vec<f32>,
+        lo: Vec<f32>,
+        hi: Vec<f32>,
+        color: Rgb,
+        name: Option<String>,
+        axis: YAxis,
+    ) -> TraceId {
+        self.push_trace(Trace::Band2d { xs, lo, hi, color, name, axis })
+    }
+
+    /// Attach per-point uncertainty to a 2D scatter or line; `None` clears an
+    /// axis's bars.
+    ///
+    /// Error bars belong to a series rather than being a series of their own:
+    /// they take its color, they stay out of the legend, and they cannot drift
+    /// out of step with the points they qualify.
+    pub fn set_error_bars(
+        &mut self,
+        id: TraceId,
+        err_x: Option<ErrBars>,
+        err_y: Option<ErrBars>,
+    ) -> Result<(), TraceError> {
+        self.resync_meta();
+        match self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)? {
+            Trace::Scatter2d { err_x: ex, err_y: ey, .. }
+            | Trace::Line2d { err_x: ex, err_y: ey, .. } => {
+                (*ex, *ey) = (err_x, err_y);
+                // The bars reach past the points, so the range must grow with
+                // them: rebuild this trace's cached box.
+                let (visible, muted) = (self.meta[id].visible, self.meta[id].muted);
+                self.meta[id] = compute_meta(&self.traces[id]);
+                self.meta[id].visible = visible;
+                self.meta[id].muted = muted;
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
+    /// Add a heatmap: a grid of cells coloured by value, where
+    /// `zs[j * xs.len() + i]` is the value at `(xs[i], ys[j])` — the same
+    /// row-major shape [`add_surface3d`](Self::add_surface3d) takes, so both
+    /// share one validation rule in the bindings. Cells are centred on their
+    /// coordinates and tile outward by half a step, so a regular grid meets
+    /// edge to edge. A non-finite value leaves a hole rather than a zero.
+    ///
+    /// The ramp spans the grid's own finite range. Set [`Plot::colorbar`] to
+    /// say what it means — a heatmap without one shows structure but no
+    /// values.
+    pub fn add_heatmap2d(
+        &mut self,
+        xs: Vec<f32>,
+        ys: Vec<f32>,
+        zs: Vec<f32>,
+        colormap: Colormap,
+        name: Option<String>,
+    ) -> TraceId {
+        self.push_trace(Trace::Heatmap2d { xs, ys, zs, colormap, name })
+    }
+
+    /// The finite value range of a heatmap trace, for sizing a colorbar
+    /// against exactly what the ramp was normalized over. `None` when the
+    /// trace is not a heatmap or has no finite values.
+    pub fn heatmap_range(&self, id: TraceId) -> Option<(f64, f64)> {
+        let Some(Trace::Heatmap2d { zs, .. }) = self.traces.get(id) else { return None };
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for v in zs.iter().filter(|v| v.is_finite()) {
+            lo = lo.min(*v as f64);
+            hi = hi.max(*v as f64);
+        }
+        lo.is_finite().then_some((lo, hi))
+    }
+
+    /// Add a histogram of `values`: the sample is binned and drawn as
+    /// touching bars. The raw values are kept, so [`extend_values`] can add
+    /// observations later and the crosshair can report a bin's interval and
+    /// count.
+    ///
+    /// Bins are solved once from the whole sample and do not change with
+    /// zoom. That is deliberate: bin edges that shifted while panning would
+    /// change the shape of the distribution under the reader's hands, which
+    /// is a different chart, not a closer look at the same one.
+    pub fn add_histogram2d(
+        &mut self,
+        values: Vec<f32>,
+        bins: BinSpec,
+        color: Rgb,
+        name: Option<String>,
+        axis: YAxis,
+    ) -> TraceId {
+        self.push_trace(Trace::Histogram2d { values, bins, color, name, axis })
+    }
+
+    /// Append observations to a histogram and rebin. Unlike the coordinate
+    /// traces this cannot be an O(delta) update: one new value can move the
+    /// range, and every bin edge with it.
+    pub fn extend_values(&mut self, id: TraceId, values: &[f32]) -> Result<(), TraceError> {
+        self.resync_meta();
+        match self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)? {
+            Trace::Histogram2d { values: v, .. } => {
+                v.extend_from_slice(values);
+                let (visible, muted) = (self.meta[id].visible, self.meta[id].muted);
+                self.meta[id] = compute_meta(&self.traces[id]);
+                self.meta[id].visible = visible;
+                self.meta[id].muted = muted;
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
     }
 
     pub fn add_bar2d(
@@ -1665,7 +3088,24 @@ impl Plot {
         name: Option<String>,
         axis: YAxis,
     ) -> TraceId {
-        self.push_trace(Trace::Bar2d { xs, heights, color, name, axis })
+        self.push_trace(Trace::Bar2d { xs, heights, color, orient: Orient::Vertical, name, axis })
+    }
+
+    /// [`add_bar2d`](Self::add_bar2d) with an explicit orientation. A
+    /// horizontal bar swaps the roles of the two axes: `xs` are y positions,
+    /// `heights` run along x, and the baseline is a vertical line at zero.
+    /// Pair it with [`Plot::y_categories`] to label the rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_bar2d_oriented(
+        &mut self,
+        xs: Vec<f32>,
+        heights: Vec<f32>,
+        color: Rgb,
+        orient: Orient,
+        name: Option<String>,
+        axis: YAxis,
+    ) -> TraceId {
+        self.push_trace(Trace::Bar2d { xs, heights, color, orient, name, axis })
     }
 
     /// The tick-label tint for right axis `k`: the color of the first trace on
@@ -2002,12 +3442,18 @@ impl Plot {
     /// Route a drag gesture through [`Self::input_map`]. `(dx, dy)` are
     /// pointer deltas in whatever unit `scales` is calibrated for (pixels,
     /// cells). Sign conventions are the house defaults — dragging grabs the
-    /// camera (drag right orbits the view right), panning follows the
-    /// pointer, dragging up or left zooms in.
+    /// scene (trackball: drag right turns the object right, the camera
+    /// orbiting the other way), panning follows the pointer, dragging up or
+    /// left zooms in.
     pub fn apply_drag(&mut self, dx: f64, dy: f64, shift: bool, scales: DragScales) {
         let m = self.input_map;
-        let (cx, cy) = if shift { (m.shift_drag_x, m.shift_drag_y) } else { (m.drag_x, m.drag_y) };
-        for (control, d) in [(cx, dx), (cy, dy)] {
+        let ((cx, ix), (cy, iy)) = if shift {
+            ((m.shift_drag_x, m.invert_shift_drag_x), (m.shift_drag_y, m.invert_shift_drag_y))
+        } else {
+            ((m.drag_x, m.invert_drag_x), (m.drag_y, m.invert_drag_y))
+        };
+        for (control, inv, d) in [(cx, ix, dx), (cy, iy, dy)] {
+            let d = if inv { -d } else { d };
             match control {
                 CameraControl::Yaw => self.camera.rotate(-d * scales.rotate, 0.0),
                 CameraControl::Pitch => self.camera.rotate(0.0, -d * scales.rotate),
@@ -2017,6 +3463,29 @@ impl Plot {
                 CameraControl::Off => {}
             }
         }
+    }
+
+    /// One auto-rotate step: `step` radians of yaw, turned in the direction
+    /// a rightward drag pushes the object. Pass a negative `step` to drift
+    /// the other way.
+    ///
+    /// The direction lives here rather than at each call site because it is
+    /// easy to get backwards and hard to see: on a point cloud or a
+    /// wireframe you cannot tell which way the scene is turning, so a spin
+    /// running against [`Self::apply_drag`] goes unnoticed until something
+    /// opaque is on screen. Then it reads as the *drag* being inverted —
+    /// you push the object right, let go, and it walks back the way it
+    /// came. `input_map.invert_drag_x` flips both together, because a spin
+    /// is defined as the drag it agrees with.
+    pub fn spin(&mut self, step: f64) {
+        // Exactly `apply_drag(step, 0.0, false, ..rotate: 1.0)`, which the
+        // test in tests/input_map.rs pins.
+        self.apply_drag(
+            step,
+            0.0,
+            false,
+            DragScales { rotate: 1.0, pan_x: 0.0, pan_y: 0.0, zoom: 0.0 },
+        );
     }
 
     /// Pick whatever is under the cursor, nodes taking priority over edges
@@ -2452,13 +3921,131 @@ impl Plot {
         fb
     }
 
+    /// The `(x, y)` half-extent a trace's cached bounds were built with, when
+    /// the meta cache is live. Reading it back is what keeps drawn geometry
+    /// and the computed range in step: both use this one number. `None` for a
+    /// trace whose extent is its points, or whenever the cache is stale.
+    fn cached_pad(&self, ti: usize) -> Option<(f64, f64)> {
+        match self.meta.get(ti).map(|tm| &tm.bounds) {
+            Some(&CachedBounds::B2 { pad, .. }) if self.meta_synced() => pad,
+            _ => None,
+        }
+    }
+
+    /// A histogram's bins: the cached solve when the meta cache is live (the
+    /// one the range was built from), else recomputed. Same read-back
+    /// discipline as [`Self::cached_pad`].
+    fn hist_bins(&self, ti: usize, values: &[f32], spec: BinSpec) -> std::borrow::Cow<'_, Bins> {
+        match self.meta.get(ti) {
+            Some(TraceMeta { bins: Some(b), .. }) if self.meta_synced() => {
+                std::borrow::Cow::Borrowed(b)
+            }
+            _ => std::borrow::Cow::Owned(bin_values(values, spec)),
+        }
+    }
+
+    /// Where a bar trace sits among the visible bar traces it shares an axis
+    /// and orientation with: `(index, count)`, in insertion order.
+    ///
+    /// Grouping and stacking are properties of the *set*, not of any one
+    /// trace, so unlike the cached half-width this cannot come from `meta` —
+    /// it has to be recomputed from the trace list, which is also what makes
+    /// it correct when a trace is hidden.
+    fn bar_slot(&self, ti: usize) -> (usize, usize) {
+        let Some(Trace::Bar2d { orient, axis, .. }) = self.traces.get(ti) else {
+            return (0, 1);
+        };
+        let (mut index, mut count) = (0, 0);
+        for (tj, t) in self.traces.iter().enumerate() {
+            if !self.is_visible(tj) {
+                continue;
+            }
+            if let Trace::Bar2d { orient: o, axis: a, .. } = t {
+                if o == orient && a == axis {
+                    if tj < ti {
+                        index += 1;
+                    }
+                    count += 1;
+                }
+            }
+        }
+        (index, count.max(1))
+    }
+
+    /// The value a stacked bar starts from: the running total of same-signed
+    /// heights at this position across the visible bar traces below it.
+    ///
+    /// Only same-signed heights accumulate. Letting a negative cancel a
+    /// positive would draw a single short bar whose length is a *net* value
+    /// the reader has no way to decompose; growing both ways from the
+    /// baseline keeps both contributions visible.
+    ///
+    /// Positions match by exact `f32` equality, the same rule the crosshair
+    /// uses — series on different grids stack independently rather than
+    /// silently snapping together. Cost is O(traces × bars) per bar, which is
+    /// nothing at the sizes a terminal plot holds.
+    fn stack_base(&self, ti: usize, pos: f32, h: f64) -> f64 {
+        let Some(Trace::Bar2d { orient, axis, .. }) = self.traces.get(ti) else {
+            return 0.0;
+        };
+        let mut base = 0.0;
+        for (tj, t) in self.traces.iter().enumerate().take(ti) {
+            if !self.is_visible(tj) {
+                continue;
+            }
+            if let Trace::Bar2d { xs, heights, orient: o, axis: a, .. } = t {
+                if o != orient || a != axis {
+                    continue;
+                }
+                for i in 0..xs.len().min(heights.len()) {
+                    let v = heights[i] as f64;
+                    if xs[i] == pos && v.is_finite() && (v >= 0.0) == (h >= 0.0) {
+                        base += v;
+                    }
+                }
+            }
+        }
+        base
+    }
+
+    /// One bar's drawn extent, with the plot's [`BarMode`] applied, in
+    /// (category, value) terms: `(cat_lo, cat_hi, val_lo, val_hi)`.
+    ///
+    /// Bounds and the renderer both read this, so a grouped bar can never be
+    /// drawn into a slot the axis was not sized for.
+    fn bar_geometry(&self, ti: usize, pos: f32, h: f64, hw: f64) -> (f64, f64, f64, f64) {
+        let p = pos as f64;
+        let (cat_lo, cat_hi) = match self.barmode {
+            BarMode::Group => {
+                let (index, count) = self.bar_slot(ti);
+                let slot = 2.0 * hw / count as f64;
+                let left = p - hw + slot * index as f64;
+                (left, left + slot)
+            }
+            BarMode::Overlay | BarMode::Stack => (p - hw, p + hw),
+        };
+        let base = match self.barmode {
+            BarMode::Stack => self.stack_base(ti, pos, h),
+            BarMode::Overlay | BarMode::Group => 0.0,
+        };
+        let (a, b) = (base, base + h);
+        (cat_lo, cat_hi, a.min(b), a.max(b))
+    }
+
     /// A bar trace's drawn halfwidth: the cached value when the meta cache is
     /// live (the one bounds already used, so drawn bars and ranges can never
     /// disagree), else recomputed from the data.
-    fn bar_hw(&self, ti: usize, xs: &[f32]) -> f64 {
-        match self.meta.get(ti).map(|tm| &tm.bounds) {
-            Some(&CachedBounds::B2 { hw: Some(hw), .. }) if self.meta_synced() => hw,
-            _ => bar_halfwidth(xs) as f64,
+    fn bar_hw(&self, ti: usize, xs: &[f32], orient: Orient) -> f64 {
+        match self.cached_pad(ti) {
+            // The width lives on whichever axis the bars are spaced along.
+            Some((x, y)) => {
+                if orient.is_horizontal() {
+                    y
+                } else {
+                    x
+                }
+            }
+            None => bar_halfwidth(xs) as f64,
         }
     }
 
@@ -2500,21 +4087,79 @@ impl Plot {
                 }
                 let slot = t.axis().right_index().map_or(0, |k| k + 1);
                 match t {
+                    Trace::Band2d { xs, lo, hi, .. } => {
+                        for i in 0..xs.len().min(lo.len()).min(hi.len()) {
+                            let x = xs[i] as f64;
+                            for v in [lo[i] as f64, hi[i] as f64] {
+                                seen(x, x, v, slot);
+                            }
+                        }
+                    }
+                    Trace::Box2d { values, group_starts, orient, .. } => {
+                        for (g, group) in box_groups(values, group_starts).enumerate() {
+                            let Some(st) = box_stats(group) else { continue };
+                            let (c0, c1) = (g as f64 - BOX_HALF_WIDTH, g as f64 + BOX_HALF_WIDTH);
+                            for v in st.spans() {
+                                if orient.is_horizontal() {
+                                    seen(v, v, c0, slot);
+                                    seen(v, v, c1, slot);
+                                } else {
+                                    seen(c0, c1, v, slot);
+                                }
+                            }
+                        }
+                    }
                     Trace::Scatter2d { xs, ys, .. } | Trace::Line2d { xs, ys, .. } => {
                         for i in 0..xs.len().min(ys.len()) {
                             let x = xs[i] as f64;
                             seen(x, x, ys[i] as f64, slot);
                         }
                     }
-                    Trace::Bar2d { xs, heights, .. } => {
-                        let hw = self.bar_hw(ti, xs);
+                    Trace::Bar2d { xs, heights, orient, .. } => {
+                        let hw = self.bar_hw(ti, xs, *orient);
                         for i in 0..xs.len().min(heights.len()) {
-                            let (x, h) = (xs[i] as f64, heights[i] as f64);
-                            seen(x - hw, x + hw, h.min(0.0), slot);
-                            seen(x - hw, x + hw, h.max(0.0), slot);
+                            let h = heights[i] as f64;
+                            if !xs[i].is_finite() || !h.is_finite() {
+                                continue;
+                            }
+                            // Grouping narrows the slot and stacking lifts the
+                            // baseline; both change the extent, so both come
+                            // from the same solve the renderer uses.
+                            let (c0, c1, v0, v1) = self.bar_geometry(ti, xs[i], h, hw);
+                            if orient.is_horizontal() {
+                                seen(v0, v1, c0, slot);
+                                seen(v0, v1, c1, slot);
+                            } else {
+                                seen(c0, c1, v0, slot);
+                                seen(c0, c1, v1, slot);
+                            }
                         }
                     }
-                    _ => {}
+                    Trace::Histogram2d { values, bins, .. } => {
+                        let b = self.hist_bins(ti, values, *bins);
+                        for (i, &n) in b.counts.iter().enumerate() {
+                            let (lo, hi) = b.edges(i);
+                            seen(lo, hi, 0.0, slot);
+                            seen(lo, hi, n as f64, slot);
+                        }
+                    }
+                    Trace::Heatmap2d { xs, ys, zs, .. } => {
+                        let (hx, hy) = self
+                            .cached_pad(ti)
+                            .unwrap_or_else(|| (grid_half_step(xs), grid_half_step(ys)));
+                        for (j, &y) in ys.iter().enumerate() {
+                            for (i, &x) in xs.iter().enumerate() {
+                                let v = zs.get(j * xs.len() + i).copied().unwrap_or(f32::NAN);
+                                if !v.is_finite() {
+                                    continue;
+                                }
+                                let (x, y) = (x as f64, y as f64);
+                                seen(x - hx, x + hx, y - hy, slot);
+                                seen(x - hx, x + hx, y + hy, slot);
+                            }
+                        }
+                    }
+                    traces_3d!() => {}
                 }
             }
             let pad = |lo: f64, hi: f64| -> (f64, f64) {
@@ -2528,7 +4173,14 @@ impl Plot {
             let (ylo, yhi) = pad(ys[0].0, ys[0].1);
             return (wlo, whi, ylo, yhi, [pad(ys[1].0, ys[1].1), pad(ys[2].0, ys[2].1)]);
         }
-        if self.meta_synced() {
+        // A per-trace cache cannot describe a cross-trace layout: a stacked
+        // bar's extent depends on the traces below it, and a grouped bar's on
+        // how many share its slot. Under those modes the cache is skipped and
+        // the full scan — which solves through `bar_geometry` — is the only
+        // answer. Overlay, the default, keeps the fast path.
+        let cross_trace_bars = self.barmode != BarMode::Overlay
+            && self.traces.iter().any(|t| matches!(t, Trace::Bar2d { .. }));
+        if self.meta_synced() && !cross_trace_bars {
             // Union of the per-trace cached boxes — min/max is order-blind,
             // so this is bit-identical to the full scan below.
             for (m, t) in self.meta.iter().zip(&self.traces) {
@@ -2557,20 +4209,73 @@ impl Plot {
                 }
                 let slot = t.axis().right_index().map_or(0, |k| k + 1);
                 match t {
+                    Trace::Band2d { xs, lo, hi, .. } => {
+                        for i in 0..xs.len().min(lo.len()).min(hi.len()) {
+                            let x = xs[i] as f64;
+                            seen(x, lo[i] as f64, slot);
+                            seen(x, hi[i] as f64, slot);
+                        }
+                    }
+                    Trace::Box2d { values, group_starts, orient, .. } => {
+                        for (g, group) in box_groups(values, group_starts).enumerate() {
+                            let Some(st) = box_stats(group) else { continue };
+                            let (c0, c1) = (g as f64 - BOX_HALF_WIDTH, g as f64 + BOX_HALF_WIDTH);
+                            for v in st.spans() {
+                                if orient.is_horizontal() {
+                                    seen(v, c0, slot);
+                                    seen(v, c1, slot);
+                                } else {
+                                    seen(c0, v, slot);
+                                    seen(c1, v, slot);
+                                }
+                            }
+                        }
+                    }
                     Trace::Scatter2d { xs, ys, .. } | Trace::Line2d { xs, ys, .. } => {
                         for i in 0..xs.len().min(ys.len()) {
                             seen(xs[i] as f64, ys[i] as f64, slot);
                         }
                     }
-                    Trace::Bar2d { xs, heights, .. } => {
-                        let hw = bar_halfwidth(xs) as f64;
-                        for i in 0..xs.len().min(heights.len()) {
-                            let (x, h) = (xs[i] as f64, heights[i] as f64);
-                            seen(x - hw, h.min(0.0), slot);
-                            seen(x + hw, h.max(0.0), slot);
+                    Trace::Histogram2d { values, bins, .. } => {
+                        let b = bin_values(values, *bins);
+                        for (i, &n) in b.counts.iter().enumerate() {
+                            let (lo, hi) = b.edges(i);
+                            seen(lo, 0.0, slot);
+                            seen(hi, n as f64, slot);
                         }
                     }
-                    _ => {}
+                    Trace::Heatmap2d { xs, ys, zs, .. } => {
+                        let (hx, hy) = (grid_half_step(xs), grid_half_step(ys));
+                        for (j, &y) in ys.iter().enumerate() {
+                            for (i, &x) in xs.iter().enumerate() {
+                                let v = zs.get(j * xs.len() + i).copied().unwrap_or(f32::NAN);
+                                if !v.is_finite() {
+                                    continue;
+                                }
+                                let (x, y) = (x as f64, y as f64);
+                                seen(x - hx, y - hy, slot);
+                                seen(x + hx, y + hy, slot);
+                            }
+                        }
+                    }
+                    Trace::Bar2d { xs, heights, orient, .. } => {
+                        let hw = bar_halfwidth(xs) as f64;
+                        for i in 0..xs.len().min(heights.len()) {
+                            let h = heights[i] as f64;
+                            if !xs[i].is_finite() || !h.is_finite() {
+                                continue;
+                            }
+                            let (c0, c1, v0, v1) = self.bar_geometry(ti, xs[i], h, hw);
+                            if orient.is_horizontal() {
+                                seen(v0, c0, slot);
+                                seen(v1, c1, slot);
+                                continue;
+                            }
+                            seen(c0, v0, slot);
+                            seen(c1, v1, slot);
+                        }
+                    }
+                    traces_3d!() => {}
                 }
             }
         }
@@ -2585,6 +4290,49 @@ impl Plot {
         let (xlo, xhi) = pad(xlo, xhi);
         let (ylo, yhi) = pad(ys[0].0, ys[0].1);
         (xlo, xhi, ylo, yhi, [pad(ys[1].0, ys[1].1), pad(ys[2].0, ys[2].1)])
+    }
+
+    /// One x position as the axis itself would label it: a category name, a
+    /// timestamp, or a plain number. The crosshair readout reads through this
+    /// so its header agrees with the tick labels under it — a categorical axis
+    /// that ticked "Mon, Tue, Wed" but read out "x 2" would be describing two
+    /// different charts.
+    fn format_x(&self, v: f64) -> String {
+        if let Some(names) = &self.x_categories {
+            let i = v.round();
+            if i >= 0.0 && (i as usize) < names.len() && (v - i).abs() < 1e-6 {
+                return names[i as usize].clone();
+            }
+        }
+        match self.x_epoch {
+            Some(base) => format_datetime(base + v),
+            None => format_value(v),
+        }
+    }
+
+    /// The primary y axis's ticks and their labels over the visible range.
+    fn y_axis_ticks(&self, lo: f64, hi: f64, target: usize) -> (Vec<f64>, Vec<String>) {
+        match &self.y_categories {
+            Some(names) => category_ticks(names, lo, hi, target),
+            None => numeric_ticks(lo, hi, target),
+        }
+    }
+
+    /// The x axis's ticks and their labels over the visible range: names for a
+    /// categorical axis, calendar boundaries for a time axis, else the numeric
+    /// ladder. Date ticks are generated in absolute epoch seconds and returned
+    /// in the offset space the map works in.
+    fn x_axis_ticks(&self, lo: f64, hi: f64, target: usize) -> (Vec<f64>, Vec<String>) {
+        if let Some(names) = &self.x_categories {
+            return category_ticks(names, lo, hi, target);
+        }
+        match self.x_epoch {
+            Some(base) => {
+                let (abs, labels) = date_ticks(base + lo, base + hi, target);
+                (abs.into_iter().map(|t| t - base).collect(), labels)
+            }
+            None => numeric_ticks(lo, hi, target),
+        }
     }
 
     /// Solve the 2D frame: margins, plot rect, per-axis maps, ticks and their
@@ -2618,7 +4366,26 @@ impl Plot {
 
         // Two passes: the side margins depend on y tick label widths, which
         // depend on the visible ranges, which depend on the margins.
-        let top = 2 * pad;
+        // The colorbar's ticks span a fixed data range, so unlike the axes
+        // they do not depend on the margins — precomputing them here keeps the
+        // fixed point below settling in two passes.
+        let cbar_w = 3 * s; // gradient strip width
+        let (cbar_ticks, cbar_labels) = match &self.colorbar {
+            Some(cb) => numeric_ticks(cb.lo, cb.hi, ((h / (4 * ch)) as usize).clamp(2, 8)),
+            None => (Vec::new(), Vec::new()),
+        };
+        let cbar_reserve = self.colorbar.as_ref().map_or(0, |_| {
+            let lw = cbar_labels.iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
+            // Every gap `draw_colorbar` actually walks, in its order: the gap
+            // to the strip, the strip, its tick mark, the gap to the labels,
+            // and the widest label. Missing the tick here clipped the last
+            // digit off the top label.
+            pad + cbar_w + tick_len + pad + lw
+        });
+        // A caption has nowhere to go but above the strip: there is no rotated
+        // text, so the frame gives up a line of top margin for it.
+        let caption = self.colorbar.as_ref().and_then(|cb| cb.label.clone());
+        let top = 2 * pad + caption.as_ref().map_or(0, |_| ch + pad);
         let bottom = ch + tick_len + 2 * pad;
         // The strip reserve is a pure function of `s` and `h`, decided before
         // the margin fixed-point below — a reserve that changed inside the
@@ -2631,11 +4398,12 @@ impl Plot {
         let (mut x0, mut y0, mut x1, mut y1) = (0, 0, 0, 0);
         let mut map = Map2d::default();
         let (mut xticks, mut xlabels) = (Vec::new(), Vec::<String>::new());
-        let (mut yticks, mut ystep) = (Vec::new(), 1.0);
+        let (mut yticks, mut ylabels) = (Vec::new(), Vec::<String>::new());
         let mut maps_r = [Map2d::default(); RIGHT_AXES];
         let mut rticks: [Vec<f64>; RIGHT_AXES] = [Vec::new(), Vec::new()];
-        let mut rsteps = [1.0; RIGHT_AXES];
+        let mut rlabels: [Vec<String>; RIGHT_AXES] = [Vec::new(), Vec::new()];
         let mut col_x = [0; RIGHT_AXES]; // label column offset from x1
+        let mut cbar_x = 0; // gradient strip offset from x1
         for _ in 0..2 {
             x0 = left;
             y0 = top;
@@ -2648,21 +4416,13 @@ impl Plot {
             let (vylo, vyhi) = (map.inv_y(y1 as f64), map.inv_y(y0 as f64));
             let tx = (((x1 - x0) / (10 * cw)) as usize).clamp(2, 12);
             let ty = (((y1 - y0) / (3 * ch)) as usize).clamp(2, 10);
-            // A time axis ticks on calendar boundaries in absolute epoch
-            // seconds; positions come back to offset space for the map.
-            if let Some(base) = self.x_epoch {
-                let (abs, labels) = date_ticks(base + vxlo, base + vxhi, tx);
-                xticks = abs.into_iter().map(|t| t - base).collect();
-                xlabels = labels;
-            } else {
-                let (t, step) = nice_ticks(vxlo, vxhi, tx);
-                xlabels = t.iter().map(|v| format_tick(*v, step)).collect();
-                xticks = t;
-            }
-            (yticks, ystep) = nice_ticks(vylo, vyhi, ty);
-            let label_w =
-                yticks.iter().map(|v| text_width(&format_tick(*v, ystep), s)).max().unwrap_or(cw);
+            (xticks, xlabels) = self.x_axis_ticks(vxlo, vxhi, tx);
+            (yticks, ylabels) = self.y_axis_ticks(vylo, vyhi, ty);
+            let label_w = ylabels.iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
             left = (label_w + tick_len + 2 * pad).min(w / 3);
+            // The right margin stacks outward from x1: tick-label columns
+            // first (innermost axis nearest the frame), then the colorbar.
+            let mut used = 2 * pad;
             if has_right.iter().any(|b| *b) {
                 let mut off = tick_len + pad; // x1 → first label column
                 for k in 0..RIGHT_AXES {
@@ -2672,17 +4432,16 @@ impl Plot {
                     let (rlo, rhi) = dright[k];
                     maps_r[k] = Map2d::new((dxlo, dxhi, rlo, rhi), rect, cam);
                     let (vlo, vhi) = (maps_r[k].inv_y(y1 as f64), maps_r[k].inv_y(y0 as f64));
-                    (rticks[k], rsteps[k]) = nice_ticks(vlo, vhi, ty);
-                    let wk = rticks[k]
-                        .iter()
-                        .map(|v| text_width(&format_tick(*v, rsteps[k]), s))
-                        .max()
-                        .unwrap_or(cw);
+                    let (t, labels) = numeric_ticks(vlo, vhi, ty);
+                    (rticks[k], rlabels[k]) = (t, labels);
+                    let wk = rlabels[k].iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
                     col_x[k] = off;
                     off += wk + 2 * pad;
                 }
-                right = (off - pad).min(w / 3);
+                used = off - pad;
             }
+            cbar_x = used + pad;
+            right = (used + cbar_reserve).min(w / 3);
         }
         // The strip sits at the very bottom, below the x tick labels, and
         // shows the full extent whatever the window — its maps never depend
@@ -2728,12 +4487,20 @@ impl Plot {
             xticks,
             xlabels,
             yticks,
-            ystep,
+            ylabels,
             rticks,
-            rsteps,
+            rlabels,
             col_x,
             has_right,
             strip,
+            cbar: self.colorbar.as_ref().map(|_| CbarLayout {
+                x0: x1 + cbar_x,
+                y0,
+                x1: x1 + cbar_x + cbar_w,
+                y1,
+                ticks: cbar_ticks,
+                labels: cbar_labels,
+            }),
         }
     }
 
@@ -2776,20 +4543,197 @@ impl Plot {
                 None => &map,
             };
             match t {
-                Trace::Scatter2d { xs, ys, color, size, .. } => {
-                    let r = size * s as f32;
-                    let (bx0, by0, bx1, by1) = pix_box(r as f64 + 1.0);
-                    for i in 0..xs.len().min(ys.len()) {
-                        let (px, py) = (m.sx(xs[i] as f64), m.sy(ys[i] as f64));
-                        if px.is_finite()
-                            && py.is_finite()
-                            && !(win && (px < bx0 || px > bx1 || py < by0 || py > by1))
-                        {
-                            fb.disc(px as f32, py as f32, 0.0, r, *color);
+                Trace::Heatmap2d { xs, ys, zs, colormap, .. } => {
+                    // The ramp spans this grid's own finite range, matching how
+                    // a colormapped surface normalizes against its own heights.
+                    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                    for v in zs.iter().filter(|v| v.is_finite()) {
+                        lo = lo.min(*v as f64);
+                        hi = hi.max(*v as f64);
+                    }
+                    let span = hi - lo;
+                    let (hx, hy) = self
+                        .cached_pad(ti)
+                        .unwrap_or_else(|| (grid_half_step(xs), grid_half_step(ys)));
+                    let (cx0, cy0, cx1, cy1) = pix_box(1.0);
+                    for (j, &yv) in ys.iter().enumerate() {
+                        for (i, &xv) in xs.iter().enumerate() {
+                            let Some(&v) = zs.get(j * xs.len() + i) else { continue };
+                            // A non-finite cell is a hole, not a zero.
+                            if !v.is_finite() || !xv.is_finite() || !yv.is_finite() {
+                                continue;
+                            }
+                            let t = if span > 0.0 { ((v as f64 - lo) / span) as f32 } else { 0.5 };
+                            let (x, y) = (xv as f64, yv as f64);
+                            let (mut fx0, mut fx1) = (m.sx(x - hx), m.sx(x + hx));
+                            let (mut fy0, mut fy1) = (m.sy(y + hy), m.sy(y - hy));
+                            if win {
+                                if fx1 < cx0 || fx0 > cx1 {
+                                    continue;
+                                }
+                                (fx0, fx1) = (fx0.max(cx0), fx1.min(cx1));
+                                (fy0, fy1) = (fy0.clamp(cy0, cy1), fy1.clamp(cy0, cy1));
+                            }
+                            fb.rect_fill(
+                                fx0.round() as i32,
+                                fy0.round() as i32,
+                                fx1.round() as i32,
+                                fy1.round() as i32,
+                                0.0,
+                                colormap.sample(t),
+                            );
                         }
                     }
                 }
-                Trace::Line2d { xs, ys, color, width, .. } => {
+                Trace::Box2d { values, group_starts, color, orient, .. } => {
+                    let horiz = orient.is_horizontal();
+                    let hw = BOX_HALF_WIDTH;
+                    let thin = s.max(1);
+                    // Solved once in (category, value) terms, then swapped
+                    // into pixels — the same trick the bar arm uses.
+                    let to_px = |cat: f64, val: f64| {
+                        if horiz {
+                            (m.sx(val), m.sy(cat))
+                        } else {
+                            (m.sx(cat), m.sy(val))
+                        }
+                    };
+                    for (g, group) in box_groups(values, group_starts).enumerate() {
+                        let Some(st) = box_stats(group) else { continue };
+                        let cat = g as f64;
+                        let (c0, c1) = (cat - hw, cat + hw);
+                        // The IQR box, dimmed so the median reads over it.
+                        let (ax, ay) = to_px(c0, st.q1);
+                        let (bx, by) = to_px(c1, st.q3);
+                        fb.rect_fill(
+                            ax.round() as i32,
+                            ay.round() as i32,
+                            bx.round() as i32,
+                            by.round() as i32,
+                            0.0,
+                            shade(*color, 0.55),
+                        );
+                        // Whiskers out to the fence ends, capped.
+                        for (from, to) in [(st.q1, st.lo), (st.q3, st.hi)] {
+                            let (fx, fy) = to_px(cat, from);
+                            let (tx, ty) = to_px(cat, to);
+                            fb.rect_fill(
+                                fx.round() as i32,
+                                fy.round() as i32,
+                                tx.round() as i32,
+                                ty.round() as i32,
+                                0.0,
+                                *color,
+                            );
+                            let (kx0, ky0) = to_px(cat - hw * 0.5, to);
+                            let (kx1, ky1) = to_px(cat + hw * 0.5, to);
+                            fb.rect_fill(
+                                kx0.round() as i32,
+                                ky0.round() as i32,
+                                kx1.round() as i32,
+                                ky1.round() as i32,
+                                0.0,
+                                *color,
+                            );
+                        }
+                        // The median last and at full colour: it is the one
+                        // number a reader takes away, so it must not be a
+                        // subtle edge of the fill.
+                        let (mx0, my0) = to_px(c0, st.median);
+                        let (mx1, my1) = to_px(c1, st.median);
+                        let (x0, y0) = (mx0.round() as i32, my0.round() as i32);
+                        let (mut x1, mut y1) = (mx1.round() as i32, my1.round() as i32);
+                        if horiz {
+                            x1 = x0 + thin - 1;
+                        } else {
+                            y1 = y0 + thin - 1;
+                        }
+                        fb.rect_fill(x0, y0, x1, y1, 0.0, *color);
+                        // Outliers as their own marks — the reason a box plot
+                        // beats a min/max range.
+                        for o in &st.outliers {
+                            let (ox, oy) = to_px(cat, *o);
+                            fb.disc(ox as f32, oy as f32, 0.0, 1.6 * s as f32, *color);
+                        }
+                    }
+                }
+                Trace::Band2d { xs, lo, hi, color, .. } => {
+                    let n = xs.len().min(lo.len()).min(hi.len());
+                    let cols: Vec<(f64, f64, f64)> = (0..n)
+                        .map(|i| {
+                            // A non-finite edge breaks the ribbon, the way it
+                            // breaks a line; `fill_between` skips those spans.
+                            (m.sx(xs[i] as f64), m.sy(lo[i] as f64), m.sy(hi[i] as f64))
+                        })
+                        .collect();
+                    fb.fill_between(&cols, 0.0, *color);
+                }
+                Trace::Scatter2d {
+                    xs,
+                    ys,
+                    color,
+                    size,
+                    colors,
+                    sizes,
+                    shapes,
+                    err_x,
+                    err_y,
+                    ..
+                } => {
+                    // Bars first, so a mark is never bisected by its own spine.
+                    for i in 0..xs.len().min(ys.len()) {
+                        let (x, y) = (xs[i] as f64, ys[i] as f64);
+                        if x.is_finite() && y.is_finite() {
+                            let (ex, ey) = (
+                                err_x.as_ref().and_then(|e| e.at(i)),
+                                err_y.as_ref().and_then(|e| e.at(i)),
+                            );
+                            if ex.is_some() || ey.is_some() {
+                                let c = colors
+                                    .as_ref()
+                                    .and_then(|v| v.get(i))
+                                    .copied()
+                                    .unwrap_or(*color);
+                                draw_error_bars(&mut fb, m, x, y, ex, ey, s, c);
+                            }
+                        }
+                    }
+                    // The pixel box is sized by the largest mark any point can
+                    // take, so a windowed plot cannot clip away a big point
+                    // whose centre sits just outside the frame.
+                    let max_size =
+                        sizes.as_ref().map_or(*size, |v| v.iter().copied().fold(*size, f32::max));
+                    let (bx0, by0, bx1, by1) = pix_box((max_size * s as f32) as f64 + 1.0);
+                    for i in 0..xs.len().min(ys.len()) {
+                        let (px, py) = (m.sx(xs[i] as f64), m.sy(ys[i] as f64));
+                        if !px.is_finite()
+                            || !py.is_finite()
+                            || (win && (px < bx0 || px > bx1 || py < by0 || py > by1))
+                        {
+                            continue;
+                        }
+                        let c = colors.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(*color);
+                        let r = sizes.as_ref().and_then(|v| v.get(i)).copied().unwrap_or(*size)
+                            * s as f32;
+                        match shapes.as_ref().and_then(|v| v.get(i)).copied() {
+                            Some(sh) => fb.mark(px as f32, py as f32, 0.0, r, sh, c),
+                            None => fb.disc(px as f32, py as f32, 0.0, r, c),
+                        }
+                    }
+                }
+                Trace::Line2d { xs, ys, color, width, interp, err_x, err_y, .. } => {
+                    for i in 0..xs.len().min(ys.len()) {
+                        let (x, y) = (xs[i] as f64, ys[i] as f64);
+                        if x.is_finite() && y.is_finite() {
+                            let (ex, ey) = (
+                                err_x.as_ref().and_then(|e| e.at(i)),
+                                err_y.as_ref().and_then(|e| e.at(i)),
+                            );
+                            if ex.is_some() || ey.is_some() {
+                                draw_error_bars(&mut fb, m, x, y, ex, ey, s, *color);
+                            }
+                        }
+                    }
                     let n = xs.len().min(ys.len());
                     let pts: Vec<Option<(f64, f64)>> = (0..n)
                         .map(|i| {
@@ -2801,27 +4745,37 @@ impl Plot {
                     let clip_box = pix_box(r as f64 + 1.0);
                     for pair in pts.windows(2) {
                         if let [Some(a), Some(b)] = pair {
-                            if win {
-                                if let Some((ca, cb)) = clip_segment(*a, *b, clip_box) {
-                                    stroke(&mut fb, ca, cb, r, *color);
+                            // A step expands one segment into the two or three
+                            // that trace its right-angle path; `Linear` yields
+                            // the single original segment.
+                            let mut from = *a;
+                            for leg in interp.corners(*a, *b).into_iter().flatten().chain([*b]) {
+                                if win {
+                                    if let Some((ca, cb)) = clip_segment(from, leg, clip_box) {
+                                        stroke(&mut fb, ca, cb, r, *color);
+                                    }
+                                } else {
+                                    stroke(&mut fb, from, leg, r, *color);
                                 }
-                            } else {
-                                stroke(&mut fb, *a, *b, r, *color);
+                                from = leg;
                             }
                         }
                     }
                 }
-                Trace::Bar2d { xs, heights, color, .. } => {
-                    let hw = self.bar_hw(ti, xs);
+                Trace::Histogram2d { values, bins, color, .. } => {
+                    let b = self.hist_bins(ti, values, *bins);
                     let base = m.sy(0.0);
                     let (cx0, cy0, cx1, cy1) = pix_box(1.0);
-                    for i in 0..xs.len().min(heights.len()) {
-                        let (x, hgt) = (xs[i] as f64, heights[i] as f64);
-                        if !x.is_finite() || !hgt.is_finite() {
+                    for (i, &n) in b.counts.iter().enumerate() {
+                        if n == 0 {
                             continue;
                         }
-                        let (mut fx0, mut fx1) = (m.sx(x - hw), m.sx(x + hw));
-                        let (mut fy0, mut fy1) = (m.sy(hgt), base);
+                        let (lo, hi) = b.edges(i);
+                        // Bars tile edge to edge — a histogram is a picture of
+                        // a continuous range, and gaps would imply the data
+                        // stops between bins.
+                        let (mut fx0, mut fx1) = (m.sx(lo), m.sx(hi));
+                        let (mut fy0, mut fy1) = (m.sy(n as f64), base);
                         if win {
                             if fx1 < cx0 || fx0 > cx1 {
                                 continue;
@@ -2829,13 +4783,55 @@ impl Plot {
                             (fx0, fx1) = (fx0.max(cx0), fx1.min(cx1));
                             (fy0, fy1) = (fy0.clamp(cy0, cy1), fy1.clamp(cy0, cy1));
                         }
-                        let bx0 = fx0.round() as i32;
-                        let bx1 = fx1.round() as i32;
-                        let by = fy0.round() as i32;
-                        fb.rect_fill(bx0, by, bx1, fy1.round() as i32, 0.0, *color);
+                        fb.rect_fill(
+                            fx0.round() as i32,
+                            fy0.round() as i32,
+                            fx1.round() as i32,
+                            fy1.round() as i32,
+                            0.0,
+                            *color,
+                        );
                     }
                 }
-                _ => {}
+                Trace::Bar2d { xs, heights, color, orient, .. } => {
+                    let hw = self.bar_hw(ti, xs, *orient);
+                    let horiz = orient.is_horizontal();
+                    // Everything below is solved once in (category, value)
+                    // terms — barmode and all — and swapped into pixels at the
+                    // end, so the two orientations share one piece of logic.
+                    let (cx0, cy0, cx1, cy1) = pix_box(1.0);
+                    for i in 0..xs.len().min(heights.len()) {
+                        let (pos, hgt) = (xs[i] as f64, heights[i] as f64);
+                        if !pos.is_finite() || !hgt.is_finite() {
+                            continue;
+                        }
+                        let (c0, c1, v0, v1) = self.bar_geometry(ti, xs[i], hgt, hw);
+                        let (mut a0, mut a1, mut b0, mut b1) = if horiz {
+                            // Category on y (inverted, so c1 is the top),
+                            // value along x.
+                            (m.sx(v0), m.sx(v1), m.sy(c1), m.sy(c0))
+                        } else {
+                            (m.sx(c0), m.sx(c1), m.sy(v1), m.sy(v0))
+                        };
+                        if win {
+                            let (lo, hi) = if horiz { (a0.min(a1), a0.max(a1)) } else { (a0, a1) };
+                            if hi < cx0 || lo > cx1 {
+                                continue;
+                            }
+                            (a0, a1) = (a0.clamp(cx0, cx1), a1.clamp(cx0, cx1));
+                            (b0, b1) = (b0.clamp(cy0, cy1), b1.clamp(cy0, cy1));
+                        }
+                        fb.rect_fill(
+                            a0.round() as i32,
+                            b0.round() as i32,
+                            a1.round() as i32,
+                            b1.round() as i32,
+                            0.0,
+                            *color,
+                        );
+                    }
+                }
+                traces_3d!() => {}
             }
         }
         fb.clear_clip();
@@ -2859,18 +4855,17 @@ impl Plot {
             let lx = (px - lw / 2).clamp(0, (w - lw).max(0));
             draw_text(&mut fb, lx, y1 + tick_len + pad, label, s, 0.0, self.chrome.ink);
         }
-        for v in &l.yticks {
+        for (v, label) in l.yticks.iter().zip(&l.ylabels) {
             let py = map.sy(*v).round() as i32;
             if py < y0 || py > y1 {
                 continue;
             }
-            let label = format_tick(*v, l.ystep);
-            let lw = text_width(&label, s);
+            let lw = text_width(label, s);
             draw_text(
                 &mut fb,
                 (x0 - tick_len - pad - lw).max(0),
                 py - ch / 2,
-                &label,
+                label,
                 s,
                 0.0,
                 self.chrome.ink,
@@ -2884,23 +4879,18 @@ impl Plot {
                 continue;
             }
             let ink = self.right_axis_color(k);
-            for v in &l.rticks[k] {
+            for (v, label) in l.rticks[k].iter().zip(&l.rlabels[k]) {
                 let py = mr.sy(*v).round() as i32;
                 if py < y0 || py > y1 {
                     continue;
                 }
-                draw_text(
-                    &mut fb,
-                    x1 + l.col_x[k],
-                    py - ch / 2,
-                    &format_tick(*v, l.rsteps[k]),
-                    s,
-                    0.0,
-                    ink,
-                );
+                draw_text(&mut fb, x1 + l.col_x[k], py - ch / 2, label, s, 0.0, ink);
             }
         }
 
+        if let Some(cb) = &l.cbar {
+            self.draw_colorbar(&mut fb, cb, s);
+        }
         self.draw_legend(&mut fb, x0, y0, x1, s, 0.0, false);
         if let Some(st) = &l.strip {
             self.draw_range_slider(&mut fb, st, s);
@@ -2945,11 +4935,29 @@ impl Plot {
                 };
                 let tint = |c: &Rgb| if pass == 0 { shade(*c, 0.4) } else { *c };
                 match t {
-                    Trace::Scatter2d { xs, ys, color, .. } => {
+                    // A grid has no useful one-line overview: squeezed into
+                    // the strip its cells collapse into a smear that says
+                    // nothing about where the window is. It sits the strip out.
+                    Trace::Heatmap2d { .. } => {}
+                    // Box plots are a categorical summary; squeezed into the
+                    // strip they say nothing about where the x window is.
+                    Trace::Box2d { .. } => {}
+                    Trace::Band2d { xs, lo, hi, color, .. } => {
+                        let n = xs.len().min(lo.len()).min(hi.len());
+                        let cols: Vec<(f64, f64, f64)> = (0..n)
+                            .map(|i| (m.sx(xs[i] as f64), m.sy(lo[i] as f64), m.sy(hi[i] as f64)))
+                            .collect();
+                        fb.fill_between(&cols, 0.0, tint(color));
+                    }
+                    Trace::Scatter2d { xs, ys, color, colors, .. } => {
                         for i in 0..xs.len().min(ys.len()) {
                             let (px, py) = (m.sx(xs[i] as f64), m.sy(ys[i] as f64));
                             if px.is_finite() && py.is_finite() {
-                                fb.disc(px as f32, py as f32, 0.0, s as f32, tint(color));
+                                let c = colors.as_ref().and_then(|v| v.get(i)).unwrap_or(color);
+                                // Sizes and shapes are dropped here on purpose:
+                                // the strip is a one-line overview, and marks
+                                // at strip scale would collide into noise.
+                                fb.disc(px as f32, py as f32, 0.0, s as f32, tint(c));
                             }
                         }
                     }
@@ -2965,21 +4973,49 @@ impl Plot {
                             prev = cur;
                         }
                     }
-                    Trace::Bar2d { xs, heights, color, .. } => {
-                        let hw = self.bar_hw(ti, xs);
-                        let base = m.sy(0.0).round() as i32;
-                        for i in 0..xs.len().min(heights.len()) {
-                            let (x, hgt) = (xs[i] as f64, heights[i] as f64);
-                            if !x.is_finite() || !hgt.is_finite() {
+                    Trace::Histogram2d { values, bins, color, .. } => {
+                        let b = self.hist_bins(ti, values, *bins);
+                        let base = m.sy(0.0);
+                        for (i, &n) in b.counts.iter().enumerate() {
+                            if n == 0 {
                                 continue;
                             }
-                            let bx0 = m.sx(x - hw).round() as i32;
-                            let bx1 = m.sx(x + hw).round() as i32;
-                            let by = m.sy(hgt).round() as i32;
-                            fb.rect_fill(bx0, by, bx1, base, 0.0, tint(color));
+                            let (lo, hi) = b.edges(i);
+                            fb.rect_fill(
+                                m.sx(lo).round() as i32,
+                                m.sy(n as f64).round() as i32,
+                                m.sx(hi).round() as i32,
+                                base.round() as i32,
+                                0.0,
+                                tint(color),
+                            );
                         }
                     }
-                    _ => {}
+                    Trace::Bar2d { xs, heights, color, orient, .. } => {
+                        let hw = self.bar_hw(ti, xs, *orient);
+                        let horiz = orient.is_horizontal();
+                        for i in 0..xs.len().min(heights.len()) {
+                            let (pos, hgt) = (xs[i] as f64, heights[i] as f64);
+                            if !pos.is_finite() || !hgt.is_finite() {
+                                continue;
+                            }
+                            let (c0, c1, v0, v1) = self.bar_geometry(ti, xs[i], hgt, hw);
+                            let (a0, a1, b0, b1) = if horiz {
+                                (m.sx(v0), m.sx(v1), m.sy(c1), m.sy(c0))
+                            } else {
+                                (m.sx(c0), m.sx(c1), m.sy(v1), m.sy(v0))
+                            };
+                            fb.rect_fill(
+                                a0.round() as i32,
+                                b0.round() as i32,
+                                a1.round() as i32,
+                                b1.round() as i32,
+                                0.0,
+                                tint(color),
+                            );
+                        }
+                    }
+                    traces_3d!() => {}
                 }
             }
             fb.clear_clip();
@@ -3171,6 +5207,51 @@ impl Plot {
     /// chrome covers it. Series match by exact sample x, so series on a
     /// shared grid all get a row while series on their own grids only show
     /// where they truly have a sample.
+    /// The colormap legend: a vertical gradient strip with a tick label per
+    /// value, and the caption above it when there is one.
+    ///
+    /// The ramp is painted a pixel row at a time from the same
+    /// [`Colormap::sample`] the traces use, so the strip is the mapping rather
+    /// than a picture of it — a ramp that drifted from the data it explains
+    /// would be worse than no ramp at all.
+    fn draw_colorbar(&self, fb: &mut Framebuffer, cb: &CbarLayout, s: i32) {
+        let Some(bar) = &self.colorbar else { return };
+        let (ch, pad, tick_len) = (CHAR_H * s, 3 * s, 2 * s);
+        let span = (cb.y1 - cb.y0).max(1) as f32;
+        for y in cb.y0..=cb.y1 {
+            // Top is `hi`, matching a y axis.
+            let t = (cb.y1 - y) as f32 / span;
+            fb.rect_fill(cb.x0, y, cb.x1, y, 0.0, bar.map.sample(t));
+        }
+        // A hairline frame, so the ramp reads as an object and its light end
+        // does not bleed into the page.
+        fb.rect_fill(cb.x0, cb.y0, cb.x1, cb.y0, 0.0, self.chrome.frame);
+        fb.rect_fill(cb.x0, cb.y1, cb.x1, cb.y1, 0.0, self.chrome.frame);
+        fb.rect_fill(cb.x0, cb.y0, cb.x0, cb.y1, 0.0, self.chrome.frame);
+        fb.rect_fill(cb.x1, cb.y0, cb.x1, cb.y1, 0.0, self.chrome.frame);
+
+        let range = bar.hi - bar.lo;
+        for (v, label) in cb.ticks.iter().zip(&cb.labels) {
+            if range == 0.0 {
+                break;
+            }
+            let f = ((v - bar.lo) / range) as f32;
+            let py = cb.y1 - (f * span).round() as i32;
+            if py < cb.y0 || py > cb.y1 {
+                continue;
+            }
+            fb.rect_fill(cb.x1, py, cb.x1 + tick_len, py, 0.0, self.chrome.frame);
+            draw_text(fb, cb.x1 + tick_len + pad, py - ch / 2, label, s, 0.0, self.chrome.ink);
+        }
+        if let Some(caption) = &bar.label {
+            // A long caption slides left to fit, but keeps the frame's own
+            // padding off the edge rather than butting against it.
+            let lw = text_width(caption, s);
+            let lx = cb.x0.min((fb.w as i32 - lw - pad).max(0));
+            draw_text(fb, lx, cb.y0 - ch - pad, caption, s, 0.0, self.chrome.ink_bright);
+        }
+    }
+
     fn draw_crosshair(
         &self,
         fb: &mut Framebuffer,
@@ -3192,11 +5273,29 @@ impl Plot {
             if !self.is_visible(ti) {
                 continue;
             }
-            let xs = match t {
+            // A histogram has no x array — its bars are derived — so it offers
+            // its bin centres, materialised for this iteration only.
+            let centres;
+            let xs: &[f32] = match t {
                 Trace::Scatter2d { xs, .. }
                 | Trace::Line2d { xs, .. }
-                | Trace::Bar2d { xs, .. } => xs,
-                _ => continue,
+                | Trace::Band2d { xs, .. } => xs,
+                // A box summarises a group; there is no x sample under the
+                // guide, and its five numbers are not a value at a position.
+                Trace::Box2d { .. } => continue,
+                // A horizontal bar's positions are y coordinates; a vertical
+                // guide has nothing to snap to on them.
+                Trace::Bar2d { orient, .. } if orient.is_horizontal() => continue,
+                Trace::Bar2d { xs, .. } => xs,
+                Trace::Histogram2d { values, bins, .. } => {
+                    let b = self.hist_bins(ti, values, *bins);
+                    centres = (0..b.counts.len()).map(|i| b.center(i) as f32).collect::<Vec<_>>();
+                    &centres
+                }
+                // A grid snaps to its columns: the crosshair is a vertical
+                // guide, so the x coordinates are the ones it can land on.
+                Trace::Heatmap2d { xs, .. } => xs,
+                traces_3d!() => continue,
             };
             for &x in xs {
                 if let Some((wlo, whi)) = vis {
@@ -3229,97 +5328,160 @@ impl Plot {
                 Some(k) => &maps_r[k],
                 None => map,
             };
-            let (xs, vals) = match t {
-                Trace::Scatter2d { xs, ys, .. } | Trace::Line2d { xs, ys, .. } => (xs, ys),
-                Trace::Bar2d { xs, heights, .. } => (xs, heights),
-                _ => continue,
+            // A histogram reads out the bin itself — the interval and its
+            // count — because "27" alone does not say 27 of what.
+            let (value, readout) = match t {
+                Trace::Histogram2d { values, bins, .. } => {
+                    let b = self.hist_bins(ti, values, *bins);
+                    let Some(i) = (0..b.counts.len()).find(|&i| b.center(i) as f32 == snap) else {
+                        continue;
+                    };
+                    let (lo, hi) = b.edges(i);
+                    let n = b.counts[i];
+                    (n as f32, format!("[{}, {})  {n}", format_value(lo), format_value(hi)))
+                }
+                _ => {
+                    let (xs, vals) = match t {
+                        Trace::Scatter2d { xs, ys, .. } | Trace::Line2d { xs, ys, .. } => (xs, ys),
+                        // A band's readout is the interval itself, since its
+                        // whole point is the width between the two edges.
+                        Trace::Band2d { xs, lo, hi, .. } => {
+                            let Some(i) = xs.iter().position(|&x| x == snap) else { continue };
+                            let (Some(&a), Some(&b)) = (lo.get(i), hi.get(i)) else { continue };
+                            if !a.is_finite() || !b.is_finite() {
+                                continue;
+                            }
+                            let name = t
+                                .name()
+                                .map_or_else(|| format!("series {}", ti + 1), str::to_owned);
+                            let (a, b) = (a.min(b), a.max(b));
+                            rows.push((
+                                format!(
+                                    "{name}  {}–{}",
+                                    format_value(a as f64),
+                                    format_value(b as f64)
+                                ),
+                                t.color(),
+                            ));
+                            continue;
+                        }
+                        Trace::Box2d { .. } => continue,
+                        Trace::Bar2d { orient, .. } if orient.is_horizontal() => continue,
+                        Trace::Bar2d { xs, heights, .. } => (xs, heights),
+                        Trace::Histogram2d { .. } => unreachable!("handled above"),
+                        // A grid has a value per *cell*, so a vertical guide
+                        // crosses a whole column of them; there is no single
+                        // number to put in the readout. Hovering a cell is
+                        // what a heatmap wants, and that is a different
+                        // gesture from the x crosshair.
+                        Trace::Heatmap2d { .. } => continue,
+                        traces_3d!() => continue,
+                    };
+                    let Some(i) = xs.iter().position(|&x| x == snap) else { continue };
+                    let Some(&v) = vals.get(i) else { continue };
+                    let name = t.name().map_or_else(|| format!("series {}", ti + 1), str::to_owned);
+                    (v, format!("{name}  {}", format_value(v as f64)))
+                }
             };
-            let Some(i) = xs.iter().position(|&x| x == snap) else { continue };
-            let Some(&v) = vals.get(i) else { continue };
-            if !v.is_finite() {
+            if !value.is_finite() {
                 continue;
             }
-            let py = m.sy(v as f64).round() as i32;
+            let py = m.sy(value as f64).round() as i32;
             if py >= y0 && py <= y1 {
                 fb.disc(px as f32, py as f32, 0.0, 2.6 * s as f32, [255, 255, 255]);
                 fb.disc(px as f32, py as f32, 0.0, 1.7 * s as f32, t.color());
             }
-            let name = t.name().map_or_else(|| format!("series {}", ti + 1), str::to_owned);
-            rows.push((format!("{name}  {}", format_value(v as f64)), t.color()));
+            rows.push((readout, t.color()));
         }
         if rows.is_empty() {
             return;
         }
 
-        let (cw, ch) = (CHAR_W * s, CHAR_H * s);
-        let pad = 3 * s;
-        let swatch = ch - s;
-        let cap_height = ch as f32 - s as f32 * 0.5;
-        let measure = |n: &str| -> i32 {
-            if s > 1 {
-                hershey_text_width(n, cap_height)
-            } else {
-                text_width(n, s)
-            }
-        };
-        let header = match self.x_epoch {
-            Some(base) => format!("x  {}", format_datetime(base + snap as f64)),
-            None => format!("x  {}", format_value(snap as f64)),
-        };
-        let text_w =
-            rows.iter().map(|(l, _)| measure(l)).chain([measure(&header)]).max().unwrap_or(cw);
-        let entry_h = ch + pad;
-        let box_w = pad + swatch + pad + text_w + pad;
-        let box_h = (rows.len() as i32 + 1) * entry_h + pad;
+        // The same rounded panel as the legend, so the two read as one family.
+        let cw = CHAR_W * s;
+        let ps = PanelStyle::new(s);
+        let header = format!("x  {}", self.format_x(snap as f64));
+        let text_w = rows
+            .iter()
+            .map(|(l, _)| ps.measure(l))
+            .chain([ps.measure(&header)])
+            .max()
+            .unwrap_or(cw);
+        let (box_w, box_h) = ps.box_size(rows.len() as i32 + 1, text_w);
         // Beside the guide, flipped to its left when the right side would
         // leave the frame, and clamped inside the plot area vertically.
-        let mut bx0 = px + 2 * pad;
+        let mut bx0 = px + ps.inset;
         if bx0 + box_w > x1 {
-            bx0 = (px - 2 * pad - box_w).max(x0 + 1);
+            bx0 = (px - ps.inset - box_w).max(x0 + 1);
         }
         let bx1 = bx0 + box_w;
-        let by0 = (y0 + pad).min((y1 - box_h).max(y0));
+        let by0 = (y0 + ps.inset).min((y1 - box_h).max(y0));
         let by1 = by0 + box_h;
 
-        fb.rect_fill(bx0, by0, bx1, by1, 0.0, self.chrome.bg);
-        fb.rect_fill(bx0, by0, bx1, by0, 0.0, self.chrome.frame);
-        fb.rect_fill(bx0, by1, bx1, by1, 0.0, self.chrome.frame);
-        fb.rect_fill(bx0, by0, bx0, by1, 0.0, self.chrome.frame);
-        fb.rect_fill(bx1, by0, bx1, by1, 0.0, self.chrome.frame);
-        let mut draw_row = |row_i: i32, label: &str, ink: Rgb| {
-            let ey = by0 + pad + row_i * entry_h;
-            if s > 1 {
-                draw_text_hershey(
-                    fb,
-                    bx0 + pad + swatch + pad,
-                    ey,
-                    label,
-                    cap_height,
-                    0.0,
-                    ink,
-                    self.chrome.bg,
-                );
-            } else {
-                draw_text(fb, bx0 + pad + swatch + pad, ey, label, s, 0.0, ink);
-            }
-        };
-        draw_row(0, &header, self.chrome.ink);
-        for (i, (label, _)) in rows.iter().enumerate() {
-            draw_row(i as i32 + 1, label, self.chrome.ink_bright);
-        }
-        for (i, (_, color)) in rows.iter().enumerate() {
-            let ey = by0 + pad + (i as i32 + 1) * entry_h;
-            fb.rect_fill(bx0 + pad, ey, bx0 + pad + swatch, ey + swatch, 0.0, *color);
+        ps.frame(fb, (bx0, by0, bx1, by1), 0.0, &self.chrome);
+        let row_y = |row_i: i32| by0 + ps.pad_y + row_i * ps.row_h;
+        // The x value heads the box in dimmer ink; the series rows follow.
+        ps.label(fb, bx0 + ps.text_dx(), row_y(0), &header, 0.0, self.chrome.ink, self.chrome.bg);
+        for (i, (label, color)) in rows.iter().enumerate() {
+            let ey = row_y(i as i32 + 1);
+            ps.chip(fb, bx0, ey, s, 0.0, *color);
+            let ink = self.chrome.ink_bright;
+            ps.label(fb, bx0 + ps.text_dx(), ey, label, 0.0, ink, self.chrome.bg);
         }
     }
 
+    /// Where the legend goes for a render of this size, and the font scale it
+    /// uses: the 2D path anchors it to the plot frame, the 3D path to the
+    /// image itself. Shared by drawing and hit-testing, so a click always
+    /// lands on the row the eye is pointing at.
+    fn legend_anchor(&self, px_w: usize, px_h: usize) -> (i32, i32, i32, bool) {
+        if !self.traces.is_empty() && !self.is_3d() {
+            let l = self.layout_2d(px_w, px_h);
+            (l.x1, l.y0, l.s, false)
+        } else {
+            let s = ((px_h.max(1) as f32) / 240.0).round().clamp(1.0, 4.0) as i32;
+            (px_w.max(1) as i32 - 1, 0, s, true)
+        }
+    }
+
+    /// The legend's rows and pixel box, or `None` when nothing is named.
+    /// `three_d` says which render path is asking; only traces that path
+    /// actually draws are listed, so a named 2D trace mixed into a 3D plot
+    /// never appears as a legend entry for geometry that is not on screen.
+    /// Hidden traces *are* listed, greyed out — the row is what you click to
+    /// bring one back.
+    fn legend_box(&self, x1: i32, y0: i32, s: i32, three_d: bool) -> Option<LegendBox<'_>> {
+        let rows: Vec<LegendRow> = self
+            .traces
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| self.in_legend(*i) && t.is_3d() == three_d)
+            .filter_map(|(i, t)| {
+                t.name().map(|name| LegendRow {
+                    trace: i,
+                    name,
+                    color: t.color(),
+                    visible: self.is_visible(i),
+                })
+            })
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let ps = PanelStyle::new(s);
+        let text_w = rows.iter().map(|r| ps.measure(r.name)).max().unwrap_or(CHAR_W * s);
+        let (box_w, box_h) = ps.box_size(rows.len() as i32, text_w);
+        let bx1 = x1 - ps.inset_x;
+        let bx0 = bx1 - box_w;
+        let by0 = y0 + ps.inset;
+        Some(LegendBox { ps, bx0, by0, bx1, by1: by0 + box_h, rows })
+    }
+
     /// Legend for named traces, top-right inside the plot area. The swatch
-    /// carries series identity; the label text stays in neutral ink. `z` is
+    /// carries series identity; the label text stays in neutral ink, and a
+    /// hidden series keeps its row with the colour drained out of it. `z` is
     /// the depth to draw at: 0.0 in the 2D path, pulled far forward in 3D so
-    /// no geometry can poke through the legend box. `three_d` says which
-    /// render path is asking; only traces that path actually draws are
-    /// listed, so a named 2D trace mixed into a 3D plot never appears as a
-    /// legend entry for geometry that is not on screen.
+    /// no geometry can poke through the legend box.
     #[allow(clippy::too_many_arguments)]
     fn draw_legend(
         &self,
@@ -3331,71 +5493,21 @@ impl Plot {
         z: f32,
         three_d: bool,
     ) {
-        let entries: Vec<(&str, Rgb)> = self
-            .traces
-            .iter()
-            .enumerate()
-            .filter(|(i, t)| self.is_visible(*i) && t.is_3d() == three_d)
-            .filter_map(|(_, t)| t.name().map(|n| (n, t.color())))
-            .collect();
-        if entries.is_empty() {
-            return;
-        }
-        let (cw, ch) = (CHAR_W * s, CHAR_H * s);
-        let pad = 3 * s;
-        let swatch = ch - s; // slightly smaller than a text row
-                             // At scale 1 the 5×7 bitmap font is the crispest thing there is; any
-                             // larger, the Hershey stroke font renders smooth instead of blocky.
-        let cap_height = ch as f32 - s as f32 * 0.5;
-        let measure = |n: &str| -> i32 {
-            if s > 1 {
-                hershey_text_width(n, cap_height)
-            } else {
-                text_width(n, s)
-            }
-        };
-        let text_w = entries.iter().map(|(n, _)| measure(n)).max().unwrap_or(cw);
-        let entry_h = ch + pad;
-        let box_w = pad + swatch + pad + text_w + pad;
-        let box_h = entries.len() as i32 * entry_h + pad;
-        let bx1 = x1 - pad;
-        let bx0 = bx1 - box_w;
-        let by0 = y0 + pad;
-        let by1 = by0 + box_h;
+        let Some(lb) = self.legend_box(x1, y0, s, three_d) else { return };
+        let (ps, bx0, by0) = (lb.ps, lb.bx0, lb.by0);
 
-        fb.rect_fill(bx0, by0, bx1, by1, z, self.chrome.bg);
-        fb.rect_fill(bx0, by0, bx1, by0, z, self.chrome.frame);
-        fb.rect_fill(bx0, by1, bx1, by1, z, self.chrome.frame);
-        fb.rect_fill(bx0, by0, bx0, by1, z, self.chrome.frame);
-        fb.rect_fill(bx1, by0, bx1, by1, z, self.chrome.frame);
-        for (i, (name, color)) in entries.iter().enumerate() {
-            let ey = by0 + pad + i as i32 * entry_h;
-            let (sx0, sx1) = (bx0 + pad, bx0 + pad + swatch);
-            fb.rect_fill(sx0, ey, sx1, ey + swatch, z, *color);
-            if s > 1 {
-                // Soften the swatch: knock the corner pixels back to the
-                // legend background so it reads as a rounded chip.
-                for (cx, cy) in [(sx0, ey), (sx1, ey), (sx0, ey + swatch), (sx1, ey + swatch)] {
-                    fb.rect_fill(cx, cy, cx, cy, z, self.chrome.bg);
-                }
-            }
-            // Rendered against the legend's own background — the one place
-            // text sits on a known opaque fill, so it can be antialiased.
-            let tx = bx0 + pad + swatch + pad;
-            if s > 1 {
-                draw_text_hershey(
-                    fb,
-                    tx,
-                    ey,
-                    name,
-                    cap_height,
-                    z,
-                    self.chrome.ink_bright,
-                    self.chrome.bg,
-                );
+        ps.frame(fb, (bx0, by0, lb.bx1, lb.by1), z, &self.chrome);
+        for (i, row) in lb.rows.iter().enumerate() {
+            let ey = by0 + ps.pad_y + i as i32 * ps.row_h;
+            // A toggled-off series greys out rather than vanishing — the way
+            // the website legend does it, and the only way back on.
+            let (chip, ink) = if row.visible {
+                (row.color, self.chrome.ink_bright)
             } else {
-                draw_text(fb, tx, ey, name, s, z, self.chrome.ink_bright);
-            }
+                (fade(desaturate(row.color), self.chrome.bg), fade(self.chrome.ink, self.chrome.bg))
+            };
+            ps.chip(fb, bx0, ey, s, z, chip);
+            ps.label(fb, bx0 + ps.text_dx(), ey, row.name, z, ink, self.chrome.bg);
         }
     }
 
@@ -3432,6 +5544,923 @@ impl Plot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A drawn pixel's color, or `None` where nothing was written.
+    fn px(fb: &Framebuffer, x: usize, y: usize) -> Option<Rgb> {
+        let i = y * fb.w + x;
+        fb.drawn[i].then(|| fb.color[i])
+    }
+
+    const BAND: Rgb = [40, 90, 160];
+
+    fn cat(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn per_point_styling_colors_sizes_and_shapes_independently() {
+        let (xs, ys) = (vec![0.0, 1.0, 2.0], vec![1.0, 1.0, 1.0]);
+        let red: Rgb = [220, 40, 40];
+        let blue: Rgb = [40, 40, 220];
+
+        let mut plot = Plot::new();
+        plot.add_scatter2d_styled(
+            xs.clone(),
+            ys.clone(),
+            red,
+            3.0,
+            Some(vec![blue, blue, blue]),
+            None,
+            None,
+            None,
+            YAxis::Primary,
+        );
+        let fb = plot.render(240, 160);
+        let drawn = |c: Rgb| (0..fb.h).any(|y| (0..fb.w).any(|x| px(&fb, x, y) == Some(c)));
+        assert!(drawn(blue), "per-point colors are used");
+        assert!(!drawn(red), "the uniform color is overridden");
+    }
+
+    /// A short array styles a prefix and the rest fall back — a partial
+    /// mapping must never drop points off the chart.
+    #[test]
+    fn short_style_arrays_fall_back_instead_of_truncating() {
+        let mut plot = Plot::new();
+        let red: Rgb = [220, 40, 40];
+        let blue: Rgb = [40, 40, 220];
+        plot.add_scatter2d_styled(
+            vec![0.0, 1.0, 2.0],
+            vec![1.0, 1.0, 1.0],
+            red,
+            3.0,
+            Some(vec![blue]),
+            None,
+            None,
+            None,
+            YAxis::Primary,
+        );
+        let fb = plot.render(240, 160);
+        let mut saw = (false, false);
+        for y in 0..fb.h {
+            for x in 0..fb.w {
+                match px(&fb, x, y) {
+                    Some(c) if c == blue => saw.0 = true,
+                    Some(c) if c == red => saw.1 = true,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(saw, (true, true), "styled prefix and unstyled remainder both draw");
+    }
+
+    #[test]
+    fn per_point_sizes_widen_the_windowed_clip_box() {
+        // A big point whose centre sits just outside the frame must still
+        // reach into it; the clip box is sized by the largest mark.
+        let mut plot = Plot::new();
+        plot.add_scatter2d_styled(
+            vec![0.0, 10.0],
+            vec![1.0, 1.0],
+            [220, 40, 40],
+            1.0,
+            None,
+            Some(vec![1.0, 14.0]),
+            None,
+            None,
+            YAxis::Primary,
+        );
+        plot.x_window = Some((-1.0, 9.5));
+        let fb = plot.render(240, 160);
+        assert!(
+            (0..fb.h).any(|y| (0..fb.w).any(|x| px(&fb, x, y).is_some())),
+            "an oversized point near the window edge must still render"
+        );
+    }
+
+    #[test]
+    fn set_point_styles_rejects_non_scatter_traces() {
+        let mut plot = Plot::new();
+        let bars = plot.add_bar2d(vec![0.0], vec![1.0], [1, 2, 3], None, YAxis::Primary);
+        assert_eq!(
+            plot.set_point_styles(bars, Some(vec![[1, 2, 3]]), None, None),
+            Err(TraceError::WrongKind)
+        );
+        assert_eq!(plot.set_point_styles(99, None, None, None), Err(TraceError::UnknownTrace));
+    }
+
+    /// The whole point of a step: it must pass through the corner, and the
+    /// corner is exactly where a straight segment would not go.
+    #[test]
+    fn step_modes_place_the_riser_where_they_promise() {
+        let a = (0.0, 10.0);
+        let b = (10.0, 0.0);
+        assert_eq!(Interp::Linear.corners(a, b), [None, None]);
+        // Pre: rise at the old x, then run across at the new y.
+        assert_eq!(Interp::Pre.corners(a, b), [Some((0.0, 0.0)), None]);
+        // Post: run across at the old y, then rise at the new x.
+        assert_eq!(Interp::Post.corners(a, b), [Some((10.0, 10.0)), None]);
+        // Mid: two corners, riser halfway between.
+        assert_eq!(Interp::Mid.corners(a, b), [Some((5.0, 10.0)), Some((5.0, 0.0))]);
+        assert_eq!(Interp::parse("post"), Some(Interp::Post));
+        assert_eq!(Interp::parse("stairs"), None);
+    }
+
+    /// A step has a flat leg; a diagonal does not. Counting total pixels
+    /// cannot tell them apart — discs stamped along a 45° path cover more
+    /// area per unit length than along an axis-aligned one, so the totals
+    /// flip with geometry — but the widest single row is decisive.
+    #[test]
+    fn a_step_runs_flat_where_a_line_runs_diagonally() {
+        let widest_row = |interp: Interp| {
+            let mut plot = Plot::new();
+            plot.add_step2d(
+                vec![0.0, 1.0, 2.0],
+                vec![0.0, 1.0, 0.0],
+                [220, 40, 40],
+                2.0,
+                interp,
+                None,
+                YAxis::Primary,
+            );
+            let fb = plot.render(240, 240);
+            (0..fb.h)
+                .map(|y| (0..fb.w).filter(|&x| px(&fb, x, y) == Some([220, 40, 40])).count())
+                .max()
+                .unwrap_or(0)
+        };
+        let diagonal = widest_row(Interp::Linear);
+        for mode in [Interp::Pre, Interp::Post, Interp::Mid] {
+            assert!(
+                widest_row(mode) > diagonal * 4,
+                "{mode:?} must hold its value across a flat run; \
+                 widest row {} vs diagonal {diagonal}",
+                widest_row(mode)
+            );
+        }
+    }
+
+    #[test]
+    fn binning_counts_every_finite_value_exactly_once() {
+        let v: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let b = bin_values(&v, BinSpec::Count(10));
+        assert_eq!(b.counts.len(), 10);
+        assert_eq!(b.counts.iter().sum::<u32>(), 100, "no value may be lost");
+        // The largest value lands in the last bin rather than off the end of
+        // the half-open interval.
+        assert!(*b.counts.last().unwrap() > 0);
+
+        // Non-finite values are dropped, like a non-finite coordinate.
+        let b = bin_values(&[1.0, f32::NAN, 2.0, f32::INFINITY], BinSpec::Count(2));
+        assert_eq!(b.counts.iter().sum::<u32>(), 2);
+
+        // Degenerate samples stay representable.
+        assert!(bin_values(&[], BinSpec::Auto).counts.is_empty());
+        let same = bin_values(&[5.0, 5.0, 5.0], BinSpec::Auto);
+        assert_eq!(same.counts.iter().sum::<u32>(), 3);
+        assert!(same.width > 0.0, "a zero-span sample still needs a drawable width");
+    }
+
+    #[test]
+    fn bin_rules_respect_their_knobs_and_stay_bounded() {
+        let v: Vec<f32> = (0..1000).map(|i| (i % 37) as f32).collect();
+        assert_eq!(bin_values(&v, BinSpec::Count(7)).counts.len(), 7);
+        // An explicit width is honoured exactly.
+        let w = bin_values(&v, BinSpec::Width(4.0));
+        assert!((w.width - 4.0).abs() < 1e-9);
+        // No rule may ask for more bins than a terminal can draw.
+        assert!(bin_values(&v, BinSpec::Count(usize::MAX)).counts.len() <= MAX_BINS);
+        assert!(bin_values(&v, BinSpec::Width(1e-12)).counts.len() <= MAX_BINS);
+        // Heavily tied data has a zero IQR; Auto must fall back, not diverge.
+        let tied = vec![1.0f32; 500];
+        assert!(!bin_values(&tied, BinSpec::Auto).counts.is_empty());
+    }
+
+    /// Zoom must not rebin: the bars a reader is looking at have to keep
+    /// meaning the same thing when they pan.
+    #[test]
+    fn a_histogram_keeps_its_bins_under_zoom_and_rebins_on_extend() {
+        let mut plot = Plot::new();
+        let id = plot.add_histogram2d(
+            (0..100).map(|i| i as f32).collect(),
+            BinSpec::Count(10),
+            [200, 120, 60],
+            None,
+            YAxis::Primary,
+        );
+        let before = plot.hist_bins(id, &[], BinSpec::Auto).into_owned();
+        plot.x_window = Some((10.0, 20.0));
+        let windowed = plot.hist_bins(id, &[], BinSpec::Auto).into_owned();
+        assert_eq!(before, windowed, "a window must not move bin edges");
+
+        // Streaming new observations does rebin.
+        plot.extend_values(id, &[500.0]).unwrap();
+        let after = plot.hist_bins(id, &[], BinSpec::Auto).into_owned();
+        assert_ne!(before.hi(), after.hi(), "a new extreme must widen the range");
+        assert_eq!(after.counts.iter().sum::<u32>(), 101);
+    }
+
+    #[test]
+    fn a_histogram_draws_bars_and_reports_its_kind() {
+        let mut plot = Plot::new();
+        let id = plot.add_histogram2d(
+            (0..200).map(|i| (i % 20) as f32).collect(),
+            BinSpec::Count(8),
+            [200, 120, 60],
+            Some("sample".into()),
+            YAxis::Primary,
+        );
+        let fb = plot.render(320, 200);
+        let bars = (0..fb.h)
+            .map(|y| (0..fb.w).filter(|&x| px(&fb, x, y) == Some([200, 120, 60])).count())
+            .sum::<usize>();
+        assert!(bars > 500, "the histogram must fill real area, got {bars}");
+
+        // It is structural for the coordinate `extend` path, and says why.
+        let (kind, why) = plot.traces[id].structural_reason().unwrap();
+        assert_eq!(kind, "histogram");
+        assert!(why.contains("extend_values"));
+        assert_eq!(plot.extend_xy(id, &[1.0], &[1.0]), Err(TraceError::Structural));
+        assert_eq!(plot.extend_values(99, &[1.0]), Err(TraceError::UnknownTrace));
+    }
+
+    fn heat() -> Plot {
+        let mut plot = Plot::new();
+        // A 3x2 grid whose values climb left to right.
+        plot.add_heatmap2d(
+            vec![0.0, 1.0, 2.0],
+            vec![0.0, 1.0],
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            Colormap::Viridis,
+            Some("grid".into()),
+        );
+        plot
+    }
+
+    /// Cells tile edge to edge: a regular grid must leave no seam between
+    /// neighbours, which is what the two-axis pad exists for.
+    #[test]
+    fn heatmap_cells_tile_the_grid_on_both_axes() {
+        let plot = heat();
+        assert_eq!(plot.cached_pad(0), Some((0.5, 0.5)));
+        let CachedBounds::B2 { xlo, xhi, ylo, yhi, .. } = plot.meta[0].bounds else {
+            panic!("a heatmap caches a B2 box");
+        };
+        assert_eq!((xlo, xhi), (-0.5, 2.5), "x reaches half a cell past the centres");
+        assert_eq!((ylo, yhi), (-0.5, 1.5), "and so does y — the bar case padded none");
+    }
+
+    #[test]
+    fn a_heatmap_paints_its_ramp_and_leaves_holes_for_nan() {
+        let fb = heat().render(300, 200);
+        let ramp = |t: f32| Colormap::Viridis.sample(t);
+        let has = |c: Rgb| (0..fb.h).any(|y| (0..fb.w).any(|x| px(&fb, x, y) == Some(c)));
+        assert!(has(ramp(0.0)), "the low end of the ramp is painted");
+        assert!(has(ramp(1.0)), "and the high end");
+
+        // A non-finite cell is a hole, not a zero: blanking one must remove
+        // area rather than paint it with the ramp's bottom color.
+        let filled = |p: &Plot| {
+            let fb = p.render(300, 200);
+            (0..fb.h).map(|y| (0..fb.w).filter(|&x| px(&fb, x, y).is_some()).count()).sum::<usize>()
+        };
+        let solid = heat();
+        let mut holed = heat();
+        if let Trace::Heatmap2d { zs, .. } = &mut holed.traces[0] {
+            zs[4] = f32::NAN;
+        }
+        holed.meta.clear(); // force the desynced full-scan path too
+        assert!(filled(&holed) < filled(&solid), "a NaN cell must leave a hole");
+    }
+
+    #[test]
+    fn a_heatmap_reports_its_range_and_is_structural() {
+        let plot = heat();
+        assert_eq!(plot.heatmap_range(0), Some((0.0, 5.0)));
+        assert_eq!(plot.heatmap_range(99), None);
+        let (kind, why) = plot.traces[0].structural_reason().unwrap();
+        assert_eq!((kind, why), ("heatmap", "a fixed grid"));
+        // It is always on the primary axis: a grid spans both axes itself.
+        assert_eq!(plot.traces[0].axis(), YAxis::Primary);
+    }
+
+    /// A horizontal bar is the vertical one with its axes swapped — every
+    /// consequence of that has to follow, not just the drawing.
+    #[test]
+    fn horizontal_bars_swap_which_axis_carries_what() {
+        let build = |orient: Orient| {
+            let mut plot = Plot::new();
+            plot.add_bar2d_oriented(
+                vec![0.0, 1.0, 2.0],
+                vec![3.0, 5.0, 4.0],
+                [200, 120, 60],
+                orient,
+                None,
+                YAxis::Primary,
+            );
+            plot
+        };
+        let v = build(Orient::Vertical);
+        let h = build(Orient::Horizontal);
+        let hw = bar_halfwidth(&[0.0, 1.0, 2.0]) as f64;
+
+        // The width moves to the axis the bars are spaced along...
+        assert_eq!(v.cached_pad(0), Some((hw, 0.0)));
+        assert_eq!(h.cached_pad(0), Some((0.0, hw)));
+        // ...and bar_hw still finds it.
+        assert_eq!(h.bar_hw(0, &[0.0, 1.0, 2.0], Orient::Horizontal), hw);
+
+        // The cached box is the vertical one transposed.
+        let CachedBounds::B2 { xlo: vx0, xhi: vx1, ylo: vy0, yhi: vy1, .. } = v.meta[0].bounds
+        else {
+            panic!("B2")
+        };
+        let CachedBounds::B2 { xlo: hx0, xhi: hx1, ylo: hy0, yhi: hy1, .. } = h.meta[0].bounds
+        else {
+            panic!("B2")
+        };
+        assert_eq!((hx0, hx1), (vy0, vy1), "x now carries the values");
+        assert_eq!((hy0, hy1), (vx0, vx1), "and y carries the categories");
+        // The value axis still reaches the zero baseline.
+        assert_eq!(hx0, 0.0);
+    }
+
+    #[test]
+    fn horizontal_bars_draw_wide_rows_not_tall_columns() {
+        let widest = |orient: Orient, tallest: bool| {
+            let mut plot = Plot::new();
+            plot.add_bar2d_oriented(
+                vec![0.0, 1.0, 2.0],
+                vec![3.0, 5.0, 4.0],
+                [200, 120, 60],
+                orient,
+                None,
+                YAxis::Primary,
+            );
+            let fb = plot.render(300, 300);
+            let hit = |x: usize, y: usize| px(&fb, x, y) == Some([200, 120, 60]);
+            if tallest {
+                (0..fb.w).map(|x| (0..fb.h).filter(|&y| hit(x, y)).count()).max().unwrap_or(0)
+            } else {
+                (0..fb.h).map(|y| (0..fb.w).filter(|&x| hit(x, y)).count()).max().unwrap_or(0)
+            }
+        };
+        // Vertical bars are tall columns; horizontal ones are wide rows.
+        assert!(widest(Orient::Vertical, true) > widest(Orient::Vertical, false));
+        assert!(widest(Orient::Horizontal, false) > widest(Orient::Horizontal, true));
+    }
+
+    /// The crosshair is a vertical guide, so a horizontal bar has no x sample
+    /// for it to land on — it must sit the gesture out rather than snap to a
+    /// y coordinate as if it were one.
+    #[test]
+    fn horizontal_bars_sit_out_the_x_crosshair() {
+        let mut plot = Plot::new();
+        plot.add_bar2d_oriented(
+            vec![0.0, 1.0, 2.0],
+            vec![3.0, 5.0, 4.0],
+            [200, 120, 60],
+            Orient::Horizontal,
+            None,
+            YAxis::Primary,
+        );
+        let plain = plot.render(300, 200);
+        plot.hover2d_px = Some(150.0);
+        let hovered = plot.render(300, 200);
+        assert_eq!(plain.rgba(), hovered.rgba(), "no guide, no readout");
+    }
+
+    fn two_bar_series(mode: BarMode) -> Plot {
+        let mut plot = Plot::new();
+        plot.barmode = mode;
+        plot.add_bar2d(vec![0.0, 1.0], vec![3.0, 4.0], [200, 0, 0], None, YAxis::Primary);
+        plot.add_bar2d(vec![0.0, 1.0], vec![2.0, 5.0], [0, 0, 200], None, YAxis::Primary);
+        plot
+    }
+
+    fn y_extent(plot: &Plot) -> (f64, f64) {
+        let (_, _, ylo, yhi, _) = plot.bounds_2d();
+        (ylo, yhi)
+    }
+
+    /// Overlay is the historical behaviour and must stay bit-for-bit: two
+    /// series at the same positions overplot, and the axis is sized for the
+    /// taller one alone.
+    #[test]
+    fn overlay_leaves_bars_full_width_and_unstacked() {
+        let plot = two_bar_series(BarMode::Overlay);
+        let hw = bar_halfwidth(&[0.0, 1.0]) as f64;
+        assert_eq!(plot.bar_geometry(0, 0.0, 3.0, hw), (-hw, hw, 0.0, 3.0));
+        assert_eq!(plot.bar_geometry(1, 0.0, 2.0, hw), (-hw, hw, 0.0, 2.0));
+        // The taller single bar is 5, not the 9 a stack would reach.
+        assert!(y_extent(&plot).1 < 9.0);
+    }
+
+    #[test]
+    fn grouping_splits_the_slot_without_overlapping() {
+        let plot = two_bar_series(BarMode::Group);
+        let hw = bar_halfwidth(&[0.0, 1.0]) as f64;
+        let (a0, a1, ..) = plot.bar_geometry(0, 0.0, 3.0, hw);
+        let (b0, b1, ..) = plot.bar_geometry(1, 0.0, 2.0, hw);
+        assert!(a1 <= b0, "grouped bars must not overlap: {a1} then {b0}");
+        assert!((a0 - -hw).abs() < 1e-9 && (b1 - hw).abs() < 1e-9, "they fill the slot");
+        assert!(((a1 - a0) - (b1 - b0)).abs() < 1e-9, "and split it evenly");
+        // Grouping does not change the value axis.
+        assert!(y_extent(&plot).1 < 9.0);
+    }
+
+    #[test]
+    fn stacking_lifts_the_baseline_and_grows_the_axis() {
+        let plot = two_bar_series(BarMode::Stack);
+        let hw = bar_halfwidth(&[0.0, 1.0]) as f64;
+        // The lower trace starts at zero...
+        assert_eq!(plot.bar_geometry(0, 0.0, 3.0, hw).2, 0.0);
+        // ...and the upper one starts where it ended.
+        let (_, _, v0, v1) = plot.bar_geometry(1, 0.0, 2.0, hw);
+        assert_eq!((v0, v1), (3.0, 5.0));
+        // The axis must reach the tallest total (4 + 5 = 9), not the tallest bar.
+        assert!(y_extent(&plot).1 >= 9.0, "the axis must fit the stack");
+    }
+
+    /// A hidden trace leaves the stack and the group, rather than holding an
+    /// empty slot or a phantom baseline.
+    #[test]
+    fn hiding_a_trace_removes_it_from_the_stack_and_the_group() {
+        let mut plot = two_bar_series(BarMode::Stack);
+        plot.set_visible(0, false).unwrap();
+        let hw = bar_halfwidth(&[0.0, 1.0]) as f64;
+        assert_eq!(plot.bar_geometry(1, 0.0, 2.0, hw).2, 0.0, "the survivor falls to zero");
+
+        let mut plot = two_bar_series(BarMode::Group);
+        plot.set_visible(0, false).unwrap();
+        assert_eq!(plot.bar_slot(1), (0, 1), "the survivor takes the whole slot");
+    }
+
+    /// Mixed signs grow both ways from the baseline instead of cancelling: a
+    /// net bar would hide both contributions behind one number.
+    #[test]
+    fn stacking_keeps_positive_and_negative_apart() {
+        let mut plot = Plot::new();
+        plot.barmode = BarMode::Stack;
+        plot.add_bar2d(vec![0.0], vec![4.0], [200, 0, 0], None, YAxis::Primary);
+        plot.add_bar2d(vec![0.0], vec![-3.0], [0, 0, 200], None, YAxis::Primary);
+        plot.add_bar2d(vec![0.0], vec![2.0], [0, 200, 0], None, YAxis::Primary);
+        let hw = bar_halfwidth(&[0.0]) as f64;
+        // The negative starts at zero, not at +4.
+        assert_eq!(plot.bar_geometry(1, 0.0, -3.0, hw), (-hw, hw, -3.0, 0.0));
+        // The third stacks on the positives only.
+        assert_eq!(plot.bar_geometry(2, 0.0, 2.0, hw).2, 4.0);
+        let (lo, hi) = y_extent(&plot);
+        assert!(lo <= -3.0 && hi >= 6.0, "both directions must fit: {lo}..{hi}");
+    }
+
+    #[test]
+    fn a_band_fills_between_its_edges_and_sizes_the_axis_to_both() {
+        let mut plot = Plot::new();
+        plot.add_band2d(
+            vec![0.0, 1.0, 2.0],
+            vec![1.0, 0.0, 1.0],
+            vec![4.0, 5.0, 4.0],
+            [40, 90, 160],
+            Some("ci".into()),
+            YAxis::Primary,
+        );
+        let (_, _, ylo, yhi) = {
+            let (a, b, c, d, _) = plot.bounds_2d();
+            (a, b, c, d)
+        };
+        assert!(ylo <= 0.0 && yhi >= 5.0, "the axis must fit both edges: {ylo}..{yhi}");
+
+        let fb = plot.render(240, 180);
+        let filled = (0..fb.h)
+            .map(|y| (0..fb.w).filter(|&x| px(&fb, x, y) == Some([40, 90, 160])).count())
+            .sum::<usize>();
+        assert!(filled > 2000, "the ribbon must be a solid area, got {filled}");
+
+        // Crossed edges are a band, not an error: the fill is between them.
+        let mut crossed = Plot::new();
+        crossed.add_band2d(
+            vec![0.0, 1.0],
+            vec![0.0, 5.0],
+            vec![5.0, 0.0],
+            [40, 90, 160],
+            None,
+            YAxis::Primary,
+        );
+        assert!(crossed.render(240, 180).rgba().chunks(4).any(|p| p[3] > 0));
+    }
+
+    /// Error bars reach past the points they qualify, so the axis has to make
+    /// room for them or their caps are clipped off.
+    #[test]
+    fn error_bars_widen_the_axis_and_draw_capped_spines() {
+        let mut plot = Plot::new();
+        let id = plot.add_scatter2d(
+            vec![1.0, 2.0],
+            vec![1.0, 1.0],
+            [220, 40, 40],
+            2.0,
+            None,
+            YAxis::Primary,
+        );
+        let (.., before_lo, before_hi, _) = plot.bounds_2d();
+        plot.set_error_bars(id, None, Some(ErrBars { plus: vec![3.0, 3.0], minus: None })).unwrap();
+        let (.., after_lo, after_hi, _) = plot.bounds_2d();
+        assert!(after_hi > before_hi && after_lo < before_lo, "the axis must grow both ways");
+        assert!(after_hi >= 4.0, "and reach the cap at y+3");
+
+        // Asymmetric bars are honoured on each side independently.
+        plot.set_error_bars(
+            id,
+            None,
+            Some(ErrBars { plus: vec![3.0, 3.0], minus: Some(vec![0.0, 0.0]) }),
+        )
+        .unwrap();
+        let (.., lo, hi, _) = plot.bounds_2d();
+        assert!(hi >= 4.0 && lo > after_lo, "minus=0 must not extend downward");
+
+        // They take the series' color and are drawn, not merely accounted for.
+        let fb = plot.render(240, 180);
+        let red = (0..fb.h)
+            .map(|y| (0..fb.w).filter(|&x| px(&fb, x, y) == Some([220, 40, 40])).count())
+            .sum::<usize>();
+        let mut bare = Plot::new();
+        bare.add_scatter2d(
+            vec![1.0, 2.0],
+            vec![1.0, 1.0],
+            [220, 40, 40],
+            2.0,
+            None,
+            YAxis::Primary,
+        );
+        let bare_fb = bare.render(240, 180);
+        let bare_red = (0..bare_fb.h)
+            .map(|y| (0..bare_fb.w).filter(|&x| px(&bare_fb, x, y) == Some([220, 40, 40])).count())
+            .sum::<usize>();
+        assert!(red > bare_red, "bars must add drawn area");
+
+        assert_eq!(plot.set_error_bars(99, None, None), Err(TraceError::UnknownTrace));
+        let bars = plot.add_bar2d(vec![0.0], vec![1.0], [1, 2, 3], None, YAxis::Primary);
+        assert_eq!(plot.set_error_bars(bars, None, None), Err(TraceError::WrongKind));
+    }
+
+    /// A short `plus` list leaves later points without bars rather than
+    /// truncating the series.
+    #[test]
+    fn short_error_arrays_leave_later_points_bare() {
+        let e = ErrBars { plus: vec![1.0], minus: None };
+        assert_eq!(e.at(0), Some((1.0, 1.0)));
+        assert_eq!(e.at(1), None);
+        let nan = ErrBars { plus: vec![f32::NAN], minus: None };
+        assert_eq!(nan.at(0), None, "a non-finite bar is no bar");
+    }
+
+    /// Tukey's rule, checked against a hand-computed case: the whiskers stop
+    /// at real data inside the fence, and everything past it is an outlier in
+    /// its own right rather than a longer whisker.
+    #[test]
+    fn box_stats_follow_tukey_and_separate_outliers() {
+        // 1..=9 plus a far outlier, type-7 quantiles over the 10 sorted
+        // values: q1 = 3.25, median = 5.5, q3 = 7.75, so IQR = 4.5 and the
+        // upper fence is 7.75 + 1.5·4.5 = 14.5 — clear of 9, well short of 100.
+        let v: Vec<f32> = vec![1., 2., 3., 4., 5., 6., 7., 8., 9., 100.];
+        let st = box_stats(&v).unwrap();
+        assert!((st.q1 - 3.25).abs() < 1e-9, "q1 = {}", st.q1);
+        assert!((st.median - 5.5).abs() < 1e-9, "median = {}", st.median);
+        assert!((st.q3 - 7.75).abs() < 1e-9, "q3 = {}", st.q3);
+        assert_eq!(st.lo, 1.0, "the low whisker stops at real data");
+        assert_eq!(st.hi, 9.0, "the high whisker stops before the outlier");
+        assert_eq!(st.outliers, vec![100.0], "and 100 stands alone");
+
+        // Degenerate samples stay representable.
+        assert!(box_stats(&[]).is_none());
+        let one = box_stats(&[7.0]).unwrap();
+        assert_eq!((one.q1, one.median, one.q3, one.lo, one.hi), (7.0, 7.0, 7.0, 7.0, 7.0));
+        assert!(one.outliers.is_empty());
+        // Non-finite values are dropped, not counted.
+        assert_eq!(box_stats(&[f32::NAN, 5.0]).unwrap().median, 5.0);
+    }
+
+    #[test]
+    fn box_groups_tolerate_malformed_offsets() {
+        let v = [1.0f32, 2.0, 3.0];
+        let got: Vec<usize> = box_groups(&v, &[0, 2]).map(<[f32]>::len).collect();
+        assert_eq!(got, vec![2, 1], "the last group runs to the end");
+        // Backwards or past the end yields an empty group, never a panic.
+        let got: Vec<usize> = box_groups(&v, &[0, 99]).map(<[f32]>::len).collect();
+        assert_eq!(got, vec![0, 0]);
+        let got: Vec<usize> = box_groups(&v, &[2, 1]).map(<[f32]>::len).collect();
+        assert_eq!(got, vec![0, 2]);
+    }
+
+    #[test]
+    fn a_box_plot_draws_its_parts_and_frames_its_outliers() {
+        let mut plot = Plot::new();
+        let a: Vec<f32> = (1..=9).map(|i| i as f32).chain([100.0]).collect();
+        let b: Vec<f32> = (1..=9).map(|i| i as f32 * 2.0).collect();
+        let mut values = a.clone();
+        values.extend_from_slice(&b);
+        let id = plot.add_box2d(
+            values,
+            vec![0, a.len() as u32],
+            [220, 40, 40],
+            Orient::Vertical,
+            Some("groups".into()),
+            YAxis::Primary,
+        );
+        // The axis must reach the outlier — the one point you most need to see.
+        let (_, _, _, yhi, _) = plot.bounds_2d();
+        assert!(yhi >= 100.0, "the frame must contain the outlier, got {yhi}");
+        // Two boxes, one unit apart, padded by half a box each side.
+        let (xlo, xhi, ..) = plot.bounds_2d();
+        assert!(xlo < 0.0 && xhi > 1.0);
+
+        let fb = plot.render(320, 240);
+        let full = (0..fb.h)
+            .map(|y| (0..fb.w).filter(|&x| px(&fb, x, y) == Some([220, 40, 40])).count())
+            .sum::<usize>();
+        let dim = shade([220, 40, 40], 0.55);
+        let boxed = (0..fb.h)
+            .map(|y| (0..fb.w).filter(|&x| px(&fb, x, y) == Some(dim)).count())
+            .sum::<usize>();
+        assert!(boxed > 100, "the IQR box must be a real area, got {boxed}");
+        assert!(full > 50, "median, whiskers and outliers draw at full colour");
+
+        let (kind, _) = plot.traces[id].structural_reason().unwrap();
+        assert_eq!(kind, "box");
+    }
+
+    fn demo_2d_plot() -> Plot {
+        let mut plot = Plot::new();
+        plot.add_scatter2d(
+            vec![0.0, 1.0, 2.0],
+            vec![0.0, 1.0, 2.0],
+            [200, 120, 60],
+            2.5,
+            None,
+            YAxis::Primary,
+        );
+        plot
+    }
+
+    #[test]
+    fn a_colorbar_reserves_its_own_margin_and_paints_the_ramp() {
+        let mut plot = demo_2d_plot();
+        let without = plot.layout_2d(400, 240);
+        plot.colorbar = Some(Colorbar { map: Colormap::Viridis, lo: 0.0, hi: 100.0, label: None });
+        let with = plot.layout_2d(400, 240);
+
+        // The plot gives up width rather than drawing over itself.
+        assert!(with.x1 < without.x1, "the colorbar must take its own margin");
+        let cb = with.cbar.as_ref().expect("a colorbar was set");
+        assert!(cb.x0 > with.x1, "the strip sits outside the plot rect");
+        assert_eq!((cb.y0, cb.y1), (with.y0, with.y1), "the ramp spans the plot height");
+        assert!(!cb.ticks.is_empty() && cb.ticks.len() == cb.labels.len());
+
+        // The painted ramp is the colormap itself, top = hi.
+        let fb = plot.render(400, 240);
+        let mid = (cb.x0 + cb.x1) / 2;
+        let top = px(&fb, mid as usize, (cb.y0 + 2) as usize).unwrap();
+        let bot = px(&fb, mid as usize, (cb.y1 - 2) as usize).unwrap();
+        assert_ne!(top, bot, "the ramp must vary along its length");
+        let near = |a: Rgb, b: Rgb| (0..3).all(|i| (a[i] as i32 - b[i] as i32).abs() <= 24);
+        assert!(near(top, Colormap::Viridis.sample(1.0)), "top of the ramp is `hi`");
+        assert!(near(bot, Colormap::Viridis.sample(0.0)), "bottom of the ramp is `lo`");
+    }
+
+    /// The reserved margin has to cover everything `draw_colorbar` walks —
+    /// the strip, its tick, and the widest label — or the outermost digits
+    /// fall off the frame.
+    #[test]
+    fn a_colorbar_reserves_room_for_its_widest_label() {
+        let mut plot = demo_2d_plot();
+        plot.colorbar = Some(Colorbar { map: Colormap::Viridis, lo: 0.0, hi: 1000.0, label: None });
+        let (w, h) = (420, 260);
+        let l = plot.layout_2d(w, h);
+        let cb = l.cbar.as_ref().unwrap();
+        let widest = cb.labels.iter().map(|t| text_width(t, l.s)).max().unwrap();
+        let right_edge = cb.x1 + 2 * l.s + 3 * l.s + widest;
+        assert!(right_edge <= w as i32, "label runs to {right_edge}, past the {w}px frame");
+    }
+
+    #[test]
+    fn a_colorbar_caption_buys_its_space_from_the_top_margin() {
+        let mut plot = demo_2d_plot();
+        plot.colorbar = Some(Colorbar { map: Colormap::Plasma, lo: 0.0, hi: 1.0, label: None });
+        let plain = plot.layout_2d(400, 240);
+        plot.colorbar =
+            Some(Colorbar { map: Colormap::Plasma, lo: 0.0, hi: 1.0, label: Some("kW".into()) });
+        let captioned = plot.layout_2d(400, 240);
+        assert!(captioned.y0 > plain.y0, "a caption pushes the frame down to fit");
+    }
+
+    /// A colorbar and the right-hand axes stack outward instead of colliding.
+    #[test]
+    fn a_colorbar_stacks_outside_the_right_axis_columns() {
+        let mut plot = demo_2d_plot();
+        plot.add_line2d(
+            vec![0.0, 1.0, 2.0],
+            vec![100.0, 200.0, 300.0],
+            [60, 200, 210],
+            2.0,
+            None,
+            YAxis::Y2,
+        );
+        plot.colorbar = Some(Colorbar { map: Colormap::Viridis, lo: 0.0, hi: 10.0, label: None });
+        let l = plot.layout_2d(500, 260);
+        let cb = l.cbar.as_ref().unwrap();
+        assert!(l.has_right[0]);
+        // The strip clears the innermost tick-label column.
+        assert!(
+            cb.x0 > l.x1 + l.col_x[0],
+            "the ramp must sit outside the y2 labels, not over them"
+        );
+        assert!(cb.x1 < 500, "and stay on the framebuffer");
+    }
+
+    #[test]
+    fn category_ticks_land_on_integers_and_clip_to_the_view() {
+        let names = cat(&["Mon", "Tue", "Wed", "Thu"]);
+        let (pos, labels) = category_ticks(&names, -0.5, 3.5, 10);
+        assert_eq!(pos, vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(labels, names);
+
+        // Only what is on screen, and never off the end of the name list.
+        let (pos, labels) = category_ticks(&names, 1.2, 99.0, 10);
+        assert_eq!(pos, vec![2.0, 3.0]);
+        assert_eq!(labels, cat(&["Wed", "Thu"]));
+
+        // A view that contains no whole category emits nothing.
+        assert_eq!(category_ticks(&names, 1.2, 1.8, 10).0, Vec::<f64>::new());
+        assert_eq!(category_ticks(&[], 0.0, 5.0, 10).0, Vec::<f64>::new());
+        assert_eq!(category_ticks(&names, f64::NAN, 3.0, 10).0, Vec::<f64>::new());
+    }
+
+    /// Thinning drops whole strides, so surviving labels stay on their own
+    /// categories rather than drifting onto neighbours.
+    #[test]
+    fn category_ticks_thin_by_a_whole_stride() {
+        let names: Vec<String> = (0..10).map(|i| format!("c{i}")).collect();
+        let (pos, labels) = category_ticks(&names, 0.0, 9.0, 3);
+        assert_eq!(pos, vec![0.0, 4.0, 8.0]);
+        assert_eq!(labels, cat(&["c0", "c4", "c8"]));
+        for (p, l) in pos.iter().zip(&labels) {
+            assert_eq!(*l, names[*p as usize], "a label drifted off its category");
+        }
+    }
+
+    #[test]
+    fn a_categorical_axis_labels_ticks_and_the_crosshair_alike() {
+        let mut plot = Plot::new();
+        plot.add_bar2d(
+            vec![0.0, 1.0, 2.0],
+            vec![3.0, 5.0, 4.0],
+            [200, 120, 60],
+            None,
+            YAxis::Primary,
+        );
+        plot.x_categories = Some(cat(&["alpha", "beta", "gamma"]));
+        let l = plot.layout_2d(400, 240);
+        assert_eq!(l.xlabels, cat(&["alpha", "beta", "gamma"]));
+        assert_eq!(l.xticks, vec![0.0, 1.0, 2.0]);
+        // The readout must agree with the ticks beneath it.
+        assert_eq!(plot.format_x(1.0), "beta");
+        // Categories win over a time axis, and a position that is not a
+        // category falls back rather than mislabelling.
+        plot.x_epoch = Some(1.7e9);
+        assert_eq!(plot.format_x(1.0), "beta");
+        assert_eq!(plot.format_x(1.5), format_datetime(1.7e9 + 1.5));
+    }
+
+    /// The y axis carries its own labels now, so a categorical y is possible
+    /// at all — and the numeric default must be unchanged.
+    #[test]
+    fn the_y_axis_carries_labels_numeric_or_categorical() {
+        let mut plot = Plot::new();
+        plot.add_scatter2d(
+            vec![0.0, 1.0, 2.0],
+            vec![0.0, 1.0, 2.0],
+            [200, 120, 60],
+            2.5,
+            None,
+            YAxis::Primary,
+        );
+        let l = plot.layout_2d(400, 240);
+        assert_eq!(l.ylabels.len(), l.yticks.len(), "every y tick carries a label");
+        assert!(!l.ylabels.is_empty());
+        let numeric = l.ylabels.clone();
+
+        plot.y_categories = Some(cat(&["low", "mid", "high"]));
+        let l = plot.layout_2d(400, 240);
+        assert_eq!(l.ylabels, cat(&["low", "mid", "high"]));
+        assert_eq!(l.yticks, vec![0.0, 1.0, 2.0]);
+        assert_ne!(l.ylabels, numeric);
+
+        // Right axes stay numeric: they carry a second scale, not names.
+        assert_eq!(l.rlabels[0].len(), l.rticks[0].len());
+    }
+
+    #[test]
+    fn fill_between_fills_the_interior_and_nothing_else() {
+        let mut fb = Framebuffer::new(40, 40);
+        // A flat band spanning y = 10..=20 across the full width.
+        fb.fill_between(&[(0.0, 10.0, 20.0), (39.0, 10.0, 20.0)], 0.0, BAND);
+        assert_eq!(px(&fb, 20, 15), Some(BAND), "the interior fills");
+        assert_eq!(px(&fb, 20, 10), Some(BAND), "the low edge is inclusive");
+        assert_eq!(px(&fb, 20, 20), Some(BAND), "the high edge is inclusive");
+        assert_eq!(px(&fb, 20, 9), None, "nothing above the band");
+        assert_eq!(px(&fb, 20, 21), None, "nothing below the band");
+    }
+
+    /// The property the column sweep exists for: where a confidence interval
+    /// pinches to zero the ribbon must stay continuous, not disappear.
+    #[test]
+    fn fill_between_stays_continuous_where_it_pinches_to_zero() {
+        let mut fb = Framebuffer::new(40, 40);
+        fb.fill_between(&[(0.0, 14.0, 26.0), (20.0, 20.0, 20.0), (39.0, 14.0, 26.0)], 0.0, BAND);
+        // Every column across the sweep must have drawn something, including
+        // the waist where lo == hi.
+        for x in 0..40 {
+            assert!(
+                (0..40).any(|y| px(&fb, x, y).is_some()),
+                "column {x} is empty; the band broke where it narrowed"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_between_breaks_at_a_non_finite_column() {
+        let mut fb = Framebuffer::new(40, 20);
+        fb.fill_between(
+            &[(0.0, 5.0, 15.0), (10.0, 5.0, 15.0), (20.0, f64::NAN, 15.0), (39.0, 5.0, 15.0)],
+            0.0,
+            BAND,
+        );
+        assert_eq!(px(&fb, 5, 10), Some(BAND), "the run before the gap fills");
+        // Both spans touching the NaN column are skipped, so the middle is bare.
+        assert_eq!(px(&fb, 15, 10), None, "the span into the gap is skipped");
+        assert_eq!(px(&fb, 30, 10), None, "the span out of the gap is skipped");
+    }
+
+    #[test]
+    fn fill_between_honors_the_clip_rect_and_offscreen_columns() {
+        let mut fb = Framebuffer::new(40, 40);
+        fb.set_clip(10, 10, 20, 20);
+        fb.fill_between(&[(0.0, 0.0, 39.0), (39.0, 0.0, 39.0)], 0.0, BAND);
+        assert_eq!(px(&fb, 15, 15), Some(BAND), "inside the clip draws");
+        assert_eq!(px(&fb, 5, 15), None, "outside the clip does not");
+        fb.clear_clip();
+
+        // A column mapped far off screen must draw nothing and, more to the
+        // point, must not walk the whole way there.
+        let mut fb = Framebuffer::new(40, 40);
+        fb.fill_between(&[(-9000.0, 10.0, 20.0), (-8000.0, 10.0, 20.0)], 0.0, BAND);
+        assert!((0..40).all(|x| (0..40).all(|y| px(&fb, x, y).is_none())));
+    }
+
+    /// The cached `pad` is the contract between the bounds scan and the
+    /// renderer: both read this one number, so a bar can never be drawn wider
+    /// than the range that was sized for it. Bars pad x only — padding y would
+    /// lift the zero baseline off the axis.
+    #[test]
+    fn bar_bounds_pad_x_by_the_halfwidth_and_never_y() {
+        let mut plot = Plot::new();
+        let id = plot.add_bar2d(
+            vec![0.0, 1.0, 2.0],
+            vec![3.0, 5.0, 4.0],
+            [200, 120, 60],
+            None,
+            YAxis::Primary,
+        );
+        let hw = bar_halfwidth(&[0.0, 1.0, 2.0]) as f64;
+        assert_eq!(plot.cached_pad(id), Some((hw, 0.0)));
+
+        let CachedBounds::B2 { xlo, xhi, ylo, yhi, .. } = plot.meta[id].bounds else {
+            panic!("a 2D trace must cache a B2 box");
+        };
+        // x carries the drawn half-width on both sides...
+        assert!((xlo - (0.0 - hw)).abs() < 1e-9, "xlo {xlo} should be -hw");
+        assert!((xhi - (2.0 + hw)).abs() < 1e-9, "xhi {xhi} should be 2+hw");
+        // ...while y is exactly baseline-to-tallest, unpadded.
+        assert_eq!((ylo, yhi), (0.0, 5.0));
+    }
+
+    /// A scatter's extent is its points, so it stores no pad and `bar_hw`
+    /// falls back to recomputing rather than reading a stale zero.
+    #[test]
+    fn point_traces_cache_no_pad() {
+        let mut plot = Plot::new();
+        let id = plot.add_scatter2d(
+            vec![0.0, 1.0],
+            vec![0.0, 1.0],
+            [200, 120, 60],
+            2.5,
+            None,
+            YAxis::Primary,
+        );
+        assert_eq!(plot.cached_pad(id), None);
+        let xs = [0.0f32, 1.0];
+        assert_eq!(plot.bar_hw(id, &xs, Orient::Vertical), bar_halfwidth(&xs) as f64);
+    }
 
     #[test]
     fn renders_nonempty() {

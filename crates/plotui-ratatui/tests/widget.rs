@@ -6,6 +6,7 @@ use crossterm::event::{
 };
 use plotui_core::YAxis;
 use plotui_ratatui::{ElementKind, PlotEvent, PlotOptions, PlotState, PlotWidget, RenderMode};
+use plotui_term::policy::pixel_geometry;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -139,7 +140,7 @@ fn drag_rotates_and_shift_drag_pans() {
     state.handle_event(&mouse(MouseEventKind::Down(MouseButton::Left), 5, 5, KeyModifiers::NONE));
     state.handle_event(&mouse(MouseEventKind::Drag(MouseButton::Left), 8, 5, KeyModifiers::NONE));
     let (yaw, pitch, ..) = state.plot().camera.state();
-    // Camera-grab direction: dragging right orbits the view right (yaw −).
+    // Trackball direction: dragging right turns the object right (yaw −).
     assert!((yaw0 - yaw - 3.0 * 0.03).abs() < 1e-9, "3 cells of drag = 3 * 0.03 rad of yaw");
     assert_eq!(pitch, pitch0);
     assert!(state.dragging());
@@ -167,6 +168,7 @@ fn scroll_and_keys_zoom_rotate_pan_reset() {
 
     let yaw0 = state.plot().camera.yaw;
     let key = |code, mods| Event::Key(KeyEvent::new(code, mods));
+    // Trackball signs: Left turns the object left (yaw +), matching drag.
     state.handle_event(&key(KeyCode::Left, KeyModifiers::NONE));
     assert!((state.plot().camera.yaw - yaw0 - 0.1).abs() < 1e-9);
     state.handle_event(&key(KeyCode::Up, KeyModifiers::SHIFT));
@@ -378,4 +380,62 @@ fn bracket_keys_shift_and_reset_clears() {
     let ev = state.handle_event(&key('r'));
     assert_eq!(ev, Some(PlotEvent::RangeChanged(None)), "reset clears the window");
     assert_eq!(state.plot().x_window, None);
+}
+
+/// A press on a legend row toggles that series instead of grabbing the
+/// camera — the terminal half of the clickable legend. The row is found by
+/// asking the engine where it drew the legend, so this stays honest if the
+/// panel ever moves.
+#[test]
+fn legend_click_toggles_a_series_and_never_rotates() {
+    let mut plot = plotui_core::Plot::new();
+    plot.add_scatter3d(
+        vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+        [230, 60, 120],
+        3.0,
+        Some("alpha".into()),
+    );
+    let mut state = PlotState::new(plot, opts(RenderMode::Placeholder));
+    render(&mut state);
+
+    // Find a cell whose pixel centre lands on the legend row, through the
+    // same geometry the event handler uses.
+    let mut cell = None;
+    'outer: for row in 0..AREA.height {
+        for col in 0..AREA.width {
+            let (pw, ph, px, py, _) =
+                pixel_geometry(AREA.width, AREA.height, CELL_PX.0, CELL_PX.1, col, row);
+            if state.plot().legend_hit(pw, ph, px, py).is_some() {
+                cell = Some((col, row));
+                break 'outer;
+            }
+        }
+    }
+    let (col, row) = cell.expect("the legend must be reachable from some cell");
+
+    let yaw = state.plot().camera.yaw;
+    let ev = state.handle_event(&mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        AREA.x + col,
+        AREA.y + row,
+        KeyModifiers::NONE,
+    ));
+    assert!(matches!(ev, Some(PlotEvent::LegendToggled(_, false))), "the press mutes the series");
+
+    // The press never became a drag, so dragging on from it cannot rotate.
+    state.handle_event(&mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        AREA.x + col + 3,
+        AREA.y + row,
+        KeyModifiers::NONE,
+    ));
+    assert_eq!(state.plot().camera.yaw, yaw, "a legend press must not grab the camera");
+
+    let ev = state.handle_event(&mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        AREA.x + col,
+        AREA.y + row,
+        KeyModifiers::NONE,
+    ));
+    assert!(matches!(ev, Some(PlotEvent::LegendToggled(_, true))), "a second press brings it back");
 }

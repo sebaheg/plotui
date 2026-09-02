@@ -19,6 +19,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("deps", "plotui's own dependency graph, laid out live by a force simulation"),
     ("lidar", "Streaming LiDAR sweep — a scanned room arriving beam by beam, height-colored"),
     ("aizawa", "The Aizawa attractor drawing itself — an RK4 trajectory, colored by speed"),
+    ("protein", "A protein cartoon folding itself in — ubiquitin, ribbons from its own PDB file"),
     (
         "mandelbulb",
         "The 3D cousin of the Mandelbrot set — a marching-cubes mesh, revealed slice by slice",
@@ -106,6 +107,7 @@ pub fn run(args: &ExampleArgs) -> ExitCode {
         "deps" => crate::deps::run(args, output),
         "lidar" => crate::lidar::run(args, output),
         "aizawa" => crate::aizawa::run(args, output),
+        "protein" => crate::protein::run(args, output),
         "mandelbulb" => crate::mandelbulb::run(args, output),
         _ => unreachable!("validated above"),
     };

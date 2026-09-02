@@ -27,6 +27,7 @@ Set the ``PLOTUI_RENDER`` environment variable (or the widget's
 
 from __future__ import annotations
 
+import math
 import os
 
 from rich.cells import cell_len
@@ -52,6 +53,11 @@ _CELL_W, _CELL_H = 12, 24
 # Above this node count, 3D plots drop to half resolution *while interacting*
 # (dragging or auto-rotating) and snap back to full resolution when still.
 _LARGE_NODE_COUNT = 400
+
+# Radians of yaw per auto-rotate tick, matching plotui_term's constant for
+# the Rust terminal frontends. `Plot.spin` owns the *direction*; this is
+# only how fast.
+AUTO_ROTATE_STEP = 0.02
 
 
 def tmux_wrap(escape: str) -> str:
@@ -290,7 +296,13 @@ class PlotWidget(Widget, can_focus=True):
                     pass
 
     def _tick(self) -> None:
-        self.apply_rotate(0.02, 0.0)
+        # Not routed through apply_rotate: that hook is for input paths
+        # (drag, scroll, keys), and an idle spin is not one. `spin` also
+        # owns the direction — it turns the way a rightward drag pushes the
+        # object, so letting go of a grabbed plot does not send it back the
+        # way it came.
+        self._plot.spin(AUTO_ROTATE_STEP)
+        self.invalidate()
 
     # ---- overridable interaction primitives ----
     # Every built-in input path (mouse drag, scroll, keys) routes through
@@ -298,6 +310,51 @@ class PlotWidget(Widget, can_focus=True):
     # overriding Textual event handlers — Textual dispatches on_* handlers to
     # every class in the MRO, so an override would run in addition to this
     # class's handler, not instead of it.
+
+    def _apply_mapped_drag(
+        self,
+        dx: float,
+        dy: float,
+        shift: bool,
+        rotate: float,
+        pan_x: float,
+        pan_y: float,
+        zoom: float,
+    ) -> None:
+        """One drag gesture, decomposed through the plot's input map into the
+        camera moves it maps to — and issued as `apply_*` calls.
+
+        The breakdown happens here rather than in `plot.apply_drag` so a drag
+        still lands on the hooks below, which a subclass may have overridden.
+        Moving the camera in the core directly would go behind that
+        subclass's back: a view that locks rotation (a flat tree that pans
+        instead of tilting) would tilt anyway, and a host that repaints an
+        overlay on camera changes would keep drawing a stale one. Scales and
+        signs mirror `Plot::apply_drag` exactly; at most one call per camera
+        kind, so a diagonal drag is a single rotate.
+        """
+        controls = self._plot.input_map()
+        d_yaw = d_pitch = pan_dx = pan_dy = 0.0
+        factor = 1.0
+        for control, d in zip(controls[2:] if shift else controls[:2], (dx, dy)):
+            if control.startswith("-"):
+                control, d = control[1:], -d
+            if control == "yaw":
+                d_yaw -= d * rotate
+            elif control == "pitch":
+                d_pitch -= d * rotate
+            elif control == "pan_x":
+                pan_dx += d * pan_x
+            elif control == "pan_y":
+                pan_dy += d * pan_y
+            elif control == "zoom":
+                factor *= math.exp(-d * zoom)
+        if d_yaw or d_pitch:
+            self.apply_rotate(d_yaw, d_pitch)
+        if pan_dx or pan_dy:
+            self.apply_pan(pan_dx, pan_dy)
+        if factor != 1.0:
+            self.apply_zoom(factor)
 
     def apply_rotate(self, d_yaw: float, d_pitch: float) -> None:
         self._plot.rotate(d_yaw, d_pitch)
@@ -602,15 +659,14 @@ class PlotWidget(Widget, can_focus=True):
                     self.invalidate()
             else:
                 # Routed through the plot's input map: drag rotates
-                # (camera-grab — drag right orbits the view right),
+                # (trackball — drag right turns the object right),
                 # shift-drag pans, unless remapped via plot.set_input_map.
                 # Pan is in full-resolution image pixels, so one dragged
                 # cell is one cell's worth of pixels and the plot stays
                 # under the pointer.
-                self._plot.apply_drag(
+                self._apply_mapped_drag(
                     dx, dy, event.shift, 0.03, self._cell_w, self._cell_h, 0.15
                 )
-                self.invalidate()
         elif not self._plot.is_3d():
             if self._crosshair:
                 px_w, px_h, px, py, _ = self._pixel_geometry(event.x, event.y)

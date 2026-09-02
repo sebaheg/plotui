@@ -126,7 +126,7 @@ func TestDragRotatesAndShiftDragPans(t *testing.T) {
 	m, _ = m.Update(click(5, 5))
 	m, _ = m.Update(motion(8, 5, 0))
 	after := m.Plot().CameraState()
-	// Camera-grab direction: dragging right orbits the view right (yaw −).
+	// Trackball direction: dragging right turns the object right (yaw −).
 	if diff := after[0] - before[0]; diff > -0.089 || diff < -0.091 {
 		t.Fatalf("3 cells of drag: yaw moved %v, want -0.09", diff)
 	}

@@ -8,7 +8,9 @@
 //! crate is that single home, so Python and Go callers see identical
 //! behavior down to the error text.
 
-use plotui_core::{Colormap, Element, Plot, RangeHit, Rgb, Shape, Trace, YAxis};
+use plotui_core::{
+    BarMode, BinSpec, Colormap, Element, ErrBars, Interp, Orient, Plot, RangeHit, Rgb, Shape, YAxis,
+};
 
 /// Default edge pick radius as a fraction of the node pick radius (the
 /// `pick_element_px` default every binding applies).
@@ -138,6 +140,119 @@ pub fn check_colorway(colors: &[Rgb]) -> Result<(), BindError> {
     Ok(())
 }
 
+/// A line's interpolation by name; an unknown name is an error.
+pub fn parse_interp(name: &str) -> Result<Interp, BindError> {
+    Interp::parse(name).ok_or_else(|| {
+        BindError::invalid(format!(
+            "unknown step mode {name:?}; expected one of: {}",
+            Interp::NAMES.join(", ")
+        ))
+    })
+}
+
+/// Set how several bar traces share their positions. Returns whether
+/// anything changed, so a frontend can skip a repaint.
+pub fn set_barmode(plot: &mut Plot, name: &str) -> Result<bool, BindError> {
+    let mode = BarMode::parse(name).ok_or_else(|| {
+        BindError::invalid(format!(
+            "unknown barmode {name:?}; expected one of: {}",
+            BarMode::NAMES.join(", ")
+        ))
+    })?;
+    let changed = plot.barmode != mode;
+    plot.barmode = mode;
+    Ok(changed)
+}
+
+/// Build error bars from the two arrays every binding exposes: an empty
+/// `plus` means no bars on that axis, and an empty `minus` mirrors `plus`.
+pub fn error_bars(plus: Vec<f32>, minus: Vec<f32>) -> Option<ErrBars> {
+    (!plus.is_empty()).then(|| ErrBars { plus, minus: (!minus.is_empty()).then_some(minus) })
+}
+
+/// Attach per-point uncertainty to a 2D scatter or line, with the shared
+/// handle-error mapping.
+pub fn set_error_bars(
+    plot: &mut Plot,
+    handle: usize,
+    err_x: Option<ErrBars>,
+    err_y: Option<ErrBars>,
+) -> Result<(), BindError> {
+    plot.set_error_bars(handle, err_x, err_y).map_err(|e| BindError {
+        kind: match e {
+            plotui_core::TraceError::UnknownTrace => BindErrorKind::UnknownHandle,
+            _ => BindErrorKind::InvalidArg,
+        },
+        msg: match e {
+            plotui_core::TraceError::WrongKind => {
+                "error bars attach to 2D scatter and line traces".into()
+            }
+            other => other.to_string(),
+        },
+    })
+}
+
+/// A bar's orientation by name; an unknown name is an error.
+pub fn parse_orient(name: &str) -> Result<Orient, BindError> {
+    Orient::parse(name).ok_or_else(|| {
+        BindError::invalid(format!(
+            "unknown orientation {name:?}; expected one of: {}",
+            Orient::NAMES.join(", ")
+        ))
+    })
+}
+
+/// Set an axis's category names; an empty list clears them back to numeric
+/// ticks. Returns whether anything changed, so a frontend can skip a repaint.
+pub fn set_categories(plot: &mut Plot, axis: &str, names: Vec<String>) -> Result<bool, BindError> {
+    let names = (!names.is_empty()).then_some(names);
+    let slot = match axis {
+        "x" => &mut plot.x_categories,
+        "y" => &mut plot.y_categories,
+        other => {
+            return Err(BindError::invalid(format!(
+                "categories go on axis 'x' or 'y', got {other:?}"
+            )))
+        }
+    };
+    let changed = *slot != names;
+    *slot = names;
+    Ok(changed)
+}
+
+/// A histogram's bin rule from the two knobs every binding exposes: an
+/// explicit bin count, an explicit bin width, or neither for the automatic
+/// rule. Giving both is a contradiction rather than a precedence puzzle, so
+/// it is refused.
+pub fn parse_bins(count: Option<usize>, width: Option<f64>) -> Result<BinSpec, BindError> {
+    match (count, width) {
+        (Some(_), Some(_)) => Err(BindError::invalid("give bins or bin_width, not both".into())),
+        (Some(0), _) => Err(BindError::invalid("bins must be at least 1".into())),
+        (Some(k), None) => Ok(BinSpec::Count(k)),
+        (None, Some(w)) if w > 0.0 && w.is_finite() => Ok(BinSpec::Width(w)),
+        (None, Some(w)) => {
+            Err(BindError::invalid(format!("bin_width must be a positive number, got {w}")))
+        }
+        (None, None) => Ok(BinSpec::Auto),
+    }
+}
+
+/// Append observations to a histogram, with the shared handle-error mapping.
+pub fn extend_values(plot: &mut Plot, handle: usize, values: &[f32]) -> Result<(), BindError> {
+    plot.extend_values(handle, values).map_err(|e| BindError {
+        kind: match e {
+            plotui_core::TraceError::UnknownTrace => BindErrorKind::UnknownHandle,
+            _ => BindErrorKind::InvalidArg,
+        },
+        msg: match e {
+            plotui_core::TraceError::WrongKind => {
+                "extend_values appends to histogram traces; use extend for coordinate series".into()
+            }
+            other => other.to_string(),
+        },
+    })
+}
+
 /// A colormap by name; an unknown name is an error (`None` means a solid
 /// color, so it maps through).
 pub fn parse_colormap(name: Option<&str>) -> Result<Option<Colormap>, BindError> {
@@ -152,21 +267,52 @@ pub fn parse_colormap(name: Option<&str>) -> Result<Option<Colormap>, BindError>
     }
 }
 
-/// A camera control by name, for [`plotui_core::InputMap`] remapping — the
-/// shared rule every binding applies to gesture-map strings.
-pub fn parse_camera_control(name: &str) -> Result<plotui_core::CameraControl, BindError> {
+/// The name of a camera control, the inverse of [`parse_camera_control`].
+/// Bindings that let a host *read* the gesture map back (so a frontend can
+/// decompose a drag into the individual camera moves it maps to) round-trip
+/// through this pair.
+pub fn camera_control_name(control: plotui_core::CameraControl, invert: bool) -> &'static str {
     use plotui_core::CameraControl as C;
-    match name {
-        "yaw" => Ok(C::Yaw),
-        "pitch" => Ok(C::Pitch),
-        "pan_x" => Ok(C::PanX),
-        "pan_y" => Ok(C::PanY),
-        "zoom" => Ok(C::Zoom),
-        "off" => Ok(C::Off),
-        _ => Err(BindError::invalid(format!(
-            "camera control must be 'yaw', 'pitch', 'pan_x', 'pan_y', 'zoom' or 'off', got {name:?}"
-        ))),
+    match (control, invert) {
+        (C::Yaw, false) => "yaw",
+        (C::Yaw, true) => "-yaw",
+        (C::Pitch, false) => "pitch",
+        (C::Pitch, true) => "-pitch",
+        (C::PanX, false) => "pan_x",
+        (C::PanX, true) => "-pan_x",
+        (C::PanY, false) => "pan_y",
+        (C::PanY, true) => "-pan_y",
+        (C::Zoom, false) => "zoom",
+        (C::Zoom, true) => "-zoom",
+        // "off" has no direction to invert; the flag is not observable.
+        (C::Off, _) => "off",
     }
+}
+
+/// A camera control by name, for [`plotui_core::InputMap`] remapping — the
+/// shared rule every binding applies to gesture-map strings. A `-` prefix
+/// (`"-yaw"`) inverts the axis; the second return is that invert flag.
+pub fn parse_camera_control(name: &str) -> Result<(plotui_core::CameraControl, bool), BindError> {
+    use plotui_core::CameraControl as C;
+    let (invert, bare) = match name.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, name),
+    };
+    let control = match bare {
+        "yaw" => C::Yaw,
+        "pitch" => C::Pitch,
+        "pan_x" => C::PanX,
+        "pan_y" => C::PanY,
+        "zoom" => C::Zoom,
+        "off" => C::Off,
+        _ => {
+            return Err(BindError::invalid(format!(
+                "camera control must be 'yaw', 'pitch', 'pan_x', 'pan_y', 'zoom' or 'off', \
+                 optionally prefixed with '-' to invert the axis, got {name:?}"
+            )))
+        }
+    };
+    Ok((control, invert))
 }
 
 /// Validate a nested surface grid (`zs[j][i]` = height at `(xs[i], ys[j])`)
@@ -197,6 +343,53 @@ pub fn check_surface_grid_len(nx: usize, ny: usize, len: usize) -> Result<(), Bi
     Ok(())
 }
 
+/// Validate a box plot's CSR group offsets: ascending, and none past the end
+/// of the sample. Paired with [`flatten_box_groups`] the way
+/// [`check_surface_grid_len`] pairs with [`flatten_surface_grid`] — the flat
+/// form for the C ABI, the nested one for Python and Go.
+pub fn check_group_starts(n_values: usize, group_starts: &[u32]) -> Result<(), BindError> {
+    if group_starts.is_empty() {
+        return Err(BindError::invalid("group_starts must name at least one group".into()));
+    }
+    if group_starts[0] != 0 {
+        return Err(BindError::invalid(format!(
+            "group_starts must begin at 0; got {}",
+            group_starts[0]
+        )));
+    }
+    for w in group_starts.windows(2) {
+        if w[1] < w[0] {
+            return Err(BindError::invalid(format!(
+                "group_starts must ascend; {} follows {}",
+                w[1], w[0]
+            )));
+        }
+    }
+    if let Some(&last) = group_starts.last() {
+        if last as usize > n_values {
+            return Err(BindError::invalid(format!(
+                "group_starts names offset {last}, past the {n_values} values given"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Flatten nested groups into the `(values, group_starts)` pair the core
+/// stores — the ergonomic form for Python and Go.
+pub fn flatten_box_groups(groups: Vec<Vec<f32>>) -> Result<(Vec<f32>, Vec<u32>), BindError> {
+    if groups.is_empty() {
+        return Err(BindError::invalid("a box plot needs at least one group of values".into()));
+    }
+    let mut values = Vec::new();
+    let mut starts = Vec::with_capacity(groups.len());
+    for g in groups {
+        starts.push(values.len() as u32);
+        values.extend(g);
+    }
+    Ok((values, starts))
+}
+
 /// Validate a mesh's flat index triples: a whole number of triangles, every
 /// index naming a vertex that exists.
 pub fn check_mesh_indices(n_verts: usize, tris: &[u32]) -> Result<(), BindError> {
@@ -212,6 +405,37 @@ pub fn check_mesh_indices(n_verts: usize, tris: &[u32]) -> Result<(), BindError>
         )));
     }
     Ok(())
+}
+
+/// Apply per-point scatter styling with the shared rule every binding uses:
+/// an empty list means "leave this channel uniform", so a caller can set one
+/// channel without disturbing the others.
+pub fn set_point_styles(
+    plot: &mut Plot,
+    handle: usize,
+    colors: Vec<Rgb>,
+    sizes: Vec<f32>,
+    shapes: Vec<&str>,
+) -> Result<(), BindError> {
+    let shapes = if shapes.is_empty() { None } else { Some(parse_shapes(&shapes)?) };
+    plot.set_point_styles(
+        handle,
+        (!colors.is_empty()).then_some(colors),
+        (!sizes.is_empty()).then_some(sizes),
+        shapes,
+    )
+    .map_err(|e| BindError {
+        kind: match e {
+            plotui_core::TraceError::UnknownTrace => BindErrorKind::UnknownHandle,
+            _ => BindErrorKind::InvalidArg,
+        },
+        msg: match e {
+            plotui_core::TraceError::WrongKind => {
+                "per-point styling applies to 2D scatter traces".into()
+            }
+            other => other.to_string(),
+        },
+    })
 }
 
 /// The graph node-color rule: one color per node, padding or truncating a
@@ -346,40 +570,22 @@ pub fn extend(
         D2,
         D3,
     }
-    let kind = match plot.traces.get(handle) {
-        None => {
-            return Err(BindError {
-                kind: BindErrorKind::UnknownHandle,
-                msg: format!("unknown trace handle {handle}"),
-            });
-        }
-        Some(Trace::Graph3d { .. }) => {
-            return Err(BindError {
-                kind: BindErrorKind::Structural,
-                msg: "graph3d traces are structural (edges reference node indices); \
-                     rebuild the plot to change them"
-                    .into(),
-            });
-        }
-        Some(Trace::Surface3d { .. }) => {
-            return Err(BindError {
-                kind: BindErrorKind::Structural,
-                msg: "surface3d traces are structural (a fixed grid); \
-                     rebuild the plot to change them"
-                    .into(),
-            });
-        }
-        Some(Trace::Mesh3d { .. }) => {
-            return Err(BindError {
-                kind: BindErrorKind::Structural,
-                msg: "mesh3d traces are structural (triangles reference vertex indices); \
-                     rebuild the plot to change them"
-                    .into(),
-            });
-        }
-        Some(Trace::Scatter3d { .. } | Trace::Line3d { .. }) => Kind::D3,
-        Some(_) => Kind::D2,
+    let Some(trace) = plot.traces.get(handle) else {
+        return Err(BindError {
+            kind: BindErrorKind::UnknownHandle,
+            msg: format!("unknown trace handle {handle}"),
+        });
     };
+    // Core classifies; this crate phrases. Both questions are answered by an
+    // exhaustive match in `plotui_core`, so a new trace kind cannot reach here
+    // as an unclassified fall-through the way `mesh3d` once did.
+    if let Some((name, why)) = trace.structural_reason() {
+        return Err(BindError {
+            kind: BindErrorKind::Structural,
+            msg: format!("{name} traces are structural ({why}); rebuild the plot to change them"),
+        });
+    }
+    let kind = if trace.is_3d() { Kind::D3 } else { Kind::D2 };
     let result = match (kind, zs) {
         (Kind::D2, Some(_)) => {
             return Err(BindError::invalid(
@@ -398,6 +604,24 @@ pub fn extend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_control_names_round_trip() {
+        use plotui_core::CameraControl as C;
+        for control in [C::Yaw, C::Pitch, C::PanX, C::PanY, C::Zoom] {
+            for invert in [false, true] {
+                let name = camera_control_name(control, invert);
+                assert_eq!(
+                    parse_camera_control(name).unwrap(),
+                    (control, invert),
+                    "{name} must parse back to what it names"
+                );
+            }
+        }
+        // "off" is directionless: it names itself and parses back uninverted.
+        assert_eq!(camera_control_name(C::Off, true), "off");
+        assert_eq!(parse_camera_control("off").unwrap(), (C::Off, false));
+    }
 
     #[test]
     fn zip3_truncates_to_the_shortest() {

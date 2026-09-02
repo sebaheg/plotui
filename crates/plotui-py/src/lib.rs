@@ -197,14 +197,9 @@ fn resolve_x(plot: &mut plotui_core::Plot, xs: XCoords) -> PyResult<Vec<f32>> {
             let base = match plot.x_epoch {
                 Some(b) => b,
                 None => {
-                    let has_2d = plot.traces.iter().any(|t| {
-                        matches!(
-                            t,
-                            plotui_core::Trace::Scatter2d { .. }
-                                | plotui_core::Trace::Line2d { .. }
-                                | plotui_core::Trace::Bar2d { .. }
-                        )
-                    });
+                    // Core owns the 2D/3D split, so a new 2D trace joins this
+                    // guard automatically instead of silently escaping it.
+                    let has_2d = plot.traces.iter().any(|t| !t.is_3d());
                     if has_2d {
                         return Err(PyValueError::new_err(MIXED_X_MSG));
                     }
@@ -380,6 +375,37 @@ impl Plot {
         Ok(self.inner.add_surface3d(xs, ys, flat, c, cm, wireframe, name))
     }
 
+    /// Add an indexed triangle mesh: vertices at (xs[i], ys[i], zs[i]) —
+    /// the same (x, y, z) space as `add_scatter3d` — and `tris` a flat run
+    /// of [a, b, c] vertex-index triples. `colormap` ("viridis" or "plasma",
+    /// default "viridis") colors by z over the mesh's own range; pass
+    /// `colormap=None` with a `color` for a solid mesh. A triangle whose
+    /// index names no vertex is an error; one with a non-finite vertex is
+    /// skipped at render time, the way a surface cell with a NaN corner is a
+    /// hole. `name` puts the mesh in the legend. Vertices are not pickable.
+    #[pyo3(signature = (xs, ys, zs, tris, color=None, colormap="viridis", name=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_mesh3d(
+        &mut self,
+        xs: Coords,
+        ys: Coords,
+        zs: Coords,
+        tris: Vec<[u32; 3]>,
+        color: Option<ColorArg>,
+        colormap: Option<&str>,
+        name: Option<String>,
+    ) -> PyResult<usize> {
+        let verts = zip3(xs, ys, zs);
+        // Validate through the shared rule so the message is byte-identical
+        // to every other binding; nested triples can't be ragged, so only the
+        // out-of-range arm is reachable from here.
+        let flat: Vec<u32> = tris.iter().flatten().copied().collect();
+        plotui_bind::check_mesh_indices(verts.len(), &flat).map_err(to_py)?;
+        let cm = plotui_bind::parse_colormap(colormap).map_err(to_py)?;
+        let c = resolve_color(&self.inner, color)?;
+        Ok(self.inner.add_mesh3d(verts, tris, c, cm, name))
+    }
+
     /// Add a 2D scatter series. With `color=None`, palette slots are assigned
     /// in fixed order. `name` puts the series in the legend. `axis="y2"` or
     /// `"y3"` binds the series to an independent right-hand axis (own
@@ -417,22 +443,207 @@ impl Plot {
         Ok(self.inner.add_line2d(xs, ys.0, c, width, name, parse_axis(axis)?))
     }
 
-    /// Add a 2D bar series: bars at `xs` rising (or falling) from zero to
-    /// `heights`. Bar width comes from the smallest gap between x positions.
-    /// `axis="y2"`/`"y3"` puts it on an independent right-hand axis, whose
-    /// own scale supplies the zero baseline.
-    #[pyo3(signature = (xs, heights, color=None, name=None, axis="y"))]
-    fn add_bar(
+    /// Add a box plot: `groups` is a list of samples, one per box. Group *i*
+    /// sits at position *i*, so `set_categories("x", …)` names the boxes (or
+    /// `"y"` with `orientation="horizontal"`).
+    ///
+    /// Boxes span the quartiles with a median line; whiskers reach the
+    /// furthest values within 1.5·IQR, and anything beyond is drawn as its own
+    /// point rather than being swallowed by a longer whisker.
+    #[pyo3(signature = (groups, color=None, orientation="vertical", name=None, axis="y"))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_box(
+        &mut self,
+        groups: Vec<Vec<f32>>,
+        color: Option<ColorArg>,
+        orientation: &str,
+        name: Option<String>,
+        axis: &str,
+    ) -> PyResult<usize> {
+        let (values, starts) = plotui_bind::flatten_box_groups(groups).map_err(to_py)?;
+        let orient = plotui_bind::parse_orient(orientation).map_err(to_py)?;
+        let c = resolve_color(&self.inner, color)?;
+        Ok(self.inner.add_box2d(values, starts, c, orient, name, parse_axis(axis)?))
+    }
+
+    /// Add a filled band between two boundaries at each x — a confidence
+    /// interval, a min/max envelope, a tolerance range.
+    ///
+    /// Add it *before* the line it belongs to: draw order is the only
+    /// layering in 2D, so a band added afterwards paints over its own centre
+    /// line.
+    #[pyo3(signature = (xs, lo, hi, color=None, name=None, axis="y"))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_band(
         &mut self,
         xs: XCoords,
-        heights: Coords,
+        lo: Coords,
+        hi: Coords,
         color: Option<ColorArg>,
         name: Option<String>,
         axis: &str,
     ) -> PyResult<usize> {
         let c = resolve_color(&self.inner, color)?;
         let xs = resolve_x(&mut self.inner, xs)?;
-        Ok(self.inner.add_bar2d(xs, heights.0, c, name, parse_axis(axis)?))
+        Ok(self.inner.add_band2d(xs, lo.0, hi.0, c, name, parse_axis(axis)?))
+    }
+
+    /// Attach per-point error bars to a 2D scatter or line. Give
+    /// `y_plus`/`y_minus` (or `x_plus`/`x_minus`); omit the `minus` half for
+    /// the symmetric case. Pass nothing for an axis to clear its bars.
+    ///
+    /// Error bars belong to the series: they take its color and stay out of
+    /// the legend, so they cannot drift out of step with the points.
+    #[pyo3(signature = (handle, y_plus=None, y_minus=None, x_plus=None, x_minus=None))]
+    fn set_error_bars(
+        &mut self,
+        handle: usize,
+        y_plus: Option<Vec<f32>>,
+        y_minus: Option<Vec<f32>>,
+        x_plus: Option<Vec<f32>>,
+        x_minus: Option<Vec<f32>>,
+    ) -> PyResult<()> {
+        let ey = plotui_bind::error_bars(y_plus.unwrap_or_default(), y_minus.unwrap_or_default());
+        let ex = plotui_bind::error_bars(x_plus.unwrap_or_default(), x_minus.unwrap_or_default());
+        plotui_bind::set_error_bars(&mut self.inner, handle, ex, ey).map_err(to_py)
+    }
+
+    /// Add a heatmap: `zs` is a list of rows (or a 2D numpy array), `zs[j][i]`
+    /// giving the value at (xs[i], ys[j]) — the same grid shape
+    /// `add_surface3d` takes. Cells centre on their coordinates and tile
+    /// outward by half a step, so a regular grid meets edge to edge; a NaN
+    /// value leaves a hole rather than a zero.
+    ///
+    /// `colorbar=True` (the default) puts a labelled ramp beside the plot
+    /// spanning this grid's own range — without one the colors show structure
+    /// but no values.
+    #[pyo3(signature = (xs, ys, zs, colormap="viridis", colorbar=true, label=None, name=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_heatmap(
+        &mut self,
+        xs: Coords,
+        ys: Coords,
+        zs: Vec<Vec<f32>>,
+        colormap: &str,
+        colorbar: bool,
+        label: Option<String>,
+        name: Option<String>,
+    ) -> PyResult<usize> {
+        let (xs, ys) = (xs.0, ys.0);
+        let flat = plotui_bind::flatten_surface_grid(xs.len(), ys.len(), zs).map_err(to_py)?;
+        let cm = plotui_bind::parse_colormap(Some(colormap))
+            .map_err(to_py)?
+            .expect("a named colormap always resolves");
+        let h = self.inner.add_heatmap2d(xs, ys, flat, cm, name);
+        if colorbar {
+            if let Some((lo, hi)) = self.inner.heatmap_range(h) {
+                self.inner.colorbar = Some(plotui_core::Colorbar { map: cm, lo, hi, label });
+            }
+        }
+        Ok(h)
+    }
+
+    /// Add a histogram of `values`. Give `bins` for a bin count, `bin_width`
+    /// for a fixed width, or neither for the Freedman–Diaconis rule (which
+    /// adapts to spread rather than to sample size). The raw values are kept,
+    /// so `extend_values` can add observations later and the crosshair reads
+    /// out each bar's interval and count.
+    ///
+    /// Bins are solved once from the whole sample and do not change with
+    /// zoom: edges that shifted while panning would change the shape of the
+    /// distribution under your hands.
+    #[pyo3(signature = (values, bins=None, bin_width=None, color=None, name=None, axis="y"))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_histogram(
+        &mut self,
+        values: Coords,
+        bins: Option<usize>,
+        bin_width: Option<f64>,
+        color: Option<ColorArg>,
+        name: Option<String>,
+        axis: &str,
+    ) -> PyResult<usize> {
+        let spec = plotui_bind::parse_bins(bins, bin_width).map_err(to_py)?;
+        let c = resolve_color(&self.inner, color)?;
+        Ok(self.inner.add_histogram2d(values.0, spec, c, name, parse_axis(axis)?))
+    }
+
+    /// Append observations to a histogram and rebin. Unlike `extend` on a
+    /// coordinate series this is not an O(delta) update: one new value can
+    /// move the range and every bin edge with it.
+    fn extend_values(&mut self, handle: usize, values: Coords) -> PyResult<()> {
+        plotui_bind::extend_values(&mut self.inner, handle, &values.0).map_err(to_py)
+    }
+
+    /// Add a 2D step series: the right-angle path between samples rather
+    /// than the straight one. Use it for anything that *holds* its value
+    /// between samples — counters, states, prices — where a straight segment
+    /// would draw a transition that never happened. `where_` is "post" (the
+    /// old value holds until the next sample, the default), "pre" (the new
+    /// value applies from the previous one), or "mid" (the riser sits halfway
+    /// between).
+    #[pyo3(signature = (xs, ys, color=None, width=2.0, where_="post", name=None, axis="y"))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_step(
+        &mut self,
+        xs: XCoords,
+        ys: Coords,
+        color: Option<ColorArg>,
+        width: f32,
+        where_: &str,
+        name: Option<String>,
+        axis: &str,
+    ) -> PyResult<usize> {
+        let c = resolve_color(&self.inner, color)?;
+        let interp = plotui_bind::parse_interp(where_).map_err(to_py)?;
+        let xs = resolve_x(&mut self.inner, xs)?;
+        Ok(self.inner.add_step2d(xs, ys.0, c, width, interp, name, parse_axis(axis)?))
+    }
+
+    /// Add a 2D bar series: bars at `xs` rising (or falling) from zero to
+    /// `heights`. Bar width comes from the smallest gap between x positions.
+    /// `axis="y2"`/`"y3"` puts it on an independent right-hand axis, whose
+    /// own scale supplies the zero baseline.
+    #[pyo3(signature = (xs, heights, color=None, orientation="vertical", name=None, axis="y"))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_bar(
+        &mut self,
+        xs: XCoords,
+        heights: Coords,
+        color: Option<ColorArg>,
+        orientation: &str,
+        name: Option<String>,
+        axis: &str,
+    ) -> PyResult<usize> {
+        let c = resolve_color(&self.inner, color)?;
+        let orient = plotui_bind::parse_orient(orientation).map_err(to_py)?;
+        let xs = resolve_x(&mut self.inner, xs)?;
+        Ok(self.inner.add_bar2d_oriented(xs, heights.0, c, orient, name, parse_axis(axis)?))
+    }
+
+    /// Set how several bar series on one axis share their positions:
+    /// "overlay" (the default — each draws at full width, so equal positions
+    /// overplot), "group" (side by side, each taking 1/n of the width), or
+    /// "stack" (each starting where the one below ended).
+    ///
+    /// Stacking accumulates same-signed values only, so a mix of positive and
+    /// negative heights grows both ways from the baseline instead of
+    /// cancelling into a net figure the reader cannot decompose.
+    fn set_barmode(&mut self, mode: &str) -> PyResult<bool> {
+        plotui_bind::set_barmode(&mut self.inner, mode).map_err(to_py)
+    }
+
+    /// Name an axis's categories: category *i* sits at position *i*, and the
+    /// ticks become one label per category instead of a numeric ladder. Pass
+    /// an empty list to go back to numbers.
+    ///
+    /// Naming categories does not move the range — traces still place
+    /// themselves — so a series plotted at 0, 1, 2 lines up with the first
+    /// three names. Pair `set_categories("y", ...)` with
+    /// `orientation="horizontal"` for readable long labels.
+    #[pyo3(signature = (axis, names))]
+    fn set_categories(&mut self, axis: &str, names: Vec<String>) -> PyResult<bool> {
+        plotui_bind::set_categories(&mut self.inner, axis, names).map_err(to_py)
     }
 
     /// Append points to an existing trace by handle: `extend(h, xs, ys)` for
@@ -497,6 +708,33 @@ impl Plot {
         let nc = rgb_list(node_colors)?;
         let ec = edge_colors.map(rgb_list).transpose()?;
         self.inner.set_graph_colors(handle, nc, ec).map_err(trace_to_py)
+    }
+
+    /// Style a 2D scatter point by point. Each list is independent and
+    /// optional: `colors` for a categorical or colormapped cloud, `sizes` for
+    /// a bubble chart, `shapes` ("disc", "ring", "square", "triangle",
+    /// "diamond", "diamond-open", "dot") for an encoding that survives a
+    /// palette change. Pass `None` to leave a channel uniform, or a list
+    /// shorter than the series to style a prefix of it.
+    #[pyo3(signature = (handle, colors=None, sizes=None, shapes=None))]
+    fn set_point_styles(
+        &mut self,
+        handle: usize,
+        colors: Option<Vec<ColorArg>>,
+        sizes: Option<Vec<f32>>,
+        shapes: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        let colors = colors.map(rgb_list).transpose()?.unwrap_or_default();
+        let shapes = shapes.unwrap_or_default();
+        let shapes: Vec<&str> = shapes.iter().map(String::as_str).collect();
+        plotui_bind::set_point_styles(
+            &mut self.inner,
+            handle,
+            colors,
+            sizes.unwrap_or_default(),
+            shapes,
+        )
+        .map_err(to_py)
     }
 
     /// Append nodes and edges to a graph trace — how new nodes arrive in a
@@ -686,10 +924,20 @@ impl Plot {
     fn rotate(&mut self, d_yaw: f64, d_pitch: f64) {
         self.inner.camera.rotate(d_yaw, d_pitch);
     }
+    /// One auto-rotate step: `step` radians of yaw, turned the way a
+    /// rightward drag pushes the object, so a view that spins on its own
+    /// and a user who grabs it agree. Negative `step` drifts the other way.
+    /// Prefer this to `rotate` for an idle spin — `rotate` takes a raw
+    /// camera delta, whose sign is the opposite one.
+    fn spin(&mut self, step: f64) {
+        self.inner.spin(step);
+    }
     /// Remap what drag gestures do. Each argument names the camera control
     /// that gesture axis drives — "yaw", "pitch", "pan_x", "pan_y", "zoom"
-    /// or "off" — or None to keep its current binding. The default map is
-    /// drag = rotate (yaw/pitch), shift-drag = pan.
+    /// or "off", optionally prefixed with "-" to invert the axis — or None
+    /// to keep its current binding. The default map is drag = rotate as a
+    /// trackball (yaw/pitch, the drag grabs the object), shift-drag = pan;
+    /// "-yaw"/"-pitch" restore camera-grab rotation.
     #[pyo3(signature = (drag_x=None, drag_y=None, shift_drag_x=None, shift_drag_y=None))]
     fn set_input_map(
         &mut self,
@@ -699,18 +947,32 @@ impl Plot {
         shift_drag_y: Option<&str>,
     ) -> PyResult<()> {
         let mut m = self.inner.input_map;
-        for (slot, name) in [
-            (&mut m.drag_x, drag_x),
-            (&mut m.drag_y, drag_y),
-            (&mut m.shift_drag_x, shift_drag_x),
-            (&mut m.shift_drag_y, shift_drag_y),
+        for (slot, inv, name) in [
+            (&mut m.drag_x, &mut m.invert_drag_x, drag_x),
+            (&mut m.drag_y, &mut m.invert_drag_y, drag_y),
+            (&mut m.shift_drag_x, &mut m.invert_shift_drag_x, shift_drag_x),
+            (&mut m.shift_drag_y, &mut m.invert_shift_drag_y, shift_drag_y),
         ] {
             if let Some(name) = name {
-                *slot = plotui_bind::parse_camera_control(name).map_err(to_py)?;
+                (*slot, *inv) = plotui_bind::parse_camera_control(name).map_err(to_py)?;
             }
         }
         self.inner.input_map = m;
         Ok(())
+    }
+    /// The current gesture map as `(drag_x, drag_y, shift_drag_x,
+    /// shift_drag_y)` control names, in the same spelling `set_input_map`
+    /// accepts (a `-` prefix marks an inverted axis). A frontend reads this
+    /// to decompose a drag into the individual camera moves it maps to,
+    /// rather than calling `apply_drag` and losing the breakdown.
+    fn input_map(&self) -> (&'static str, &'static str, &'static str, &'static str) {
+        let m = self.inner.input_map;
+        (
+            plotui_bind::camera_control_name(m.drag_x, m.invert_drag_x),
+            plotui_bind::camera_control_name(m.drag_y, m.invert_drag_y),
+            plotui_bind::camera_control_name(m.shift_drag_x, m.invert_shift_drag_x),
+            plotui_bind::camera_control_name(m.shift_drag_y, m.invert_shift_drag_y),
+        )
     }
     /// Route a drag through the input map (see `set_input_map`): `(dx, dy)`
     /// pointer deltas in whatever unit the scales are calibrated for —
