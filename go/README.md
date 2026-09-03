@@ -42,6 +42,12 @@ escape, _ := p.RenderKitty(cols, rows, cellW, cellH, plotui.RenderOpts{})
 // …emit with the cursor at the region's top-left; p.KittyCleanup() on exit.
 ```
 
+Axis semantics mirror the Python binding, error strings included:
+`SetTitle`, `SetXTitle`, `SetYTitle` (an empty string clears; the y title is
+drawn rotated in the left margin), `SetXRange`/`ClearXRange`/`XRange` and the
+y counterparts (the extent only — zoom and pan still compose on top), and
+`SetXLog`/`SetYLog` for log10 scales (see `axes.go`).
+
 2D x-window / range-slider / time-axis state mirrors the other bindings:
 `SetXWindow`/`ClearXWindow`/`XWindow`, `SetRangeSlider`,
 `SetXEpoch`/`ClearXEpoch`/`XEpoch` (x values as seconds since a UTC epoch

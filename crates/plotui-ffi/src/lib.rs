@@ -1657,6 +1657,345 @@ pub unsafe extern "C" fn plotui_set_x_window(
     })
 }
 
+/// Set the chart title (`text` NULL or empty clears it); writes whether the state
+/// changed to `out_changed`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `text` NUL-terminated UTF-8 or NULL,
+/// `out_changed` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_title(
+    p: *mut PlotuiPlot,
+    text: *const c_char,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let text = match opt_str(text) {
+            Ok(t) => t.map(str::to_string),
+            Err(s) => return s,
+        };
+        match plotui_bind::set_title(&mut p.plot, "title", text) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Read the chart title into `out` as a freshly allocated C string — empty when none
+/// is set. Free it with `plotui_string_free`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out` must be a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_title(p: *const PlotuiPlot, out: *mut *mut c_char) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        out_string(p.plot.title.clone().unwrap_or_default(), out)
+    })
+}
+
+/// Set the x axis title (`text` NULL or empty clears it); writes whether the state
+/// changed to `out_changed`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `text` NUL-terminated UTF-8 or NULL,
+/// `out_changed` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_x_title(
+    p: *mut PlotuiPlot,
+    text: *const c_char,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let text = match opt_str(text) {
+            Ok(t) => t.map(str::to_string),
+            Err(s) => return s,
+        };
+        match plotui_bind::set_title(&mut p.plot, "x", text) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Read the x axis title into `out` as a freshly allocated C string — empty when none
+/// is set. Free it with `plotui_string_free`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out` must be a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_x_title(p: *const PlotuiPlot, out: *mut *mut c_char) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        out_string(p.plot.x_title.clone().unwrap_or_default(), out)
+    })
+}
+
+/// Set the y axis title (`text` NULL or empty clears it); writes whether the state
+/// changed to `out_changed`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `text` NUL-terminated UTF-8 or NULL,
+/// `out_changed` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_y_title(
+    p: *mut PlotuiPlot,
+    text: *const c_char,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let text = match opt_str(text) {
+            Ok(t) => t.map(str::to_string),
+            Err(s) => return s,
+        };
+        match plotui_bind::set_title(&mut p.plot, "y", text) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Read the y axis title into `out` as a freshly allocated C string — empty when none
+/// is set. Free it with `plotui_string_free`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out` must be a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_y_title(p: *const PlotuiPlot, out: *mut *mut c_char) -> i32 {
+    guard(|| {
+        let p = match plot_ref(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        out_string(p.plot.y_title.clone().unwrap_or_default(), out)
+    })
+}
+
+/// Pin the x extent to `[lo, hi]` (`has` false autoscales); writes
+/// whether the state changed to `out_changed`. Unlike an x window this
+/// decides the extent only — the camera still composes on top.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out_changed` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_x_range(
+    p: *mut PlotuiPlot,
+    has: bool,
+    lo: f64,
+    hi: f64,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        match plotui_bind::set_range(&mut p.plot, "x", has.then_some((lo, hi))) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Read the explicit x range into `out_lo`/`out_hi`; returns whether one
+/// is set (outputs untouched when not).
+///
+/// # Safety
+/// `p` must be a live plot handle; out pointers may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_x_range(
+    p: *const PlotuiPlot,
+    out_lo: *mut f64,
+    out_hi: *mut f64,
+) -> bool {
+    match plot_ref(p) {
+        Ok(p) => match p.plot.x_range {
+            Some((lo, hi)) => {
+                if !out_lo.is_null() {
+                    *out_lo = lo;
+                }
+                if !out_hi.is_null() {
+                    *out_hi = hi;
+                }
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Pin the primary y extent to `[lo, hi]` (`has` false autoscales); writes
+/// whether the state changed to `out_changed`. Unlike an x window this
+/// decides the extent only — the camera still composes on top.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out_changed` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_y_range(
+    p: *mut PlotuiPlot,
+    has: bool,
+    lo: f64,
+    hi: f64,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        match plotui_bind::set_range(&mut p.plot, "y", has.then_some((lo, hi))) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Read the explicit primary y range into `out_lo`/`out_hi`; returns whether one
+/// is set (outputs untouched when not).
+///
+/// # Safety
+/// `p` must be a live plot handle; out pointers may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_y_range(
+    p: *const PlotuiPlot,
+    out_lo: *mut f64,
+    out_hi: *mut f64,
+) -> bool {
+    match plot_ref(p) {
+        Ok(p) => match p.plot.y_range {
+            Some((lo, hi)) => {
+                if !out_lo.is_null() {
+                    *out_lo = lo;
+                }
+                if !out_hi.is_null() {
+                    *out_hi = hi;
+                }
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Scale the x axis by log10 (or back). Ignored on a categorical or time axis. Writes whether the state changed
+/// to `out_changed`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out_changed` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_x_log(
+    p: *mut PlotuiPlot,
+    on: bool,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        match plotui_bind::set_log(&mut p.plot, "x", on) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Whether the x axis is set to log10.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_x_log(p: *const PlotuiPlot) -> bool {
+    plot_ref(p).map(|p| p.plot.x_log).unwrap_or(false)
+}
+
+/// Scale the primary y axis by log10 (or back). Ignored on a categorical y axis; the right-hand axes stay linear. Writes whether the state changed
+/// to `out_changed`.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out_changed` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_y_log(
+    p: *mut PlotuiPlot,
+    on: bool,
+    out_changed: *mut bool,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        match plotui_bind::set_log(&mut p.plot, "y", on) {
+            Ok(changed) => {
+                if !out_changed.is_null() {
+                    *out_changed = changed;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Whether the primary y axis is set to log10.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_y_log(p: *const PlotuiPlot) -> bool {
+    plot_ref(p).map(|p| p.plot.y_log).unwrap_or(false)
+}
+
 /// Read the current x window into `out_lo`/`out_hi`; returns whether one is
 /// set (outputs untouched when not).
 ///

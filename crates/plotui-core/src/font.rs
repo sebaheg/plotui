@@ -186,10 +186,22 @@ struct Edge {
 /// baseline at the left sidebearing) at `(ox, oy)` and scaled by `upx` pixels
 /// per font unit. Font y runs up and the framebuffer's runs down, hence the
 /// sign flip.
-fn flatten(gi: usize, ox: f32, oy: f32, upx: f32, out: &mut Vec<Edge>) {
+///
+/// With `rot`, the glyph turns a quarter turn counter-clockwise about that
+/// origin: the advance walks up the frame and glyph tops face left. This is
+/// the only place the transform lives — [`fill`] scanlines whatever polygon
+/// it is handed, so rotated text costs no second rasterizer.
+fn flatten(gi: usize, ox: f32, oy: f32, upx: f32, rot: bool, out: &mut Vec<Edge>) {
     let (first, first_end, n_ends) = glyphs::GLYPHS[gi];
     let (first, first_end, n_ends) = (first as usize, first_end as usize, n_ends as usize);
-    let px = |p: (i16, i16, u8)| (ox + p.0 as f32 * upx, oy - p.1 as f32 * upx);
+    let px = |p: (i16, i16, u8)| {
+        let (dx, dy) = (p.0 as f32 * upx, p.1 as f32 * upx);
+        if rot {
+            (ox - dy, oy - dx)
+        } else {
+            (ox + dx, oy - dy)
+        }
+    };
 
     let mut start = 0usize;
     for e in 0..n_ends {
@@ -358,16 +370,22 @@ fn draw(
     z: f32,
     color: Rgb,
     bg: Option<Rgb>,
+    rot: bool,
 ) {
     let upx = cap_height / CAP;
     let adv = ADV * upx;
-    // `y` is the top of the line box, so the baseline sits one cap below it.
-    let baseline = y as f32 + cap_height;
+    // Upright, `y` is the top of the line box and the baseline sits one cap
+    // below it. Rotated, `(x, y)` is the box's *bottom*-left and the baseline
+    // runs up its left edge, one cap in — so a caller reserves the same two
+    // numbers either way, swapped.
+    let (bx, by) =
+        if rot { (x as f32 + cap_height, y as f32) } else { (x as f32, y as f32 + cap_height) };
     let mut edges: Vec<Edge> = Vec::new();
     for (i, ch) in text.chars().enumerate() {
         let Some(gi) = glyph_index(ch) else { continue };
         edges.clear();
-        flatten(gi, x as f32 + i as f32 * adv, baseline, upx, &mut edges);
+        let (ox, oy) = if rot { (bx, by - i as f32 * adv) } else { (bx + i as f32 * adv, by) };
+        flatten(gi, ox, oy, upx, rot, &mut edges);
         fill(&edges, |px, py, c| match bg {
             Some(bg) => {
                 let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * c).round() as u8;
@@ -393,7 +411,7 @@ pub fn draw_text(fb: &mut Framebuffer, x: i32, y: i32, text: &str, scale: i32, z
         draw_bitmap(fb, x, y, text, z, color);
         return;
     }
-    draw(fb, x, y, text, CAP * (CHAR_W * s) as f32 / ADV, z, color, None);
+    draw(fb, x, y, text, CAP * (CHAR_W * s) as f32 / ADV, z, color, None, false);
 }
 
 /// The scale-1 path: one bitmap column per pixel, no scaling and no coverage.
@@ -406,13 +424,56 @@ fn draw_bitmap(fb: &mut Framebuffer, x: i32, y: i32, text: &str, z: f32, color: 
     for (i, ch) in text.chars().enumerate() {
         let cx = x + i as i32 * CHAR_W;
         let Some(g) = (' '..='~').contains(&ch).then(|| FONT[ch as usize - 0x20]) else {
-            draw(fb, cx, y, &ch.to_string(), CAP * CHAR_W as f32 / ADV, z, color, None);
+            draw(fb, cx, y, &ch.to_string(), CAP * CHAR_W as f32 / ADV, z, color, None, false);
             continue;
         };
         for (col, bits) in g.iter().enumerate() {
             for row in 0..7 {
                 if bits & (1 << row) != 0 {
                     fb.put_px(cx + col as i32, y + row, z, color);
+                }
+            }
+        }
+    }
+}
+
+/// [`draw_text`] turned a quarter turn counter-clockwise: the text reads
+/// bottom to top with its tops facing left, and `(x, y)` is the *bottom*-left
+/// corner of the rotated line box. The box is `CHAR_H * scale` wide and
+/// [`text_width`] tall — the upright numbers, swapped — which is what a
+/// y-axis title needs to reserve in the left margin.
+pub fn draw_text_rot90(
+    fb: &mut Framebuffer,
+    x: i32,
+    y: i32,
+    text: &str,
+    scale: i32,
+    z: f32,
+    color: Rgb,
+) {
+    let s = scale.max(1);
+    if s == 1 {
+        draw_bitmap_rot90(fb, x, y, text, z, color);
+        return;
+    }
+    draw(fb, x, y, text, CAP * (CHAR_W * s) as f32 / ADV, z, color, None, true);
+}
+
+/// The scale-1 rotated path — [`draw_bitmap`]'s transpose. Rotating the
+/// bitmap keeps small frames' titles as crisp as their tick labels; going
+/// through the outline face at this size would blur them for no gain.
+fn draw_bitmap_rot90(fb: &mut Framebuffer, x: i32, y: i32, text: &str, z: f32, color: Rgb) {
+    for (i, ch) in text.chars().enumerate() {
+        // Distance along the (upward) advance, before the rotation.
+        let adv = i as i32 * CHAR_W;
+        let Some(g) = (' '..='~').contains(&ch).then(|| FONT[ch as usize - 0x20]) else {
+            draw(fb, x, y - adv, &ch.to_string(), CAP * CHAR_W as f32 / ADV, z, color, None, true);
+            continue;
+        };
+        for (col, bits) in g.iter().enumerate() {
+            for row in 0..7 {
+                if bits & (1 << row) != 0 {
+                    fb.put_px(x + row, y - (adv + col as i32), z, color);
                 }
             }
         }
@@ -435,7 +496,7 @@ pub fn draw_text_aa(
     bg: Rgb,
 ) {
     let s = scale.max(1);
-    draw(fb, x, y, text, CAP * (CHAR_W * s) as f32 / ADV, z, color, Some(bg));
+    draw(fb, x, y, text, CAP * (CHAR_W * s) as f32 / ADV, z, color, Some(bg), false);
 }
 
 /// [`draw_text_aa`] sized by cap height rather than by an integer scale, for
@@ -451,7 +512,7 @@ pub fn draw_text_at(
     color: Rgb,
     bg: Rgb,
 ) {
-    draw(fb, x, y, text, cap_height.max(1.0), z, color, Some(bg));
+    draw(fb, x, y, text, cap_height.max(1.0), z, color, Some(bg), false);
 }
 
 #[cfg(test)]

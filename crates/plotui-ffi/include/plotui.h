@@ -615,6 +615,139 @@ int32_t plotui_set_x_window(struct PlotuiPlot *p,
                             bool *out_changed);
 
 /**
+ * Set the chart title (`text` NULL or empty clears it); writes whether the state
+ * changed to `out_changed`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `text` NUL-terminated UTF-8 or NULL,
+ * `out_changed` may be NULL.
+ */
+int32_t plotui_set_title(struct PlotuiPlot *p, const char *text, bool *out_changed);
+
+/**
+ * Read the chart title into `out` as a freshly allocated C string — empty when none
+ * is set. Free it with `plotui_string_free`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out` must be a valid pointer.
+ */
+int32_t plotui_title(const struct PlotuiPlot *p, char **out);
+
+/**
+ * Set the x axis title (`text` NULL or empty clears it); writes whether the state
+ * changed to `out_changed`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `text` NUL-terminated UTF-8 or NULL,
+ * `out_changed` may be NULL.
+ */
+int32_t plotui_set_x_title(struct PlotuiPlot *p, const char *text, bool *out_changed);
+
+/**
+ * Read the x axis title into `out` as a freshly allocated C string — empty when none
+ * is set. Free it with `plotui_string_free`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out` must be a valid pointer.
+ */
+int32_t plotui_x_title(const struct PlotuiPlot *p, char **out);
+
+/**
+ * Set the y axis title (`text` NULL or empty clears it); writes whether the state
+ * changed to `out_changed`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `text` NUL-terminated UTF-8 or NULL,
+ * `out_changed` may be NULL.
+ */
+int32_t plotui_set_y_title(struct PlotuiPlot *p, const char *text, bool *out_changed);
+
+/**
+ * Read the y axis title into `out` as a freshly allocated C string — empty when none
+ * is set. Free it with `plotui_string_free`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out` must be a valid pointer.
+ */
+int32_t plotui_y_title(const struct PlotuiPlot *p, char **out);
+
+/**
+ * Pin the x extent to `[lo, hi]` (`has` false autoscales); writes
+ * whether the state changed to `out_changed`. Unlike an x window this
+ * decides the extent only — the camera still composes on top.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_changed` may be NULL.
+ */
+int32_t plotui_set_x_range(struct PlotuiPlot *p, bool has, double lo, double hi, bool *out_changed);
+
+/**
+ * Read the explicit x range into `out_lo`/`out_hi`; returns whether one
+ * is set (outputs untouched when not).
+ *
+ * # Safety
+ * `p` must be a live plot handle; out pointers may be NULL.
+ */
+bool plotui_x_range(const struct PlotuiPlot *p, double *out_lo, double *out_hi);
+
+/**
+ * Pin the primary y extent to `[lo, hi]` (`has` false autoscales); writes
+ * whether the state changed to `out_changed`. Unlike an x window this
+ * decides the extent only — the camera still composes on top.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_changed` may be NULL.
+ */
+int32_t plotui_set_y_range(struct PlotuiPlot *p, bool has, double lo, double hi, bool *out_changed);
+
+/**
+ * Read the explicit primary y range into `out_lo`/`out_hi`; returns whether one
+ * is set (outputs untouched when not).
+ *
+ * # Safety
+ * `p` must be a live plot handle; out pointers may be NULL.
+ */
+bool plotui_y_range(const struct PlotuiPlot *p, double *out_lo, double *out_hi);
+
+/**
+ * Scale the x axis by log10 (or back). Ignored on a categorical or time axis. Writes whether the state changed
+ * to `out_changed`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_changed` may be NULL.
+ */
+int32_t plotui_set_x_log(struct PlotuiPlot *p,
+                         bool on,
+                         bool *out_changed);
+
+/**
+ * Whether the x axis is set to log10.
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+bool plotui_x_log(const struct PlotuiPlot *p);
+
+/**
+ * Scale the primary y axis by log10 (or back). Ignored on a categorical y axis; the right-hand axes stay linear. Writes whether the state changed
+ * to `out_changed`.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_changed` may be NULL.
+ */
+int32_t plotui_set_y_log(struct PlotuiPlot *p,
+                         bool on,
+                         bool *out_changed);
+
+/**
+ * Whether the primary y axis is set to log10.
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+bool plotui_y_log(const struct PlotuiPlot *p);
+
+/**
  * Read the current x window into `out_lo`/`out_hi`; returns whether one is
  * set (outputs untouched when not).
  *

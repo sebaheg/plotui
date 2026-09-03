@@ -254,6 +254,52 @@ category nothing was plotted at simply falls outside the view. With more
 categories than fit, labels thin by a whole stride so the ones that remain
 stay on their own categories.
 
+## Titles
+
+```python
+plot.set_title("p99 latency")     # centered above the plot
+plot.set_x_title("requests")      # under the x tick labels
+plot.set_y_title("ms")            # rotated in the left margin
+```
+
+Each title buys its own margin — the plot area shrinks to make room, so a
+title never draws over the data or the tick labels. Passing `None` or `""`
+clears one, and a frame too small to fit a title in the margin it asks for
+simply draws without it. The right-hand axes take their identity from the
+color their labels are tinted in rather than from a title of their own.
+
+## Ranges and log scales
+
+```python
+plot.set_x_range((0, 100))        # pin the extent; None restores autoscale
+plot.set_y_range((0.1, 1e4))
+plot.set_y_log(True)              # log10; set_x_log for the x axis
+```
+
+An explicit range decides the *extent* only: it replaces what autoscale
+found, is used exactly as given (no 5% padding), and zoom and pan still
+compose on top of it — so a host can pin a starting view without freezing
+interaction. That is the difference from
+[`set_x_window`](#range-slider), which is the live window: it also
+autoscales y to what is inside it and supersedes the camera. With both set,
+the window wins.
+
+A log axis is linear in decades and ticks in powers of ten, subdividing into
+1/2/5 where a decade or two would otherwise leave the axis nearly unlabelled.
+Values at or below zero have no log coordinate: they neither set the range
+nor draw, exactly as in Plotly. Because of that, a range reaching zero is
+rejected outright:
+
+```python
+plot.set_y_log(True)
+plot.set_y_range((0, 100))        # ValueError: a log y axis needs a
+                                  # positive range, got (0, 100)
+```
+
+Log applies to the x and primary y axes. A categorical or time axis keeps
+its own coordinate and ignores the flag — there is no decade between Tue and
+Wed — and the right-hand axes stay linear.
+
 ## Colors
 
 `color` takes an `(r, g, b)` tuple or a shorthand string: `"#rrggbb"` hex

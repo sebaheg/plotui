@@ -18,12 +18,16 @@ mod marching;
 mod ribbon;
 mod ticks;
 
-pub use font::{draw_text, draw_text_aa, draw_text_at, text_width, text_width_at, CHAR_H, CHAR_W};
+pub use font::{
+    draw_text, draw_text_aa, draw_text_at, draw_text_rot90, text_width, text_width_at, CHAR_H,
+    CHAR_W,
+};
 pub use layout::{reachable, Direction, ForceLayout, LayeredLayout, RankDir};
 pub use marching::marching_cubes;
 pub use ribbon::{catmull_rom, ribbon, tube};
 pub use ticks::{
-    civil_from_days, date_ticks, days_from_civil, format_datetime, format_tick, nice_ticks,
+    civil_from_days, date_ticks, days_from_civil, format_datetime, format_log_tick, format_tick,
+    log_ticks, nice_ticks,
 };
 
 pub type Rgb = [u8; 3];
@@ -977,11 +981,28 @@ struct Map2d {
     bx: f64,
     ay: f64,
     by: f64,
+    /// Per-axis log₁₀ scaling, and the scale-space floor an off-scale value
+    /// lands on; see [`Map2d::fwd`].
+    lx: bool,
+    ly: bool,
+    xfloor: f64,
+    yfloor: f64,
 }
 
 impl Map2d {
-    fn new(data: (f64, f64, f64, f64), rect: (f64, f64, f64, f64), cam: &Camera) -> Self {
+    fn new(
+        data: (f64, f64, f64, f64),
+        rect: (f64, f64, f64, f64),
+        cam: &Camera,
+        logs: (bool, bool),
+    ) -> Self {
+        let (lx, ly) = logs;
         let (dxlo, dxhi, dylo, dyhi) = data;
+        // The affine solve happens in *scale* space, so a log axis is the
+        // same straight line as any other — only the coordinate it is
+        // straight in differs.
+        let (dxlo, dxhi) = (Self::to_scale(dxlo, lx), Self::to_scale(dxhi, lx));
+        let (dylo, dyhi) = (Self::to_scale(dylo, ly), Self::to_scale(dyhi, ly));
         let (x0, y0, x1, y1) = rect;
         let ax0 = (x1 - x0) / (dxhi - dxlo);
         let bx0 = x0 - ax0 * dxlo;
@@ -994,21 +1015,102 @@ impl Map2d {
             bx: rcx + (bx0 - rcx) * z + cam.pan_x,
             ay: ay0 * z,
             by: rcy + (by0 - rcy) * z + cam.pan_y,
+            lx,
+            ly,
+            xfloor: Self::floor_of(dxlo, dxhi, lx),
+            yfloor: Self::floor_of(dylo, dyhi, ly),
+        }
+    }
+
+    /// Data → scale space: identity, or log₁₀ on a log axis.
+    fn to_scale(v: f64, log: bool) -> f64 {
+        if log {
+            v.log10()
+        } else {
+            v
+        }
+    }
+
+    /// Scale space → data, the inverse of [`Self::to_scale`].
+    fn from_scale(v: f64, log: bool) -> f64 {
+        if log {
+            10f64.powf(v)
+        } else {
+            v
+        }
+    }
+
+    /// Where an off-scale value (zero or negative on a log axis) is put: one
+    /// full axis span below the bottom of the range. It has to go *somewhere*
+    /// finite — the primitives walk their pixel span before the clip rejects
+    /// each write, so a `-inf` coordinate would saturate into a span the size
+    /// of the i32 range — and a span below is far enough to be clipped away
+    /// at any sane zoom while keeping the segment that reaches it sloping
+    /// off-scale the way a below-range point does on a linear axis.
+    fn floor_of(lo: f64, hi: f64, log: bool) -> f64 {
+        if log && lo.is_finite() && hi.is_finite() {
+            lo - (hi - lo).abs().max(1.0)
+        } else {
+            f64::NEG_INFINITY
+        }
+    }
+
+    fn fwd(v: f64, log: bool, floor: f64) -> f64 {
+        if !log {
+            return v;
+        }
+        if v > 0.0 {
+            v.log10().max(floor)
+        } else {
+            floor
         }
     }
 
     fn sx(&self, x: f64) -> f64 {
-        self.ax * x + self.bx
+        self.ax * Self::fwd(x, self.lx, self.xfloor) + self.bx
     }
     fn sy(&self, y: f64) -> f64 {
-        self.ay * y + self.by
+        self.ay * Self::fwd(y, self.ly, self.yfloor) + self.by
     }
     fn inv_x(&self, px: f64) -> f64 {
-        (px - self.bx) / self.ax
+        Self::from_scale((px - self.bx) / self.ax, self.lx)
     }
     fn inv_y(&self, py: f64) -> f64 {
-        (py - self.by) / self.ay
+        Self::from_scale((py - self.by) / self.ay, self.ly)
     }
+}
+
+/// Autoscale padding: 5% of the span at each end, in the axis's own scale
+/// space — a log axis pads by a fraction of a decade, not by a slice of a
+/// number, which on a range like 1..1000 would otherwise push the low end
+/// straight through zero. An axis nothing landed on falls back to a readable
+/// unit range.
+fn pad_range(lo: f64, hi: f64, log: bool) -> (f64, f64) {
+    if !lo.is_finite() || !hi.is_finite() {
+        return if log { (1.0, 10.0) } else { (-1.0, 1.0) };
+    }
+    if log {
+        let (l0, l1) = (lo.log10(), hi.log10());
+        let span = l1 - l0;
+        let p = if span > 0.0 { span * 0.05 } else { 0.5 };
+        return (10f64.powf(l0 - p), 10f64.powf(l1 + p));
+    }
+    let span = hi - lo;
+    let p = if span > 0.0 { span * 0.05 } else { 1.0 };
+    (lo - p, hi + p)
+}
+
+/// Force a range a log axis can actually solve in. Autoscale already only
+/// counts positive samples, so what this catches is an explicit range: rather
+/// than refuse the frame, a bad low end is lifted to a decade under the high
+/// one and the plot draws what it can.
+fn log_safe(lo: f64, hi: f64, log: bool) -> (f64, f64) {
+    if !log {
+        return (lo, hi);
+    }
+    let hi = if hi > 0.0 { hi } else { 10.0 };
+    let lo = if lo > 0.0 && lo < hi { lo } else { hi / 10.0 };
+    (lo, hi)
 }
 
 /// [`nice_ticks`] in the `(positions, labels)` shape [`date_ticks`] returns,
@@ -1098,6 +1200,11 @@ struct Layout2d {
     has_right: [bool; RIGHT_AXES],
     strip: Option<StripLayout>,
     cbar: Option<CbarLayout>,
+    /// The titles the frame had room for, already filtered by
+    /// [`Plot::layout_2d`] — the renderer draws what it is given.
+    title: Option<String>,
+    x_title: Option<String>,
+    y_title: Option<String>,
 }
 
 /// The range-slider strip's solved geometry: its rect, the full-extent
@@ -2712,6 +2819,34 @@ pub struct Plot {
     /// owns the mapping — a heatmap knows its own value range, and a
     /// colormapped scatter knows the range it binned its colors over — so the
     /// core never has to guess which trace the ramp belongs to.
+    /// Chart title, centered over the plot area. `None` gives the line back
+    /// to the data.
+    pub title: Option<String>,
+    /// What the numbers on the x axis mean, drawn under its tick labels.
+    pub x_title: Option<String>,
+    /// The primary y axis's title, rotated a quarter turn in the left margin
+    /// (see [`draw_text_rot90`]). The right-hand axes take their identity
+    /// from the colour their labels are tinted in instead: a second rotated
+    /// column would cost more frame than a terminal has to give.
+    pub y_title: Option<String>,
+    /// Explicit x extent, replacing what autoscale found. Unlike
+    /// [`Self::x_window`] this only decides the *extent*: the camera's 2D
+    /// zoom/pan still compose on top, so pinning a range leaves interactive
+    /// zoom working. Used exactly as given — an explicit range is a decision,
+    /// so it gets none of autoscale's 5% padding. A set `x_window` is the
+    /// narrower statement and wins.
+    pub x_range: Option<(f64, f64)>,
+    /// Explicit primary-y extent; the y counterpart of [`Self::x_range`].
+    /// The right-hand axes keep autoscaling — they exist to fit a second
+    /// series against its own spread.
+    pub y_range: Option<(f64, f64)>,
+    /// Scale the x axis by log₁₀. Ignored on a categorical or time axis:
+    /// names and calendars own the coordinate they sit on, and there is no
+    /// meaningful decade between Tuesday and Wednesday.
+    pub x_log: bool,
+    /// Scale the primary y axis by log₁₀; ignored on a categorical y axis.
+    /// The right-hand axes stay linear.
+    pub y_log: bool,
     /// How several bar traces on one axis share their positions; see
     /// [`BarMode`]. The default keeps plotui's original overlay behaviour.
     pub barmode: BarMode,
@@ -2746,6 +2881,13 @@ impl Default for Plot {
             range_slider: false,
             x_epoch: None,
             x_categories: None,
+            title: None,
+            x_title: None,
+            y_title: None,
+            x_range: None,
+            y_range: None,
+            x_log: false,
+            y_log: false,
             barmode: BarMode::default(),
             colorbar: None,
             y_categories: None,
@@ -4737,8 +4879,12 @@ impl Plot {
         let (mut xlo, mut xhi) = (f64::INFINITY, f64::NEG_INFINITY);
         // Index 0 is the primary axis, then the right axes in YAxis order.
         let mut ys = [(f64::INFINITY, f64::NEG_INFINITY); 1 + RIGHT_AXES];
+        let (logx, logy) = (self.log_x(), self.log_y());
         if let Some((wlo, whi)) = xr {
             let mut seen = |lo: f64, hi: f64, y: f64, slot: usize| {
+                if logy && slot == 0 && y <= 0.0 {
+                    return;
+                }
                 if lo.is_finite() && y.is_finite() && hi >= wlo && lo <= whi {
                     ys[slot].0 = ys[slot].0.min(y);
                     ys[slot].1 = ys[slot].1.max(y);
@@ -4831,16 +4977,14 @@ impl Plot {
                     traces_3d!() => {}
                 }
             }
-            let pad = |lo: f64, hi: f64| -> (f64, f64) {
-                if !lo.is_finite() {
-                    return (-1.0, 1.0);
-                }
-                let span = hi - lo;
-                let p = if span > 0.0 { span * 0.05 } else { 1.0 };
-                (lo - p, hi + p)
-            };
-            let (ylo, yhi) = pad(ys[0].0, ys[0].1);
-            return (wlo, whi, ylo, yhi, [pad(ys[1].0, ys[1].1), pad(ys[2].0, ys[2].1)]);
+            let (ylo, yhi) = self.y_range.unwrap_or_else(|| pad_range(ys[0].0, ys[0].1, logy));
+            return (
+                wlo,
+                whi,
+                ylo,
+                yhi,
+                [pad_range(ys[1].0, ys[1].1, false), pad_range(ys[2].0, ys[2].1, false)],
+            );
         }
         // A per-trace cache cannot describe a cross-trace layout: a stacked
         // bar's extent depends on the traces below it, and a grouped bar's on
@@ -4849,7 +4993,10 @@ impl Plot {
         // answer. Overlay, the default, keeps the fast path.
         let cross_trace_bars = self.barmode != BarMode::Overlay
             && self.traces.iter().any(|t| matches!(t, Trace::Bar2d { .. }));
-        if self.meta_synced() && !cross_trace_bars {
+        // A log axis drops the samples it has no coordinate for, and the
+        // per-trace boxes were cached without knowing that, so it takes the
+        // full scan too.
+        if self.meta_synced() && !cross_trace_bars && !logx && !logy {
             // Union of the per-trace cached boxes — min/max is order-blind,
             // so this is bit-identical to the full scan below.
             for (m, t) in self.meta.iter().zip(&self.traces) {
@@ -4865,6 +5012,11 @@ impl Plot {
             }
         } else {
             let mut seen = |x: f64, y: f64, slot: usize| {
+                // A log axis has no coordinate for zero or a negative value,
+                // so such a sample does not get to vote on the range either.
+                if (logx && x <= 0.0) || (logy && slot == 0 && y <= 0.0) {
+                    return;
+                }
                 if x.is_finite() && y.is_finite() {
                     xlo = xlo.min(x);
                     xhi = xhi.max(x);
@@ -4954,17 +5106,15 @@ impl Plot {
                 }
             }
         }
-        let pad = |lo: f64, hi: f64| -> (f64, f64) {
-            if !lo.is_finite() {
-                return (-1.0, 1.0);
-            }
-            let span = hi - lo;
-            let p = if span > 0.0 { span * 0.05 } else { 1.0 };
-            (lo - p, hi + p)
-        };
-        let (xlo, xhi) = pad(xlo, xhi);
-        let (ylo, yhi) = pad(ys[0].0, ys[0].1);
-        (xlo, xhi, ylo, yhi, [pad(ys[1].0, ys[1].1), pad(ys[2].0, ys[2].1)])
+        let (xlo, xhi) = self.x_range.unwrap_or_else(|| pad_range(xlo, xhi, logx));
+        let (ylo, yhi) = self.y_range.unwrap_or_else(|| pad_range(ys[0].0, ys[0].1, logy));
+        (
+            xlo,
+            xhi,
+            ylo,
+            yhi,
+            [pad_range(ys[1].0, ys[1].1, false), pad_range(ys[2].0, ys[2].1, false)],
+        )
     }
 
     /// One x position as the axis itself would label it: a category name, a
@@ -4985,10 +5135,23 @@ impl Plot {
         }
     }
 
+    /// Is the x axis actually logarithmic? Names and calendars own the
+    /// coordinate they sit on, so log defers to both rather than solving a
+    /// scale nothing could label — there is no decade between Tue and Wed.
+    fn log_x(&self) -> bool {
+        self.x_log && self.x_categories.is_none() && self.x_epoch.is_none()
+    }
+
+    /// Is the primary y axis logarithmic? The right-hand axes stay linear.
+    fn log_y(&self) -> bool {
+        self.y_log && self.y_categories.is_none()
+    }
+
     /// The primary y axis's ticks and their labels over the visible range.
     fn y_axis_ticks(&self, lo: f64, hi: f64, target: usize) -> (Vec<f64>, Vec<String>) {
         match &self.y_categories {
             Some(names) => category_ticks(names, lo, hi, target),
+            None if self.log_y() => log_ticks(lo, hi, target),
             None => numeric_ticks(lo, hi, target),
         }
     }
@@ -5006,6 +5169,7 @@ impl Plot {
                 let (abs, labels) = date_ticks(base + lo, base + hi, target);
                 (abs.into_iter().map(|t| t - base).collect(), labels)
             }
+            None if self.x_log => log_ticks(lo, hi, target),
             None => numeric_ticks(lo, hi, target),
         }
     }
@@ -5023,6 +5187,9 @@ impl Plot {
         let pad = 3 * s;
 
         let (dxlo, dxhi, dylo, dyhi, dright) = self.bounds_2d();
+        let (logx, logy) = (self.log_x(), self.log_y());
+        let (dxlo, dxhi) = log_safe(dxlo, dxhi, logx);
+        let (dylo, dyhi) = log_safe(dylo, dyhi, logy);
         // The window is the view: an explicit x range and the pixel-space
         // camera transform would fight over what `inv_x` means (a handle drag
         // through a zoomed map lands somewhere else), so a set window
@@ -5060,7 +5227,6 @@ impl Plot {
         // A caption has nowhere to go but above the strip: there is no rotated
         // text, so the frame gives up a line of top margin for it.
         let caption = self.colorbar.as_ref().and_then(|cb| cb.label.clone());
-        let top = 2 * pad + caption.as_ref().map_or(0, |_| ch + pad);
         // Without chrome there is no tick-label column to reserve on any
         // side, so every margin collapses to the same small air gap and the
         // graph gets the whole frame.
@@ -5069,14 +5235,29 @@ impl Plot {
         // data-space pad can know; the map below gives them that room.
         let (box_hw, box_hh) = self.graph_box_inset(s);
         let legend_w = if box_hw > 0 { self.legend_width(s) } else { 0 };
-        let bottom = if hidden { 2 * pad } else { ch + tick_len + 2 * pad };
+        // Titles are the first thing a cramped frame gives up. Each one is
+        // taken only where the margin it asks for stays inside the third of
+        // the frame the clamps below allow the chrome — otherwise it would be
+        // handed the tick labels' own pixels. A title outlives `hidden`,
+        // though: ticks are chrome the frame puts there on its own, while a
+        // title is something the caller asked for by name.
+        let line = ch + pad;
+        let base_bottom = if hidden { 2 * pad } else { ch + tick_len + 2 * pad };
+        let title_on = self.title.is_some() && 3 * (2 * pad + line) <= h;
+        let xtitle_on = self.x_title.is_some() && 3 * (base_bottom + line) <= h;
+        let ytitle_on = self.y_title.is_some() && 3 * (4 * cw + tick_len + 2 * pad + line) <= w;
+        let top =
+            2 * pad + if title_on { line } else { 0 } + caption.as_ref().map_or(0, |_| ch + pad);
+        let bottom = base_bottom + if xtitle_on { line } else { 0 };
         // The strip reserve is a pure function of `s` and `h`, decided before
         // the margin fixed-point below — a reserve that changed inside the
         // loop could keep it from settling in two passes.
         let strip_on = self.range_slider && h >= STRIP_MIN_H * s;
         let strip_h = STRIP_H_S * s;
         let strip_reserve = if strip_on { strip_h + pad } else { 0 };
-        let mut left = if hidden { 2 * pad } else { (8 * cw).min(w / 3) };
+        let ytitle_reserve = if ytitle_on { line } else { 0 };
+        let mut left =
+            if hidden { 2 * pad + ytitle_reserve } else { (8 * cw + ytitle_reserve).min(w / 3) };
         let mut right = 2 * pad;
         let (mut x0, mut y0, mut x1, mut y1) = (0, 0, 0, 0);
         let mut map = Map2d::default();
@@ -5099,17 +5280,24 @@ impl Plot {
             // because the answer is in pixels and only the frame has those.
             // The two ends take separate insets: the legend eats into the
             // high-x end only.
-            let room = |lo: f64, hi: f64, span_px: f64, at_lo: i32, at_hi: i32| -> (f64, f64) {
+            // Widened in the axis's own scale space: a pixel is a slice of a
+            // number on a linear axis and a fraction of a decade on a log
+            // one, and the inset is a pixel count either way.
+            let room = |lo: f64, hi: f64, span_px: f64, at_lo: i32, at_hi: i32, log: bool| {
                 let usable = span_px - (at_lo + at_hi) as f64;
                 if (at_lo | at_hi) == 0 || usable <= 1.0 || hi <= lo {
                     return (lo, hi);
                 }
-                let per_px = (hi - lo) / usable;
-                (lo - per_px * at_lo as f64, hi + per_px * at_hi as f64)
+                let (slo, shi) = (Map2d::to_scale(lo, log), Map2d::to_scale(hi, log));
+                let per_px = (shi - slo) / usable;
+                (
+                    Map2d::from_scale(slo - per_px * at_lo as f64, log),
+                    Map2d::from_scale(shi + per_px * at_hi as f64, log),
+                )
             };
-            let (mxlo, mxhi) = room(dxlo, dxhi, (x1 - x0) as f64, box_hw, box_hw + legend_w);
-            let (mylo, myhi) = room(dylo, dyhi, (y1 - y0) as f64, box_hh, box_hh);
-            map = Map2d::new((mxlo, mxhi, mylo, myhi), rect, cam);
+            let (mxlo, mxhi) = room(dxlo, dxhi, (x1 - x0) as f64, box_hw, box_hw + legend_w, logx);
+            let (mylo, myhi) = room(dylo, dyhi, (y1 - y0) as f64, box_hh, box_hh, logy);
+            map = Map2d::new((mxlo, mxhi, mylo, myhi), rect, cam, (logx, logy));
             // Ticks cover what is actually visible after zoom/pan.
             let (vxlo, vxhi) = (map.inv_x(x0 as f64), map.inv_x(x1 as f64));
             let (vylo, vyhi) = (map.inv_y(y1 as f64), map.inv_y(y0 as f64));
@@ -5126,7 +5314,11 @@ impl Plot {
                 (yticks, ylabels) = (Vec::new(), Vec::new());
             }
             let label_w = ylabels.iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
-            left = if hidden { 2 * pad } else { (label_w + tick_len + 2 * pad).min(w / 3) };
+            left = if hidden {
+                2 * pad + ytitle_reserve
+            } else {
+                (label_w + tick_len + 2 * pad + ytitle_reserve).min(w / 3)
+            };
             // The right margin stacks outward from x1: tick-label columns
             // first (innermost axis nearest the frame), then the colorbar.
             let mut used = 2 * pad;
@@ -5137,7 +5329,7 @@ impl Plot {
                         continue;
                     }
                     let (rlo, rhi) = dright[k];
-                    maps_r[k] = Map2d::new((mxlo, mxhi, rlo, rhi), rect, cam);
+                    maps_r[k] = Map2d::new((mxlo, mxhi, rlo, rhi), rect, cam, (logx, false));
                     let (vlo, vhi) = (maps_r[k].inv_y(y1 as f64), maps_r[k].inv_y(y0 as f64));
                     let (t, labels) = numeric_ticks(vlo, vhi, ty);
                     (rticks[k], rlabels[k]) =
@@ -5156,14 +5348,21 @@ impl Plot {
         // on `x_window`, so drags read a stable pixel↔data scale from it.
         let strip = if strip_on {
             let (flo, fhi, fylo, fyhi, fright) = self.bounds_2d_in(None);
+            let (flo, fhi) = log_safe(flo, fhi, logx);
+            let (fylo, fyhi) = log_safe(fylo, fyhi, logy);
             let sy1 = h - 1 - pad;
             let sy0 = sy1 - strip_h;
             let rect = (x0 as f64, sy0 as f64, x1 as f64, sy1 as f64);
-            let smap = Map2d::new((flo, fhi, fylo, fyhi), rect, &flat);
+            let smap = Map2d::new((flo, fhi, fylo, fyhi), rect, &flat, (logx, logy));
             let mut smaps_r = [Map2d::default(); RIGHT_AXES];
             for (k, sm) in smaps_r.iter_mut().enumerate() {
                 if has_right[k] {
-                    *sm = Map2d::new((flo, fhi, fright[k].0, fright[k].1), rect, &flat);
+                    *sm = Map2d::new(
+                        (flo, fhi, fright[k].0, fright[k].1),
+                        rect,
+                        &flat,
+                        (logx, false),
+                    );
                 }
             }
             let (wx0, wx1) = match self.x_window {
@@ -5201,6 +5400,9 @@ impl Plot {
             col_x,
             has_right,
             strip,
+            title: self.title.clone().filter(|_| title_on),
+            x_title: self.x_title.clone().filter(|_| xtitle_on),
+            y_title: self.y_title.clone().filter(|_| ytitle_on),
             cbar: self.colorbar.as_ref().map(|_| CbarLayout {
                 x0: x1 + cbar_x,
                 y0,
@@ -5584,6 +5786,30 @@ impl Plot {
                 0.0,
                 self.chrome.ink,
             );
+        }
+        // Titles last of the chrome: the chart's above the plot area, the x
+        // axis's under its own tick labels, and the y axis's rotated in the
+        // left margin, each centered on the side it names. They are drawn in
+        // `ink_bright` — a title says what the numbers *are*, so it outranks
+        // the numbers, the same way the colorbar's caption outranks its
+        // ticks.
+        if let Some(t) = &l.title {
+            let tw = text_width(t, s);
+            let tx = ((x0 + x1) / 2 - tw / 2).clamp(0, (w - tw).max(0));
+            draw_text(&mut fb, tx, pad, t, s, 0.0, self.chrome.ink_bright);
+        }
+        if let Some(t) = &l.x_title {
+            let tw = text_width(t, s);
+            let tx = ((x0 + x1) / 2 - tw / 2).clamp(0, (w - tw).max(0));
+            draw_text(&mut fb, tx, y1 + tick_len + 2 * pad + ch, t, s, 0.0, self.chrome.ink_bright);
+        }
+        if let Some(t) = &l.y_title {
+            // Rotated text grows upward from its anchor, so the anchor is the
+            // *bottom* of the run: half its length below the middle of the
+            // axis it names.
+            let tw = text_width(t, s);
+            let ty = ((y0 + y1) / 2 + tw / 2).clamp(tw, fb.h as i32 - 1);
+            draw_text_rot90(&mut fb, pad, ty, t, s, 0.0, self.chrome.ink_bright);
         }
         // Right-axis tick labels, one column per axis, tinted to the first
         // trace on that axis — two unlabeled number columns are otherwise
@@ -8066,5 +8292,235 @@ mod tests {
         let hit =
             fb.rgba().chunks(4).any(|px| px[3] > 0 && px[0] == 9 && px[1] == 250 && px[2] == 9);
         assert!(hit, "explicit edge color not found in framebuffer");
+    }
+
+    // ---- axis semantics: titles, explicit ranges, log scales -------------
+
+    /// A title is drawn out of the frame's own margins, never over the plot.
+    #[test]
+    fn titles_buy_their_space_from_the_margins() {
+        let plot = demo_2d_plot();
+        let plain = plot.layout_2d(600, 400);
+
+        let mut titled = demo_2d_plot();
+        titled.title = Some("p99 latency".into());
+        titled.x_title = Some("requests".into());
+        titled.y_title = Some("ms".into());
+        let l = titled.layout_2d(600, 400);
+
+        assert!(l.y0 > plain.y0, "the chart title pushes the plot area down");
+        assert!(l.y1 < plain.y1, "the x title lifts the plot area off the bottom");
+        assert!(l.x0 > plain.x0, "the y title widens the left margin");
+        assert_eq!(
+            (l.title.as_deref(), l.x_title.as_deref(), l.y_title.as_deref()),
+            (Some("p99 latency"), Some("requests"), Some("ms")),
+        );
+    }
+
+    /// Every title has to land inside the margin it was given, or it draws
+    /// over the tick labels it was supposed to explain.
+    #[test]
+    fn titles_stay_inside_their_own_margins() {
+        let mut plot = demo_2d_plot();
+        plot.title = Some("title".into());
+        plot.x_title = Some("x axis".into());
+        plot.y_title = Some("y axis".into());
+        let (w, h) = (600, 400);
+        let l = plot.layout_2d(w, h);
+        let fb = plot.render(w, h);
+
+        let ink = plot.chrome.ink_bright;
+        let mut top = (h as i32, 0);
+        let mut left = (w as i32, 0);
+        let mut bottom = 0;
+        for y in 0..fb.h {
+            for x in 0..fb.w {
+                if px(&fb, x, y) != Some(ink) {
+                    continue;
+                }
+                let (x, y) = (x as i32, y as i32);
+                if y < l.y0 {
+                    top = (top.0.min(y), top.1.max(y));
+                }
+                if x < l.x0 {
+                    left = (left.0.min(x), left.1.max(x));
+                }
+                if y > l.y1 {
+                    bottom = bottom.max(y);
+                }
+            }
+        }
+        assert!(top.1 < l.y0, "the chart title stays above the plot rect");
+        assert!(left.1 < l.x0, "the y title stays left of the plot rect");
+        assert!(bottom > l.y1 && bottom < h as i32, "the x title fits under the axis");
+    }
+
+    /// The y title is rotated, so its mark is taller than it is wide — the
+    /// same string upright is the other way about.
+    #[test]
+    fn the_y_title_is_drawn_rotated() {
+        let bounds = |fb: &Framebuffer, ink: Rgb| {
+            let (mut x0, mut x1, mut y0, mut y1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+            for y in 0..fb.h {
+                for x in 0..fb.w {
+                    if px(fb, x, y) == Some(ink) {
+                        (x0, x1) = (x0.min(x), x1.max(x));
+                        (y0, y1) = (y0.min(y), y1.max(y));
+                    }
+                }
+            }
+            (x1 + 1 - x0, y1 + 1 - y0)
+        };
+        let ink = [255, 255, 255];
+        let text = "latency";
+
+        let mut up = Framebuffer::new(200, 200);
+        draw_text(&mut up, 20, 90, text, 2, 0.0, ink);
+        let (uw, uh) = bounds(&up, ink);
+
+        let mut rot = Framebuffer::new(200, 200);
+        draw_text_rot90(&mut rot, 20, 180, text, 2, 0.0, ink);
+        let (rw, rh) = bounds(&rot, ink);
+
+        assert!(uw > uh, "upright text runs across the frame ({uw}x{uh})");
+        assert!(rh > rw, "rotated text runs up it ({rw}x{rh})");
+        // A quarter turn swaps the two, give or take the rasterizer's edges.
+        assert!((rh as i32 - uw as i32).abs() <= 2, "length is preserved: {rh} vs {uw}");
+        assert!((rw as i32 - uh as i32).abs() <= 2, "height is preserved: {rw} vs {uh}");
+    }
+
+    /// An explicit range is used exactly as given — no autoscale padding —
+    /// and, unlike an x window, leaves the camera composing on top of it.
+    #[test]
+    fn an_explicit_range_replaces_autoscale_without_padding() {
+        let mut plot = demo_2d_plot();
+        plot.x_range = Some((0.0, 10.0));
+        plot.y_range = Some((-5.0, 5.0));
+        let l = plot.layout_2d(600, 400);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(near(l.map.inv_x(l.x0 as f64), 0.0) && near(l.map.inv_x(l.x1 as f64), 10.0));
+        assert!(near(l.map.inv_y(l.y1 as f64), -5.0) && near(l.map.inv_y(l.y0 as f64), 5.0));
+
+        // The camera still moves the view; an `x_window` would have replaced it.
+        plot.camera.zoom = 2.0;
+        let zoomed = plot.layout_2d(600, 400);
+        assert!(zoomed.map.inv_x(zoomed.x0 as f64) > 0.0, "zoom composes over an explicit range",);
+        assert!(plot.x_window.is_none(), "a range is not a window");
+    }
+
+    /// A log axis is linear in decades: 10 lands halfway between 1 and 100.
+    #[test]
+    fn a_log_axis_is_linear_in_decades() {
+        let mut plot = Plot::new();
+        plot.add_line2d(
+            vec![1.0, 2.0, 3.0],
+            vec![1.0, 100.0, 10000.0],
+            [200, 120, 60],
+            2.0,
+            None,
+            YAxis::Primary,
+        );
+        plot.y_log = true;
+        plot.y_range = Some((1.0, 100.0));
+        let l = plot.layout_2d(600, 400);
+        let (a, b, c) = (l.map.sy(1.0), l.map.sy(10.0), l.map.sy(100.0));
+        assert!((b - (a + c) / 2.0).abs() < 0.5, "a decade is a decade: {a} {b} {c}");
+        assert!(l.ylabels.iter().any(|t| t == "10"), "decades are labelled: {:?}", l.ylabels);
+    }
+
+    /// Zero and negative samples have no log coordinate: they neither set the
+    /// range nor drag the drawing back to a saturated pixel.
+    #[test]
+    fn a_log_axis_ignores_values_it_cannot_place() {
+        let mut plot = Plot::new();
+        plot.add_line2d(
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![0.0, 10.0, -3.0, 1000.0],
+            [200, 120, 60],
+            2.0,
+            None,
+            YAxis::Primary,
+        );
+        plot.y_log = true;
+        let l = plot.layout_2d(600, 400);
+        let (vlo, vhi) = (l.map.inv_y(l.y1 as f64), l.map.inv_y(l.y0 as f64));
+        assert!(vlo > 0.0, "the range stays positive, got {vlo}");
+        assert!(vlo <= 10.0 && vhi >= 1000.0, "the positive samples still fit: {vlo}..{vhi}");
+        // Off-scale values land below the axis, not at a saturated pixel.
+        let py = l.map.sy(0.0);
+        assert!(py.is_finite() && py > l.y1 as f64, "zero sits under the axis, at {py}");
+        assert!(py < (l.y1 as f64) + 4.0 * (l.y1 - l.y0) as f64, "…but not absurdly far: {py}");
+    }
+
+    /// Names and calendars own the coordinate they sit on, so log defers.
+    #[test]
+    fn log_defers_to_categorical_and_time_axes() {
+        let mut plot = demo_2d_plot();
+        plot.x_log = true;
+        plot.y_log = true;
+        plot.x_categories = Some(cat(&["a", "b", "c"]));
+        plot.y_categories = Some(cat(&["low", "high"]));
+        assert!(!plot.log_x() && !plot.log_y());
+        plot.x_categories = None;
+        plot.x_epoch = Some(1.0e9);
+        assert!(!plot.log_x(), "a calendar is not a ladder of decades");
+    }
+
+    /// A chart title and a colorbar caption both want the top margin. They
+    /// stack rather than share: the title above, the caption on the line
+    /// that belongs to the ramp it names.
+    #[test]
+    fn a_title_stacks_above_a_colorbar_caption() {
+        let mut plot = demo_2d_plot();
+        plot.colorbar =
+            Some(Colorbar { map: Colormap::Viridis, lo: 0.0, hi: 1.0, label: Some("kW".into()) });
+        let captioned = plot.layout_2d(600, 400);
+        plot.title = Some("power".into());
+        let both = plot.layout_2d(600, 400);
+        assert!(both.y0 > captioned.y0, "the title takes a line of its own");
+
+        // Nothing in the top margin is drawn twice over: walk the rows above
+        // the plot rect and check the two runs of ink are separated.
+        let fb = plot.render(600, 400);
+        let ink_rows: Vec<i32> = (0..both.y0)
+            .filter(|y| {
+                (0..fb.w).any(|x| {
+                    px(&fb, x, *y as usize)
+                        .is_some_and(|c| c == plot.chrome.ink_bright || c == plot.chrome.ink)
+                })
+            })
+            .collect();
+        assert!(!ink_rows.is_empty(), "the top margin carries the title and caption");
+        let gaps = ink_rows.windows(2).filter(|w| w[1] - w[0] > 1).count();
+        assert_eq!(gaps, 1, "two separated runs of text, not one overlapping block");
+    }
+
+    /// A graph frame hides its axes, and the tick labels with them — but a
+    /// title is not automatic chrome, it is something the caller named. It
+    /// survives, and still buys its own margin out of the frame.
+    #[test]
+    fn a_graph_frame_keeps_a_title_it_was_given() {
+        let mut plot = Plot::new();
+        plot.add_graph2d(
+            vec![[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]],
+            vec!["extract".into(), "transform".into(), "load".into()],
+            vec![[230, 60, 120]; 3],
+            vec![(0, 1), (1, 2)],
+            true,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(plot.chrome_hidden(), "a graph-only plot drops its axes");
+        let bare = plot.layout_2d(600, 400);
+        assert!(bare.xlabels.is_empty(), "…and its tick labels with them");
+
+        plot.title = Some("nightly forecast".into());
+        plot.y_title = Some("rank".into());
+        let titled = plot.layout_2d(600, 400);
+        assert_eq!(titled.title.as_deref(), Some("nightly forecast"));
+        assert!(titled.y0 > bare.y0, "the title takes a line off the top");
+        assert!(titled.x0 > bare.x0, "the rotated y title widens the left margin");
     }
 }

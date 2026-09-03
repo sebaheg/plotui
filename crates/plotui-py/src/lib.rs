@@ -912,6 +912,93 @@ impl Plot {
         self.inner.x_epoch
     }
 
+    /// Set the chart title, drawn centered above the plot area. `None` (or
+    /// `""`) clears it. Returns True when the state changed.
+    #[pyo3(signature = (text))]
+    fn set_title(&mut self, text: Option<String>) -> PyResult<bool> {
+        plotui_bind::set_title(&mut self.inner, "title", text).map_err(to_py)
+    }
+
+    /// The chart title, or `None`.
+    fn title(&self) -> Option<String> {
+        self.inner.title.clone()
+    }
+
+    /// Set the x axis's title, drawn under its tick labels. `None` clears.
+    #[pyo3(signature = (text))]
+    fn set_x_title(&mut self, text: Option<String>) -> PyResult<bool> {
+        plotui_bind::set_title(&mut self.inner, "x", text).map_err(to_py)
+    }
+
+    /// The x axis title, or `None`.
+    fn x_title(&self) -> Option<String> {
+        self.inner.x_title.clone()
+    }
+
+    /// Set the primary y axis's title, drawn rotated in the left margin.
+    /// `None` clears. The right-hand axes take their identity from the color
+    /// their labels are tinted in instead.
+    #[pyo3(signature = (text))]
+    fn set_y_title(&mut self, text: Option<String>) -> PyResult<bool> {
+        plotui_bind::set_title(&mut self.inner, "y", text).map_err(to_py)
+    }
+
+    /// The y axis title, or `None`.
+    fn y_title(&self) -> Option<String> {
+        self.inner.y_title.clone()
+    }
+
+    /// Pin the x extent to `(lo, hi)`, or `None` to autoscale. Unlike
+    /// `set_x_window` this decides the extent only — zoom and pan still
+    /// compose on top of it — and it is used exactly as given, without
+    /// autoscale's 5% padding. A set x window is the narrower statement and
+    /// wins. Returns True when the state changed.
+    #[pyo3(signature = (range))]
+    fn set_x_range(&mut self, range: Option<(f64, f64)>) -> PyResult<bool> {
+        plotui_bind::set_range(&mut self.inner, "x", range).map_err(to_py)
+    }
+
+    /// The explicit x range as `(lo, hi)`, or `None`.
+    fn x_range(&self) -> Option<(f64, f64)> {
+        self.inner.x_range
+    }
+
+    /// Pin the primary y extent to `(lo, hi)`, or `None` to autoscale. The
+    /// right-hand axes keep autoscaling — they exist to fit a second series
+    /// against its own spread.
+    #[pyo3(signature = (range))]
+    fn set_y_range(&mut self, range: Option<(f64, f64)>) -> PyResult<bool> {
+        plotui_bind::set_range(&mut self.inner, "y", range).map_err(to_py)
+    }
+
+    /// The explicit y range as `(lo, hi)`, or `None`.
+    fn y_range(&self) -> Option<(f64, f64)> {
+        self.inner.y_range
+    }
+
+    /// Scale the x axis by log10. Ignored on a categorical or time axis:
+    /// names and calendars own the coordinate they sit on. Returns True when
+    /// the state changed.
+    fn set_x_log(&mut self, on: bool) -> PyResult<bool> {
+        plotui_bind::set_log(&mut self.inner, "x", on).map_err(to_py)
+    }
+
+    /// Whether the x axis is set to log10.
+    fn x_log(&self) -> bool {
+        self.inner.x_log
+    }
+
+    /// Scale the primary y axis by log10; ignored on a categorical y axis.
+    /// The right-hand axes stay linear.
+    fn set_y_log(&mut self, on: bool) -> PyResult<bool> {
+        plotui_bind::set_log(&mut self.inner, "y", on).map_err(to_py)
+    }
+
+    /// Whether the primary y axis is set to log10.
+    fn y_log(&self) -> bool {
+        self.inner.y_log
+    }
+
     /// What the range-slider strip has under `(px, py)` framebuffer pixels
     /// at a `px_w`×`px_h` frame, within `tol_px`: `"left"`, `"right"`,
     /// `"window"`, `"track"`, or `None` off the strip. Terminal mice report

@@ -228,6 +228,82 @@ pub fn format_datetime(ts: f64) -> String {
     }
 }
 
+/// Tick positions and labels for a log₁₀ axis over the *data* range
+/// `[lo, hi]`, in data units — the map applies the transform, so an axis's
+/// ticks are the same shape whatever its scale.
+///
+/// Powers of ten are the ladder, thinned by a whole power when more decades
+/// fit than `target` asks for. A range spanning a decade or two would show
+/// one or two ticks that way, so there the 1/2/5 subdivisions come in;
+/// under a single decade the axis is close enough to linear that
+/// [`nice_ticks`] labels it better than any power-of-ten rule can, and
+/// deferring to it also keeps a log axis zoomed all the way in from going
+/// blank.
+pub fn log_ticks(lo: f64, hi: f64, target: usize) -> (Vec<f64>, Vec<String>) {
+    if !lo.is_finite() || !hi.is_finite() || hi <= 0.0 {
+        return (Vec::new(), Vec::new());
+    }
+    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    // A non-positive low end cannot be a log coordinate; the visible range
+    // still has to be labelled, so it starts a decade under the top instead.
+    let lo = if lo > 0.0 { lo } else { hi / 10.0 };
+    let (l0, l1) = (lo.log10(), hi.log10());
+    let decades = l1 - l0;
+    let target = target.max(1);
+    if decades < 1.0 {
+        let (t, step) = nice_ticks(lo, hi, target);
+        let labels = t.iter().map(|v| format_tick(*v, step)).collect();
+        return (t, labels);
+    }
+    // Whole-decade stride: as many powers as `target` will take.
+    let stride = ((decades / target as f64).ceil() as i64).max(1);
+    // Subdivisions only where the decades alone would leave the axis nearly
+    // unlabelled, and only when they all fit.
+    let mantissas: &[f64] =
+        if stride == 1 && decades <= 2.0 && target >= 4 { &[1.0, 2.0, 5.0] } else { &[1.0] };
+    let (k0, k1) = (l0.floor() as i64, l1.ceil() as i64);
+    let eps = 1e-9;
+    let mut ticks = Vec::new();
+    for k in k0..=k1 {
+        if k.rem_euclid(stride) != 0 {
+            continue;
+        }
+        let decade = 10f64.powi(k as i32);
+        for m in mantissas {
+            let v = m * decade;
+            if v >= lo * (1.0 - eps) && v <= hi * (1.0 + eps) {
+                ticks.push(v);
+            }
+        }
+    }
+    let labels = ticks.iter().map(|v| format_log_tick(*v)).collect();
+    (ticks, labels)
+}
+
+/// Format a log-axis tick. Its own precision comes from its own magnitude —
+/// there is no single step to read it from, the way [`format_tick`] does.
+pub fn format_log_tick(v: f64) -> String {
+    let a = v.abs();
+    if a == 0.0 {
+        return "0".to_string();
+    }
+    let e = a.log10().floor();
+    if !(1e-4..1e6).contains(&a) {
+        let m = v / 10f64.powf(e);
+        let e = e as i32;
+        // The mantissa is 1, 2 or 5 by construction, so it never needs a
+        // decimal — "1e6" rather than "1.0e6".
+        return if (m - 1.0).abs() < 1e-9 { format!("1e{e}") } else { format!("{m:.0}e{e}") };
+    }
+    let decimals = (-e as i32).clamp(0, 6) as usize;
+    let s = format!("{v:.decimals$}");
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +426,40 @@ mod tests {
             assert!(ticks.iter().all(|v| *v >= lo - 1e-6 && *v <= hi + 1e-6));
         }
         let _ = t;
+    }
+
+    #[test]
+    fn log_ticks_walk_the_decades() {
+        let (t, labels) = log_ticks(1.0, 10_000.0, 6);
+        assert_eq!(labels, vec!["1", "10", "100", "1000", "10000"]);
+        assert!(t.iter().zip(&labels).all(|(v, _)| *v > 0.0));
+
+        // Too many decades for the target: whole powers are skipped.
+        let (t, labels) = log_ticks(1.0, 1e12, 4);
+        assert!(t.len() <= 6, "thinned to {t:?}");
+        assert!(labels.contains(&"1".to_string()));
+        assert!(labels.iter().any(|l| l.contains('e')), "big decades go exponential: {labels:?}");
+    }
+
+    #[test]
+    fn a_short_log_range_subdivides_then_goes_linear() {
+        // One decade would be two lonely ticks, so 2 and 5 come in.
+        let (_, labels) = log_ticks(1.0, 10.0, 5);
+        assert_eq!(labels, vec!["1", "2", "5", "10"]);
+
+        // Under a decade the axis is near enough linear to label as one.
+        let (t, _) = log_ticks(3.0, 8.0, 5);
+        assert!(t.len() >= 3, "a sub-decade range still gets a ladder: {t:?}");
+        assert!(t.iter().all(|v| *v >= 3.0 && *v <= 8.0));
+    }
+
+    #[test]
+    fn log_tick_labels_read_by_magnitude() {
+        assert_eq!(format_log_tick(0.001), "0.001");
+        assert_eq!(format_log_tick(0.2), "0.2");
+        assert_eq!(format_log_tick(1.0), "1");
+        assert_eq!(format_log_tick(50.0), "50");
+        assert_eq!(format_log_tick(1e6), "1e6");
+        assert_eq!(format_log_tick(2e-5), "2e-5");
     }
 }

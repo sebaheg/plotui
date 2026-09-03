@@ -10,10 +10,11 @@ drops into a [Textual](https://textual.textualize.io/),
 widget, with the rendering engine written in Rust so it stays fast in 2D and 3D.
 
 > Status: **early scaffold.** Working today: 2D scatter/line/step/bar,
-> histogram, box, heatmap, and band charts with axes, ticks, categorical
-> labels, a colorbar and a legend; DAG/pipeline graphs with a layered layout
-> and a DOT subset reader; a 3D scatter/graph/surface/mesh engine; a
-> Kitty-image raw demo; and a Textual widget.
+> histogram, box, heatmap, and band charts with axes, ticks, titles,
+> explicit ranges, log scales, categorical labels, a colorbar and a legend;
+> DAG/pipeline graphs with a layered layout and a DOT subset reader; a 3D
+> scatter/graph/surface/mesh engine; a Kitty-image raw demo; and a Textual
+> widget.
 
 ## Architecture
 
@@ -89,6 +90,9 @@ plotui hist samples.txt                         # binned automatically
 plotui box -H measurements.tsv                  # one box per column
 plotui dag pipeline.dot                         # a DAG from a DOT file; hover a task
                                                 # to light everything it waits on
+plotui line --log-y --title "queue depth" \
+            --x-title minute --y-title items    # titles and log scales
+plotui line --x-range 0:100 --y-range 0:1       # pin an extent, LO:HI
 plotui example scatter                          # built-in demo scenes, no data needed
 plotui example deps                             # plotui's own dependency graph, laid
                                                 # out live by a force simulation
@@ -145,6 +149,21 @@ plot.add_bar(xs3, heights)
 # (y2 innermost, y3 outermost). The grid stays with the left axis.
 plot.add_line(xs, tokens, name="tokens", axis="y2")
 plot.add_line(xs, cpu_minutes, name="cpu min", axis="y3")
+
+# Titles: each buys its own margin, so the plot area shrinks rather than
+# drawing over the data. The y title is drawn rotated in the left margin.
+plot.set_title("p99 latency")
+plot.set_x_title("requests")
+plot.set_y_title("ms")
+
+# Ranges and scales: an explicit range pins the *extent* only — no autoscale
+# padding, and zoom/pan still compose on top of it (unlike set_x_window,
+# which is the live window and supersedes the camera). A log axis ticks in
+# powers of ten; values at or below zero have no log coordinate and neither
+# set the range nor draw.
+plot.set_x_range((0, 100))                         # None restores autoscale
+plot.set_y_range((0.1, 1e4))
+plot.set_y_log(True)                               # set_x_log for x
 
 # DAGs and pipelines: labelled boxes wired by arrows, laid out by rank. Node
 # centres are data coordinates; each box is sized in pixels from its label,

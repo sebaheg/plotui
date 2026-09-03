@@ -90,6 +90,28 @@ struct Args {
     /// the x axis)
     #[arg(long)]
     range_slider: bool,
+    /// Chart title, drawn above the plot
+    #[arg(long)]
+    title: Option<String>,
+    /// x axis title, drawn under its tick labels
+    #[arg(long)]
+    x_title: Option<String>,
+    /// y axis title, drawn rotated in the left margin
+    #[arg(long)]
+    y_title: Option<String>,
+    /// Pin the x extent, as LO:HI (e.g. -5:5). Zoom and pan still work from
+    /// there; without it the axis fits the data
+    #[arg(long, value_parser = parse_range)]
+    x_range: Option<(f64, f64)>,
+    /// Pin the y extent, as LO:HI
+    #[arg(long, value_parser = parse_range)]
+    y_range: Option<(f64, f64)>,
+    /// Scale the x axis by log10 (ignored on a categorical axis)
+    #[arg(long)]
+    log_x: bool,
+    /// Scale the y axis by log10
+    #[arg(long)]
+    log_y: bool,
     /// Export to a file instead of the terminal (.png; needs ffmpeg on PATH)
     #[arg(long)]
     out: Option<PathBuf>,
@@ -185,6 +207,17 @@ pub struct ExampleArgs {
     fps: u32,
 }
 
+/// `LO:HI`, gnuplot's range syntax. A colon rather than a comma so a decimal
+/// comma can never be read as a separator — the same reason the input parser
+/// leaves comma decimals alone.
+fn parse_range(s: &str) -> Result<(f64, f64), String> {
+    let err = || format!("expected LO:HI (e.g. 0:100), got '{s}'");
+    let (lo, hi) = s.split_once(':').ok_or_else(err)?;
+    let lo: f64 = lo.trim().parse().map_err(|_| err())?;
+    let hi: f64 = hi.trim().parse().map_err(|_| err())?;
+    Ok((lo, hi))
+}
+
 fn parse_size(s: &str) -> Result<(u16, u16), String> {
     let err = || format!("expected WxH (e.g. 1280x720), got '{s}'");
     let (w, h) = s.split_once(['x', 'X']).ok_or_else(err)?;
@@ -212,6 +245,20 @@ pub enum ChartKind {
         bins: Option<usize>,
         bin_width: Option<f64>,
     },
+}
+
+/// The `--title` / `--*-range` / `--log-*` family, applied in the order that
+/// makes both orders work: the scales first, so a range that a log axis
+/// cannot show is rejected outright rather than silently lifted.
+fn apply_axes(plot: &mut plotui_core::Plot, args: &Args) -> Result<(), plotui_bind::BindError> {
+    plotui_bind::set_log(plot, "x", args.log_x)?;
+    plotui_bind::set_log(plot, "y", args.log_y)?;
+    plotui_bind::set_title(plot, "title", args.title.clone())?;
+    plotui_bind::set_title(plot, "x", args.x_title.clone())?;
+    plotui_bind::set_title(plot, "y", args.y_title.clone())?;
+    plotui_bind::set_range(plot, "x", args.x_range)?;
+    plotui_bind::set_range(plot, "y", args.y_range)?;
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -250,6 +297,12 @@ fn main() -> ExitCode {
 
     let mut plot = build::build_plot(kind, &table);
     plot.range_slider = args.range_slider;
+    // Through the shared binding rules, so `plotui --log-y --y-range 0:1`
+    // fails with the same words the Python and Go bindings would use.
+    if let Err(e) = apply_axes(&mut plot, &args) {
+        eprintln!("plotui: {e}");
+        return ExitCode::from(2);
+    }
 
     // File export never needs (or probes) a graphics-capable terminal.
     if let Some(out) = &args.out {

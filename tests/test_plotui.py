@@ -1101,3 +1101,70 @@ def test_reachable_follows_direction():
     assert reachable(3, PIPELINE_EDGES, 2, upstream=False) == [False, False, True]
     assert reachable(3, PIPELINE_EDGES, 0, upstream=False) == [True, True, True]
     assert reachable(3, PIPELINE_EDGES, 99) == [False, False, False]
+
+
+def test_titles_round_trip_and_draw():
+    plot = demo_2d()
+    plain = drawn_count(plot, 600, 400)
+    assert plot.set_title("p99 latency") is True
+    assert plot.set_x_title("requests") is True
+    assert plot.set_y_title("ms") is True
+    assert (plot.title(), plot.x_title(), plot.y_title()) == ("p99 latency", "requests", "ms")
+    assert drawn_count(plot, 600, 400) > plain, "titles put ink on the frame"
+    # Setting the same text again is not a change; "" clears, so a host can
+    # pass a user's empty input straight through.
+    assert plot.set_title("p99 latency") is False
+    assert plot.set_title("") is True
+    assert plot.title() is None
+
+
+def test_explicit_range_replaces_autoscale():
+    plot = demo_2d()
+    assert plot.set_y_range((-10.0, 10.0)) is True
+    assert plot.y_range() == (-10.0, 10.0)
+    # A range is not a window: it pins the extent and leaves the camera alone.
+    assert plot.x_window() is None
+    assert plot.set_x_range((0.0, 3.0)) is True
+    pinned = plot.render_rgba(300, 200)
+    plot.zoom_by(2.0)
+    assert plot.render_rgba(300, 200) != pinned, "zoom composes over a range"
+    assert plot.set_x_range(None) is True
+    assert plot.x_range() is None
+
+    with pytest.raises(ValueError, match="needs finite lo < hi"):
+        plot.set_x_range((5.0, 5.0))
+
+
+def test_log_axes():
+    plot = Plot()
+    plot.add_line([1.0, 2.0, 3.0, 4.0], [1.0, 10.0, 100.0, 1000.0], name="rps")
+    assert plot.set_y_log(True) is True
+    assert plot.y_log() is True and plot.x_log() is False
+    assert len(plot.render_rgba(400, 300)) == 400 * 300 * 4
+
+    # A log axis has no coordinate for zero, so a range reaching one is
+    # refused rather than quietly lifted at render time.
+    with pytest.raises(ValueError, match="log y axis needs a positive range"):
+        plot.set_y_range((0.0, 100.0))
+    assert plot.set_y_range((0.5, 2000.0)) is True
+
+    # Zero and negative samples simply do not place: the plot still renders,
+    # and the axis stays positive.
+    zeros = Plot()
+    zeros.add_line([1.0, 2.0, 3.0], [0.0, -5.0, 100.0])
+    zeros.set_y_log(True)
+    assert len(zeros.render_rgba(400, 300)) == 400 * 300 * 4
+
+
+def test_log_defers_to_a_categorical_axis():
+    plot = Plot()
+    plot.add_bar([0.0, 1.0, 2.0], [3.0, 9.0, 27.0])
+    plot.set_categories("x", ["alpha", "beta", "gamma"])
+    plot.set_x_log(True)
+    # The flag is remembered, but names own the coordinate, so the frame is
+    # the categorical one — identical to never having asked for log.
+    assert plot.x_log() is True
+    plain = Plot()
+    plain.add_bar([0.0, 1.0, 2.0], [3.0, 9.0, 27.0])
+    plain.set_categories("x", ["alpha", "beta", "gamma"])
+    assert plot.render_rgba(400, 300) == plain.render_rgba(400, 300)

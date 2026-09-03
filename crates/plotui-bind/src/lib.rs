@@ -592,6 +592,82 @@ pub fn set_x_window(plot: &mut Plot, w: Option<(f64, f64)>) -> Result<bool, Bind
     Ok(changed)
 }
 
+/// Set (or clear) a title with change detection. `which` names the slot —
+/// `"title"`, `"x"` or `"y"` — and an empty string clears, so a binding can
+/// hand a user's `""` straight through instead of inventing a second call.
+pub fn set_title(plot: &mut Plot, which: &str, text: Option<String>) -> Result<bool, BindError> {
+    let text = text.filter(|t| !t.is_empty());
+    let slot = match which {
+        "title" => &mut plot.title,
+        "x" => &mut plot.x_title,
+        "y" => &mut plot.y_title,
+        _ => {
+            return Err(BindError::invalid(format!(
+                "title must be \"title\", \"x\" or \"y\", got '{which}'"
+            )))
+        }
+    };
+    let changed = *slot != text;
+    *slot = text;
+    Ok(changed)
+}
+
+/// Set (or clear) an axis's explicit range with validation and change
+/// detection. `axis` is `"x"` or `"y"`; the right-hand axes keep autoscaling.
+///
+/// A log axis has no coordinate for zero or a negative number, so a range
+/// that reaches one is refused here rather than quietly lifted at render
+/// time — the caller asked for something the scale cannot show. Order still
+/// matters the other way about: switching an axis to log *after* pinning a
+/// range that crosses zero lifts the low end instead (see `Plot::x_log`),
+/// because that is a change of scale, not a bad argument.
+pub fn set_range(plot: &mut Plot, axis: &str, r: Option<(f64, f64)>) -> Result<bool, BindError> {
+    let log = match axis {
+        "x" => plot.x_log,
+        "y" => plot.y_log,
+        _ => {
+            return Err(BindError::invalid(format!(
+                "range axis must be \"x\" or \"y\", got '{axis}'"
+            )))
+        }
+    };
+    if let Some((lo, hi)) = r {
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return Err(BindError::invalid(format!(
+                "{axis} range needs finite lo < hi, got ({lo}, {hi})"
+            )));
+        }
+        if log && lo <= 0.0 {
+            return Err(BindError::invalid(format!(
+                "a log {axis} axis needs a positive range, got ({lo}, {hi})"
+            )));
+        }
+    }
+    let slot = if axis == "x" { &mut plot.x_range } else { &mut plot.y_range };
+    let changed = *slot != r;
+    *slot = r;
+    Ok(changed)
+}
+
+/// Switch an axis to log₁₀ (or back) with change detection. `axis` is `"x"`
+/// or `"y"`; a categorical or time axis keeps its own coordinate and ignores
+/// the flag (see `Plot::x_log`), so this reports what was *set*, not what
+/// the frame will end up drawing.
+pub fn set_log(plot: &mut Plot, axis: &str, on: bool) -> Result<bool, BindError> {
+    let slot = match axis {
+        "x" => &mut plot.x_log,
+        "y" => &mut plot.y_log,
+        _ => {
+            return Err(BindError::invalid(format!(
+                "log axis must be \"x\" or \"y\", got '{axis}'"
+            )))
+        }
+    };
+    let changed = *slot != on;
+    *slot = on;
+    Ok(changed)
+}
+
 /// Toggle the range-slider strip with change detection.
 pub fn set_range_slider(plot: &mut Plot, on: bool) -> bool {
     let changed = plot.range_slider != on;
@@ -880,6 +956,69 @@ mod tests {
         assert_eq!(
             range_hit_from_parts("middle").unwrap_err().to_string(),
             "range part must be 'left', 'right', 'window' or 'track', got \"middle\""
+        );
+    }
+
+    #[test]
+    fn titles_clear_on_empty_and_report_change() {
+        let mut plot = Plot::new();
+        assert!(set_title(&mut plot, "title", Some("p99".into())).unwrap());
+        assert!(!set_title(&mut plot, "title", Some("p99".into())).unwrap());
+        assert_eq!(plot.title.as_deref(), Some("p99"));
+        // Empty is the same statement as absent, so a binding can hand a
+        // user's "" straight through instead of a second call.
+        assert!(set_title(&mut plot, "title", Some(String::new())).unwrap());
+        assert_eq!(plot.title, None);
+
+        assert!(set_title(&mut plot, "x", Some("requests".into())).unwrap());
+        assert!(set_title(&mut plot, "y", Some("ms".into())).unwrap());
+        assert_eq!(
+            (plot.x_title.as_deref(), plot.y_title.as_deref()),
+            (Some("requests"), Some("ms"))
+        );
+        assert_eq!(
+            set_title(&mut plot, "z", Some("nope".into())).unwrap_err().msg,
+            r#"title must be "title", "x" or "y", got 'z'"#
+        );
+    }
+
+    #[test]
+    fn ranges_validate_and_a_log_axis_demands_positives() {
+        let mut plot = Plot::new();
+        assert!(set_range(&mut plot, "x", Some((0.0, 100.0))).unwrap());
+        assert_eq!(plot.x_range, Some((0.0, 100.0)));
+        assert!(set_range(&mut plot, "x", None).unwrap());
+        assert_eq!(
+            set_range(&mut plot, "y", Some((5.0, 5.0))).unwrap_err().msg,
+            "y range needs finite lo < hi, got (5, 5)"
+        );
+
+        // Scale first, then range: the range is refused outright.
+        set_log(&mut plot, "y", true).unwrap();
+        assert_eq!(
+            set_range(&mut plot, "y", Some((0.0, 100.0))).unwrap_err().msg,
+            "a log y axis needs a positive range, got (0, 100)"
+        );
+        assert!(set_range(&mut plot, "y", Some((0.1, 100.0))).unwrap());
+
+        // The other order is a change of scale, not a bad argument: the
+        // renderer lifts the low end rather than the setter refusing it.
+        let mut plot = Plot::new();
+        set_range(&mut plot, "y", Some((0.0, 100.0))).unwrap();
+        assert!(set_log(&mut plot, "y", true).unwrap());
+        assert_eq!(plot.y_range, Some((0.0, 100.0)));
+    }
+
+    #[test]
+    fn axis_names_are_checked() {
+        let mut plot = Plot::new();
+        assert_eq!(
+            set_log(&mut plot, "z", true).unwrap_err().msg,
+            r#"log axis must be "x" or "y", got 'z'"#
+        );
+        assert_eq!(
+            set_range(&mut plot, "z", None).unwrap_err().msg,
+            r#"range axis must be "x" or "y", got 'z'"#
         );
     }
 }

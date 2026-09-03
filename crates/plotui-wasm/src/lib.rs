@@ -856,6 +856,36 @@ impl Plot {
         self.inner.x_window.map(|(lo, hi)| vec![lo, hi])
     }
 
+    /// The chart title, drawn centered above the plot area; `None` or an
+    /// empty string clears it.
+    pub fn set_title(&mut self, text: Option<String>) -> Result<bool, JsError> {
+        plotui_bind::set_title(&mut self.inner, "title", text).map_err(to_js)
+    }
+
+    /// An axis's title ("x" or "y"): what its numbers mean. The x title sits
+    /// under its tick labels, the y title rotated in the left margin.
+    pub fn set_axis_title(&mut self, axis: &str, text: Option<String>) -> Result<bool, JsError> {
+        plotui_bind::set_title(&mut self.inner, axis, text).map_err(to_js)
+    }
+
+    /// Pin an axis's extent ("x" or "y") to `[lo, hi]`. Unlike an x window
+    /// this decides the extent only — zoom and pan still compose on top —
+    /// and it is used exactly as given, without autoscale's padding.
+    pub fn set_range(&mut self, axis: &str, lo: f64, hi: f64) -> Result<bool, JsError> {
+        plotui_bind::set_range(&mut self.inner, axis, Some((lo, hi))).map_err(to_js)
+    }
+
+    /// Clear an axis's explicit range, back to autoscale.
+    pub fn clear_range(&mut self, axis: &str) -> Result<bool, JsError> {
+        plotui_bind::set_range(&mut self.inner, axis, None).map_err(to_js)
+    }
+
+    /// Scale an axis ("x" or "y") by log10. Ignored on a categorical or time
+    /// axis, and on the right-hand axes, which stay linear.
+    pub fn set_log(&mut self, axis: &str, on: bool) -> Result<bool, JsError> {
+        plotui_bind::set_log(&mut self.inner, axis, on).map_err(to_js)
+    }
+
     /// Toggle the range-slider strip; returns whether a repaint is needed.
     pub fn set_range_slider(&mut self, on: bool) -> bool {
         plotui_bind::set_range_slider(&mut self.inner, on)
