@@ -1386,6 +1386,67 @@ impl PanelStyle {
     }
 }
 
+/// The top-left corner for the crosshair readout panel, in framebuffer
+/// pixels: `px` is the guide's *snapped* x (never the raw hovered pixel, or
+/// two hovers that snap to the same sample would render differently),
+/// `markers` the marker y's currently on the frame, and `legend` the legend's
+/// box when there is one.
+///
+/// Four slots — beside the guide on either side, in either half of the frame
+/// — scored on how far they fall outside the plot rect, then on how much of
+/// the legend they cover. The preferred half is the one the markers are
+/// *not* in: the panel is opaque, and a tall multi-series readout sitting on
+/// the values it names hides more than it explains. Chart.js and Plotly do
+/// the opposite — they centre the label on the point and accept the occlusion
+/// — but both animate between positions and draw a caret back to the point.
+/// Here the guide line is already the tether, so the panel is free to stand
+/// well clear of the data.
+fn readout_slot(
+    px: i32,
+    box_w: i32,
+    box_h: i32,
+    rect: (i32, i32, i32, i32),
+    gap: i32,
+    markers: &[i32],
+    legend: Option<(i32, i32, i32, i32)>,
+) -> (i32, i32) {
+    let (x0, y0, x1, y1) = rect;
+    let (top, bottom) = (y0 + gap, y1 - gap - box_h);
+    // Markers up top send the panel low, and the other way about. With no
+    // marker on the frame there is nothing to dodge, so it keeps the top
+    // corner the single-slot placement always used.
+    let panel_low = !markers.is_empty() && {
+        let sum: i64 = markers.iter().map(|&y| i64::from(y)).sum();
+        sum / markers.len() as i64 <= i64::from((y0 + y1) / 2)
+    };
+    let (near, far) = if panel_low { (bottom, top) } else { (top, bottom) };
+    let (right, left) = (px + gap, px - gap - box_w);
+    let cands = [(right, near), (left, near), (right, far), (left, far)];
+
+    let overlap = |a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)| -> i64 {
+        let w = i64::from((a.2.min(b.2) - a.0.max(b.0) + 1).max(0));
+        let h = i64::from((a.3.min(b.3) - a.1.max(b.1) + 1).max(0));
+        w * h
+    };
+    let full = i64::from(box_w + 1) * i64::from(box_h + 1);
+
+    let (bx, by) = cands
+        .iter()
+        .min_by_key(|&&(bx, by)| {
+            let b = (bx, by, bx + box_w, by + box_h);
+            (full - overlap(b, rect), legend.map_or(0, |l| overlap(b, l)))
+        })
+        // `min_by_key` keeps the first of equal keys, so a tie — no legend, or
+        // a legend none of the slots touch — falls to the preferred slot and
+        // placement stays deterministic.
+        .copied()
+        .unwrap_or((right, near));
+
+    // A panel wider or taller than the frame cannot be placed, only pushed
+    // back inside it — the same guards the single-slot placement used.
+    ((bx.min(x1 - box_w)).max(x0 + 1), by.clamp(y0, (y1 - box_h).max(y0)))
+}
+
 /// One legend row: the trace it stands for, its label and swatch colour, and
 /// whether that trace is currently drawn.
 struct LegendRow<'a> {
@@ -6144,12 +6205,6 @@ impl Plot {
         changed
     }
 
-    /// The 2D hover crosshair: a vertical guide at the sample x nearest the
-    /// hovered pixel, a marker on every series sampled at that x, and a
-    /// readout box naming each value. Drawn after everything else so no
-    /// chrome covers it. Series match by exact sample x, so series on a
-    /// shared grid all get a row while series on their own grids only show
-    /// where they truly have a sample.
     /// The colormap legend: a vertical gradient strip with a tick label per
     /// value, and the caption above it when there is one.
     ///
@@ -6195,6 +6250,14 @@ impl Plot {
         }
     }
 
+    /// The 2D hover crosshair: a vertical guide at the sample x nearest the
+    /// hovered pixel, a marker on every series sampled at that x, and a
+    /// readout box naming each value. Drawn after everything else so no
+    /// chrome covers it. Series match by exact sample x, so series on a
+    /// shared grid all get a row while series on their own grids only show
+    /// where they truly have a sample. The readout box is placed by
+    /// [`readout_slot`], which keeps it off the legend and out of the half of
+    /// the frame the sampled markers are in.
     fn draw_crosshair(
         &self,
         fb: &mut Framebuffer,
@@ -6265,6 +6328,10 @@ impl Plot {
         fb.rect_fill(px, y0, px, y1, 0.0, self.chrome.ink);
 
         let mut rows: Vec<(String, Rgb)> = Vec::new();
+        // The marker y's actually on the frame, which is what the readout box
+        // steers away from. A band contributes a row but no marker, so this
+        // is not one entry per row.
+        let mut markers: Vec<i32> = Vec::new();
         for (ti, t) in self.traces.iter().enumerate() {
             // Skipping hidden traces here keeps the `series N` fallback names
             // stable: numbering follows the trace index, not the row count.
@@ -6338,6 +6405,7 @@ impl Plot {
             if py >= y0 && py <= y1 {
                 fb.disc(px as f32, py as f32, 0.0, 2.6 * s as f32, [255, 255, 255]);
                 fb.disc(px as f32, py as f32, 0.0, 1.7 * s as f32, t.color());
+                markers.push(py);
             }
             rows.push((readout, t.color()));
         }
@@ -6356,15 +6424,12 @@ impl Plot {
             .max()
             .unwrap_or(cw);
         let (box_w, box_h) = ps.box_size(rows.len() as i32 + 1, text_w);
-        // Beside the guide, flipped to its left when the right side would
-        // leave the frame, and clamped inside the plot area vertically.
-        let mut bx0 = px + ps.inset;
-        if bx0 + box_w > x1 {
-            bx0 = (px - ps.inset - box_w).max(x0 + 1);
-        }
-        let bx1 = bx0 + box_w;
-        let by0 = (y0 + ps.inset).min((y1 - box_h).max(y0));
-        let by1 = by0 + box_h;
+        // Beside the guide, away from the data, and off the legend. The
+        // legend rect comes from the same call `draw_legend` made a moment
+        // ago, so the box dodges what is actually on screen.
+        let legend = self.legend_box(x1, y0, s, false).map(|l| (l.bx0, l.by0, l.bx1, l.by1));
+        let (bx0, by0) = readout_slot(px, box_w, box_h, rect, ps.inset, &markers, legend);
+        let (bx1, by1) = (bx0 + box_w, by0 + box_h);
 
         ps.frame(fb, (bx0, by0, bx1, by1), 0.0, &self.chrome);
         let row_y = |row_i: i32| by0 + ps.pad_y + row_i * ps.row_h;
@@ -8271,6 +8336,94 @@ mod tests {
         let plain = plot.render(300, 200).rgba();
         plot.hover2d_px = Some(150.0);
         assert_eq!(plot.render(300, 200).rgba(), plain);
+    }
+
+    /// The plot rect, panel inset and panel size the `readout_slot` tests
+    /// share, so each one only states the thing it is about.
+    const SLOT_RECT: (i32, i32, i32, i32) = (20, 10, 280, 190);
+    const SLOT_GAP: i32 = 6;
+    const SLOT_W: i32 = 80;
+    const SLOT_H: i32 = 50;
+
+    fn slot(px: i32, markers: &[i32], legend: Option<(i32, i32, i32, i32)>) -> (i32, i32) {
+        readout_slot(px, SLOT_W, SLOT_H, SLOT_RECT, SLOT_GAP, markers, legend)
+    }
+
+    /// The readout takes the half of the frame the markers are not in, so it
+    /// never sits on the values it is naming.
+    #[test]
+    fn readout_sits_opposite_the_data() {
+        let (_, y0, _, y1) = SLOT_RECT;
+        let mid = (y0 + y1) / 2;
+        let (_, high_data) = slot(150, &[30, 40], None);
+        assert!(high_data > mid, "markers up top, panel should go low");
+        let (_, low_data) = slot(150, &[160, 170], None);
+        assert!(low_data + SLOT_H < mid, "markers down low, panel should go high");
+    }
+
+    /// With no marker on the frame there is nothing to dodge, so the panel
+    /// keeps the top corner it has always used.
+    #[test]
+    fn readout_without_markers_keeps_the_top_corner() {
+        assert_eq!(slot(150, &[], None), (150 + SLOT_GAP, SLOT_RECT.1 + SLOT_GAP));
+    }
+
+    /// A legend in the corner the panel wants pushes it to the other side of
+    /// the guide rather than being painted over.
+    #[test]
+    fn readout_dodges_the_legend() {
+        // Markers low, so the panel wants the top — the legend's own row.
+        let legend = (200, 16, 270, 56);
+        let (with_x, with_y) = slot(180, &[160, 170], Some(legend));
+        let b = (with_x, with_y, with_x + SLOT_W, with_y + SLOT_H);
+        let overlaps = b.0 <= legend.2 && b.2 >= legend.0 && b.1 <= legend.3 && b.3 >= legend.1;
+        assert!(!overlaps, "readout {b:?} still covers the legend {legend:?}");
+        // And it is the legend that moved it: the same hover without one
+        // stays on the preferred right-hand side.
+        assert_eq!(slot(180, &[160, 170], None).0, 180 + SLOT_GAP);
+    }
+
+    /// Wherever the guide lands, the panel stays inside the plot rect.
+    #[test]
+    fn readout_stays_in_frame() {
+        let (x0, y0, x1, y1) = SLOT_RECT;
+        for px in x0..=x1 {
+            for markers in [&[30, 40][..], &[160, 170][..], &[][..]] {
+                let (bx, by) = slot(px, markers, Some((200, 16, 270, 56)));
+                assert!(
+                    bx >= x0 && bx + SLOT_W <= x1 && by >= y0 && by + SLOT_H <= y1,
+                    "panel at ({bx}, {by}) left the frame for px {px}"
+                );
+            }
+        }
+    }
+
+    /// A panel too big for the frame cannot be placed, only pushed back
+    /// inside it — it must still land somewhere drawable.
+    #[test]
+    fn readout_survives_an_oversized_box() {
+        let (x0, y0, ..) = SLOT_RECT;
+        let (bx, by) = readout_slot(150, 400, 400, SLOT_RECT, SLOT_GAP, &[30], None);
+        assert!(bx >= x0 && by >= y0, "oversized panel placed off-frame at ({bx}, {by})");
+    }
+
+    /// End to end: hovering near the right edge — where the readout used to
+    /// be pinned to the top row and paint straight over the legend — leaves
+    /// the legend's swatch untouched.
+    #[test]
+    fn hover2d_leaves_the_legend_swatch_alone() {
+        let mut plot = crosshair_plot();
+        let (lx1, ly0, s, three_d) = plot.legend_anchor(300, 200);
+        let lb = plot.legend_box(lx1, ly0, s, three_d).expect("the named trace has a row");
+        let (ps, bx0, by0) = (lb.ps, lb.bx0, lb.by0);
+        let color = lb.rows[0].color;
+        // The centre of the first row's chip, mirroring `PanelStyle::chip`.
+        let cx = (bx0 + ps.pad_x + ps.swatch / 2) as usize;
+        let cy = (by0 + ps.pad_y + (CHAR_H * s - ps.swatch + s) / 2 + ps.swatch / 2) as usize;
+        assert_eq!(px(&plot.render(300, 200), cx, cy), Some(color), "wrong probe point");
+
+        plot.hover2d_px = Some(290.0);
+        assert_eq!(px(&plot.render(300, 200), cx, cy), Some(color), "the readout ate the legend");
     }
 
     /// Explicit edge colors reach the framebuffer verbatim (no dimming).
