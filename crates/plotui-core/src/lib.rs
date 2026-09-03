@@ -19,7 +19,7 @@ mod ribbon;
 mod ticks;
 
 pub use font::{draw_text, draw_text_aa, draw_text_at, text_width, text_width_at, CHAR_H, CHAR_W};
-pub use layout::ForceLayout;
+pub use layout::{reachable, Direction, ForceLayout, LayeredLayout, RankDir};
 pub use marching::marching_cubes;
 pub use ribbon::{catmull_rom, ribbon, tube};
 pub use ticks::{

@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use plotui_core::{ForceLayout, Plot, Rgb, Shape, COLORWAY_PLOTUI};
+use plotui_core::{Direction, ForceLayout, Plot, Rgb, Shape, COLORWAY_PLOTUI};
 use plotui_ratatui::{ElementKind, OverlaySpan, PlotEvent, PlotState};
 use ratatui::style::{Color, Style};
 
@@ -204,19 +204,9 @@ impl Scene {
     }
 
     /// The transitive-dependency closure of node `i` over the current edges.
+    /// An edge (a, b) means a depends on b, so the closure runs downstream.
     fn reachable(&self, i: usize) -> Vec<bool> {
-        let mut seen = vec![false; self.n];
-        let mut stack = vec![i];
-        seen[i] = true;
-        while let Some(a) = stack.pop() {
-            for &(x, y) in &self.edges {
-                if x as usize == a && !seen[y as usize] {
-                    seen[y as usize] = true;
-                    stack.push(y as usize);
-                }
-            }
-        }
-        seen
+        plotui_core::reachable(self.n, &self.edges, i, Direction::Downstream)
     }
 
     /// Recolor for a hover: the hovered crate and everything it depends on
