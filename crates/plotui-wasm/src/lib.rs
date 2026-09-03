@@ -512,7 +512,7 @@ impl Plot {
         let pairs: Vec<(u32, u32)> =
             edges.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
         self.inner
-            .extend_graph(handle, &pts, &colors, &pairs)
+            .extend_graph(handle, &pts, &colors, &pairs, None)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 

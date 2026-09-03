@@ -1483,6 +1483,32 @@ impl NodeBox {
         NodeBox { cx: self.cx, cy: self.cy, hw: self.hw + m, hh: self.hh + m }
     }
 
+    /// Is `(px, py)` inside this silhouette? The test is the shape itself,
+    /// not its bounding box, so the notch beside a diamond belongs to
+    /// whatever is behind it rather than to the diamond.
+    fn contains(&self, shape: NodeShape, px: f64, py: f64) -> bool {
+        let (dx, dy) = ((px - self.cx).abs(), (py - self.cy).abs());
+        let (hw, hh) = (self.hw.max(1e-6), self.hh.max(1e-6));
+        match shape {
+            NodeShape::Rounded | NodeShape::Box => dx <= hw && dy <= hh,
+            NodeShape::Ellipse => (dx / hw).powi(2) + (dy / hh).powi(2) <= 1.0,
+            NodeShape::Diamond => dx / hw + dy / hh <= 1.0,
+        }
+    }
+
+    /// How far `(px, py)` is from this node, squared: zero inside the
+    /// silhouette, else the distance to the bounding rectangle. A terminal
+    /// mouse reports whole cells, so a pick needs a tolerance *outside* the
+    /// box as well as an exact answer inside it.
+    fn hit_d2(&self, shape: NodeShape, px: f64, py: f64) -> f64 {
+        if self.contains(shape, px, py) {
+            return 0.0;
+        }
+        let dx = ((px - self.cx).abs() - self.hw).max(0.0);
+        let dy = ((py - self.cy).abs() - self.hh).max(0.0);
+        dx * dx + dy * dy
+    }
+
     /// Where the ray leaving the centre along `(dx, dy)` crosses the
     /// silhouette — where an edge must stop so it meets the box instead of
     /// running under it to the label.
@@ -3001,6 +3027,10 @@ impl Plot {
     /// indices) stay valid. `positions.len()` must equal the node count.
     /// O(n): bounds recompute in full, because moving nodes can shrink the
     /// box and the incremental union only widens.
+    ///
+    /// A 2D graph takes the same `[f32; 3]` list with its z dropped, so one
+    /// layout-step call site drives either dimension and the FFI, Python, Go
+    /// and JavaScript entry points need no second signature.
     pub fn set_graph_positions(
         &mut self,
         id: TraceId,
@@ -3014,13 +3044,59 @@ impl Plot {
                     return Err(TraceError::LengthMismatch);
                 }
                 *nodes = positions;
-                let visible = self.meta[id].visible;
-                self.meta[id] = compute_meta(&self.traces[id]);
-                self.meta[id].visible = visible;
+                self.rebuild_meta(id);
+                Ok(())
+            }
+            Trace::Graph2d { nodes, .. } => {
+                if positions.len() != nodes.len() {
+                    return Err(TraceError::LengthMismatch);
+                }
+                *nodes = positions.into_iter().map(|p| [p[0], p[1]]).collect();
+                self.rebuild_meta(id);
                 Ok(())
             }
             _ => Err(TraceError::WrongKind),
         }
+    }
+
+    /// Replace a 2D graph's edge waypoints — the second half of a relayout,
+    /// after [`Self::set_graph_positions`] has moved the nodes. `route_starts`
+    /// carries one entry per edge (CSR, the shape
+    /// [`LayeredLayout::routes`](crate::LayeredLayout::routes) returns);
+    /// empty lists restore straight edges.
+    pub fn set_graph_routes(
+        &mut self,
+        id: TraceId,
+        pts: Vec<[f32; 2]>,
+        starts: Vec<u32>,
+    ) -> Result<(), TraceError> {
+        self.resync_meta();
+        let t = self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        match t {
+            Trace::Graph2d { edges, route_pts, route_starts, .. } => {
+                if !starts.is_empty() && starts.len() != edges.len() {
+                    return Err(TraceError::LengthMismatch);
+                }
+                *route_pts = pts;
+                *route_starts = starts;
+                // Waypoints are geometry, so the frame can shrink around them
+                // the way it does when nodes move.
+                self.rebuild_meta(id);
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
+    /// Rescan trace `id` after its geometry changed in place, keeping the
+    /// host's view flags. Both `visible` and `muted` are restored: they are
+    /// answers about the *host's* intent, and a relayout is not a reason to
+    /// forget either of them.
+    fn rebuild_meta(&mut self, id: TraceId) {
+        let (visible, muted) = (self.meta[id].visible, self.meta[id].muted);
+        self.meta[id] = compute_meta(&self.traces[id]);
+        self.meta[id].visible = visible;
+        self.meta[id].muted = muted;
     }
 
     /// Recolor a graph trace in place — the host-side highlight primitive
@@ -3051,6 +3127,19 @@ impl Plot {
                 *edge_colors = new_edge_colors;
                 Ok(())
             }
+            Trace::Graph2d { nodes, edges, node_colors, edge_colors, .. } => {
+                if colors.len() != nodes.len() {
+                    return Err(TraceError::LengthMismatch);
+                }
+                if let Some(ec) = &new_edge_colors {
+                    if ec.len() != edges.len() {
+                        return Err(TraceError::LengthMismatch);
+                    }
+                }
+                *node_colors = colors;
+                *edge_colors = new_edge_colors;
+                Ok(())
+            }
             _ => Err(TraceError::WrongKind),
         }
     }
@@ -3064,12 +3153,21 @@ impl Plot {
     /// graph that is not the last node-bearing trace shifts the flat indices
     /// of every node after it (edge indices likewise); `selected`/`hovered`
     /// are remapped here, hosts holding indices must do the same.
+    ///
+    /// `new_labels` names the appended nodes of a [`Trace::Graph2d`] (missing
+    /// entries give unlabelled boxes); a 3D graph has no labels and ignores
+    /// it. Positions are `[f32; 3]` for both, z dropped in 2D, so one call
+    /// site grows either dimension — the same rule
+    /// [`Self::set_graph_positions`] follows. Appending never adds
+    /// waypoints: new edges start straight, and a relayout is what routes
+    /// them (see [`Self::set_graph_routes`]).
     pub fn extend_graph(
         &mut self,
         id: TraceId,
         new_nodes: &[[f32; 3]],
         new_colors: &[Rgb],
         new_edges: &[(u32, u32)],
+        new_labels: Option<&[String]>,
     ) -> Result<(), TraceError> {
         self.resync_meta();
         // Flat boundaries computed pre-extend: nodes at/after the end of this
@@ -3083,27 +3181,48 @@ impl Plot {
             .iter()
             .take(id + 1)
             .map(|t| match t {
-                Trace::Graph3d { edges, .. } => edges.len(),
+                Trace::Graph3d { edges, .. } | Trace::Graph2d { edges, .. } => edges.len(),
                 _ => 0,
             })
             .sum();
+        // Both arms shift the same indices by the same deltas, so the remap
+        // is written once here rather than duplicated per dimension.
+        let remap = |selected: &mut Option<Element>, hovered: &mut Option<Element>| {
+            for el in [selected, hovered] {
+                match el {
+                    Some(Element::Node(n)) if *n >= node_boundary => *n += new_nodes.len(),
+                    Some(Element::Edge(e)) if *e >= edge_boundary => *e += new_edges.len(),
+                    _ => {}
+                }
+            }
+        };
         let t = self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)?;
         match t {
             Trace::Graph3d { nodes, node_colors, edges, .. } => {
                 nodes.extend_from_slice(new_nodes);
                 node_colors.extend_from_slice(new_colors);
                 edges.extend_from_slice(new_edges);
-                for el in [&mut self.selected, &mut self.hovered] {
-                    match el {
-                        Some(Element::Node(n)) if *n >= node_boundary => *n += new_nodes.len(),
-                        Some(Element::Edge(e)) if *e >= edge_boundary => *e += new_edges.len(),
-                        _ => {}
-                    }
-                }
+                remap(&mut self.selected, &mut self.hovered);
                 let m = &mut self.meta[id];
                 b3_seen_all(&mut m.bounds, new_nodes);
                 m.node_len += new_nodes.len();
                 m.vert_len += new_nodes.len();
+                Ok(())
+            }
+            Trace::Graph2d { nodes, labels, node_colors, edges, .. } => {
+                nodes.extend(new_nodes.iter().map(|p| [p[0], p[1]]));
+                labels.extend(
+                    (0..new_nodes.len())
+                        .map(|i| new_labels.and_then(|v| v.get(i)).cloned().unwrap_or_default()),
+                );
+                node_colors.extend_from_slice(new_colors);
+                edges.extend_from_slice(new_edges);
+                remap(&mut self.selected, &mut self.hovered);
+                // A graph's frame pad is a share of its own extent, so the
+                // union of the old box with the new points would be wrong at
+                // the edges; the rescan is the only honest answer, and it is
+                // O(n) rather than O(delta) for exactly that reason.
+                self.rebuild_meta(id);
                 Ok(())
             }
             _ => Err(TraceError::WrongKind),
@@ -3175,10 +3294,26 @@ impl Plot {
     }
 
     /// Project every node (flat-index order, same list as [`Self::pick`])
-    /// through the exact projector `render` uses. Returns screen-space
+    /// through the exact projection `render` uses. Returns screen-space
     /// `[x_px, y_px, depth]` per node — the hook for frontends that overlay
     /// text labels or steer the camera toward a node.
+    ///
+    /// A 2D plot goes through the axis map instead of the orbit projector and
+    /// reports depth 0: there is no camera to be in front of, and a node's
+    /// box centre is the anchor a tooltip wants either way.
     pub fn project_nodes(&self, px_w: usize, px_h: usize) -> Vec<[f32; 3]> {
+        if !self.is_3d() {
+            let l = self.layout_2d(px_w, px_h);
+            let mut v = Vec::with_capacity(self.node_count());
+            for t in &self.traces {
+                if let Trace::Graph2d { nodes, .. } = t {
+                    v.extend(nodes.iter().map(|p| {
+                        [l.map.sx(p[0] as f64) as f32, l.map.sy(p[1] as f64) as f32, 0.0]
+                    }));
+                }
+            }
+            return v;
+        }
         let (pr, _, _) = self.projector(px_w, px_h, 1.0);
         self.node_points().iter().map(|p| pr.project(*p)).collect()
     }
@@ -3537,7 +3672,12 @@ impl Plot {
             match t {
                 Trace::Scatter3d { pts, .. } => v.extend_from_slice(pts),
                 Trace::Graph3d { nodes, .. } => v.extend_from_slice(nodes),
-                // 2D traces are not part of 3D node picking.
+                // A 2D graph's nodes are pickable and share the flat index
+                // space, so they are listed here too, flattened onto z = 0.
+                // The 3D consumers of this list (bounds, the fog range) only
+                // ever see it in plots that have no 2D graph in them.
+                Trace::Graph2d { nodes, .. } => v.extend(nodes.iter().map(|p| [p[0], p[1], 0.0])),
+                // Other 2D traces have no pickable nodes.
                 _ => {}
             }
         }
@@ -3685,7 +3825,14 @@ impl Plot {
 
     /// Return the flat node index nearest to screen pixel `(px, py)` within
     /// `radius` pixels, or `None`. Uses the exact projection `render` uses.
+    ///
+    /// In a 2D plot a node is its *box*, not a point: a hit inside the box
+    /// wins outright, and `radius` is the slack outside it a terminal mouse
+    /// needs, since it reports whole cells.
     pub fn pick(&self, px_w: usize, px_h: usize, px: f32, py: f32, radius: f32) -> Option<usize> {
+        if !self.is_3d() {
+            return self.pick_2d(px_w, px_h, px, py, radius);
+        }
         let (pr, _, _) = self.projector(px_w, px_h, 1.0);
         let mut best: Option<usize> = None;
         let mut best_d2 = radius * radius;
@@ -3718,6 +3865,81 @@ impl Plot {
         best
     }
 
+    /// [`Self::pick`] for a 2D plot: the nearest [`Trace::Graph2d`] node box,
+    /// measured by [`NodeBox::hit_d2`], sharing the flat index space with the
+    /// 3D path. Hidden traces keep their block so visible nodes never shift.
+    fn pick_2d(&self, px_w: usize, px_h: usize, px: f32, py: f32, radius: f32) -> Option<usize> {
+        let l = self.layout_2d(px_w, px_h);
+        let (px, py) = (px as f64, py as f64);
+        let mut best: Option<usize> = None;
+        let mut best_d2 = (radius as f64) * (radius as f64);
+        let mut flat = 0usize;
+        for (ti, t) in self.traces.iter().enumerate() {
+            let Trace::Graph2d { nodes, node_shapes, .. } = t else { continue };
+            if !self.is_visible(ti) {
+                flat += nodes.len();
+                continue;
+            }
+            let boxes = self.graph2d_boxes(ti, &l.map, l.s);
+            for (i, p) in nodes.iter().enumerate() {
+                if p[0].is_finite() && p[1].is_finite() {
+                    let shape =
+                        node_shapes.as_ref().and_then(|v| v.get(i)).copied().unwrap_or_default();
+                    let d2 = boxes[i].hit_d2(shape, px, py);
+                    if d2 <= best_d2 {
+                        best = Some(flat);
+                        best_d2 = d2;
+                    }
+                }
+                flat += 1;
+            }
+        }
+        best
+    }
+
+    /// [`Self::pick_edge`] for a 2D plot: the nearest point on any edge's
+    /// drawn polyline, waypoints and all, so a routed edge is clickable
+    /// where it is *drawn* rather than along the straight line it is not.
+    fn pick_edge_2d(
+        &self,
+        px_w: usize,
+        px_h: usize,
+        px: f32,
+        py: f32,
+        radius: f32,
+    ) -> Option<usize> {
+        let l = self.layout_2d(px_w, px_h);
+        let mut best: Option<usize> = None;
+        let mut best_d2 = radius * radius;
+        let mut flat = 0usize;
+        for (ti, t) in self.traces.iter().enumerate() {
+            let Trace::Graph2d { edges, .. } = t else { continue };
+            if !self.is_visible(ti) {
+                flat += edges.len();
+                continue;
+            }
+            let boxes = self.graph2d_boxes(ti, &l.map, l.s);
+            for e in 0..edges.len() {
+                // Untrimmed: the arrowhead's footprint is part of the edge as
+                // far as the eye is concerned, so the hit path runs the whole
+                // way to the target box.
+                if let Some(poly) = self.graph2d_edge_path(ti, &boxes, &l.map, e, 0.0) {
+                    for w in poly.windows(2) {
+                        let a = [w[0].0 as f32, w[0].1 as f32, 0.0];
+                        let b = [w[1].0 as f32, w[1].1 as f32, 0.0];
+                        let d2 = point_segment_d2(px, py, a, b);
+                        if d2 <= best_d2 {
+                            best = Some(flat);
+                            best_d2 = d2;
+                        }
+                    }
+                }
+                flat += 1;
+            }
+        }
+        best
+    }
+
     /// Return the flat edge index nearest to screen pixel `(px, py)` within
     /// `radius` pixels of the projected segment, or `None`.
     pub fn pick_edge(
@@ -3728,6 +3950,9 @@ impl Plot {
         py: f32,
         radius: f32,
     ) -> Option<usize> {
+        if !self.is_3d() {
+            return self.pick_edge_2d(px_w, px_h, px, py, radius);
+        }
         let (pr, _, _) = self.projector(px_w, px_h, 1.0);
         let mut best: Option<usize> = None;
         let mut best_d2 = radius * radius;

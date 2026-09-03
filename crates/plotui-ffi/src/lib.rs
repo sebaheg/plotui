@@ -1340,7 +1340,8 @@ pub unsafe extern "C" fn plotui_extend_graph(
             Ok(e) => e.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect(),
             Err(s) => return s,
         };
-        match p.plot.extend_graph(handle, &plotui_bind::zip3(xs, ys, zs), &colors, &edge_list) {
+        match p.plot.extend_graph(handle, &plotui_bind::zip3(xs, ys, zs), &colors, &edge_list, None)
+        {
             Ok(()) => PLOTUI_OK,
             Err(e) => trace_status(e),
         }

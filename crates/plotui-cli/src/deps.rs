@@ -195,7 +195,7 @@ impl Scene {
         self.layout.add_node(&neighbors);
         let (color, _, _) = style(NODES[self.n].1);
         let pos = *self.layout.positions().last().expect("just added");
-        plot.extend_graph(self.handle, &[pos], &[color], &new_edges).expect("graph handle");
+        plot.extend_graph(self.handle, &[pos], &[color], &new_edges, None).expect("graph handle");
         self.base.push(color);
         self.edges.extend_from_slice(&new_edges);
         self.n += 1;

@@ -757,7 +757,7 @@ impl Plot {
     ) -> PyResult<()> {
         let pts = zip3(xs, ys, zs);
         let colors = node_colors.map(rgb_list).transpose()?.unwrap_or_default();
-        self.inner.extend_graph(handle, &pts, &colors, &edges).map_err(trace_to_py)
+        self.inner.extend_graph(handle, &pts, &colors, &edges, None).map_err(trace_to_py)
     }
 
     /// Show or hide a trace by handle. Returns True when the state changed,
