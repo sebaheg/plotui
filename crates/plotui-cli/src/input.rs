@@ -16,6 +16,109 @@ pub struct Table {
     /// since this UTC epoch base (the first timestamp's midnight), and the
     /// plot gets a calendar x axis.
     pub x_epoch: Option<f64>,
+    /// What the first row settled about the input's shape. `--follow` reads
+    /// later rows through it, so a streamed line is parsed exactly like the
+    /// batch that opened the plot.
+    pub schema: Schema,
+}
+
+/// The shape the first data row settles: how fields are separated, how many
+/// there are, and whether x is a calendar or a running index. Everything
+/// after that row is read through it rather than re-sniffed, so a feed cannot
+/// change delimiter or column count halfway and quietly plot nonsense.
+#[derive(Debug, Clone)]
+pub struct Schema {
+    delim: Delim,
+    ncols: usize,
+    time_x: bool,
+    /// Epoch base for a time x column: the first timestamp's UTC midnight.
+    /// f32 x cannot hold raw epoch seconds, so values are offsets from it.
+    x_epoch: Option<f64>,
+    /// Next x for a single-column input, whose x is its row number. Carried
+    /// on the schema so a streamed row continues the count the batch left.
+    next_x: usize,
+}
+
+/// One row: its x — given, dated, or auto-indexed — and one value per series.
+#[derive(Debug, PartialEq)]
+pub struct Row {
+    pub x: f32,
+    pub ys: Vec<f32>,
+}
+
+impl Schema {
+    fn new(first: &str, delim: Delim) -> Self {
+        let f = fields(first, delim);
+        let ncols = f.len();
+        // A first x cell that is no number but a strict ISO date puts the
+        // whole x column on a time axis.
+        let time_x = ncols > 1 && f[0].parse::<f32>().is_err() && parse_iso(f[0]).is_some();
+        Schema { delim, ncols, time_x, x_epoch: None, next_x: 0 }
+    }
+
+    /// How many series the rows carry: every column past x, or the one column
+    /// itself when x is the row number.
+    pub fn n_series(&self) -> usize {
+        if self.ncols <= 1 {
+            1
+        } else {
+            self.ncols - 1
+        }
+    }
+
+    /// The epoch base a time-x column resolved to, once a row has been read.
+    pub fn x_epoch(&self) -> Option<f64> {
+        self.x_epoch
+    }
+
+    /// Parse one line against this shape. `lineno` names the row in errors;
+    /// `hint` adds the `-H` suggestion that only makes sense on the very
+    /// first row of a headerless file.
+    pub fn parse_row(&mut self, line: &str, lineno: usize, hint: bool) -> Result<Row, String> {
+        let f = fields(line, self.delim);
+        if f.len() != self.ncols {
+            return Err(format!(
+                "line {lineno}: expected {} fields, found {}",
+                self.ncols,
+                f.len()
+            ));
+        }
+        let mut x = 0.0f32;
+        if self.time_x {
+            let ts = parse_iso(f[0]).ok_or_else(|| {
+                format!(
+                    "line {lineno}: {:?} is not an ISO-8601 date (mixed date and numeric x?)",
+                    f[0]
+                )
+            })?;
+            let base = *self.x_epoch.get_or_insert_with(|| (ts / 86_400.0).floor() * 86_400.0);
+            x = (ts - base) as f32;
+        }
+        let mut nums = Vec::with_capacity(self.ncols);
+        for field in &f[if self.time_x { 1 } else { 0 }..] {
+            match field.parse::<f32>() {
+                Ok(v) => nums.push(v),
+                Err(_) => {
+                    let mut msg = format!("line {lineno}: {field:?} is not a number");
+                    if hint {
+                        msg.push_str("; use -H if the first row is a header");
+                    }
+                    return Err(msg);
+                }
+            }
+        }
+        let ys = if self.ncols == 1 {
+            x = self.next_x as f32;
+            self.next_x += 1;
+            nums
+        } else if self.time_x {
+            nums
+        } else {
+            x = nums[0];
+            nums[1..].to_vec()
+        };
+        Ok(Row { x, ys })
+    }
 }
 
 /// A strict ISO-8601 timestamp — `YYYY-MM-DD`, optionally `THH:MM[:SS]`
@@ -111,7 +214,7 @@ fn fields(line: &str, delim: Delim) -> Vec<&str> {
     }
 }
 
-fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, String> {
+pub fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, String> {
     // 1-based line numbers for error messages; blank lines are skipped but
     // still counted.
     let mut rows: Vec<(usize, &str)> = text
@@ -138,61 +241,20 @@ fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, Str
         }
     }
 
-    let ncols = fields(rows[0].1, delim).len();
-    let n_series = if ncols <= 1 { 1 } else { ncols - 1 };
-    // A first x cell that is no number but a strict ISO date puts the whole
-    // x column on a time axis (values become offsets from an epoch base).
-    let first_x = fields(rows[0].1, delim)[0];
-    let time_x = ncols > 1 && first_x.parse::<f32>().is_err() && parse_iso(first_x).is_some();
-    let mut x_epoch: Option<f64> = None;
+    let mut schema = Schema::new(rows[0].1, delim);
+    let n_series = schema.n_series();
+    let ncols = schema.ncols;
     let mut x: Vec<f32> = Vec::with_capacity(rows.len());
     let mut series: Vec<Vec<f32>> = vec![Vec::with_capacity(rows.len()); n_series];
 
     for (row_idx, (lineno, line)) in rows.iter().enumerate() {
-        let f = fields(line, delim);
-        if f.len() != ncols {
-            return Err(format!("line {lineno}: expected {ncols} fields, found {}", f.len()));
-        }
-        if time_x {
-            let ts = parse_iso(f[0]).ok_or_else(|| {
-                format!(
-                    "line {lineno}: {:?} is not an ISO-8601 date (mixed date and numeric x?)",
-                    f[0]
-                )
-            })?;
-            let base = *x_epoch.get_or_insert_with(|| (ts / 86_400.0).floor() * 86_400.0);
-            x.push((ts - base) as f32);
-        }
-        let mut nums = Vec::with_capacity(ncols);
-        for field in &f[if time_x { 1 } else { 0 }..] {
-            match field.parse::<f32>() {
-                Ok(v) => nums.push(v),
-                Err(_) => {
-                    let mut msg = format!("line {lineno}: {field:?} is not a number");
-                    if row_idx == 0 && !header {
-                        msg.push_str("; use -H if the first row is a header");
-                    }
-                    return Err(msg);
-                }
-            }
-        }
-        if ncols == 1 {
-            x.push(x.len() as f32);
-            series[0].push(nums[0]);
-        } else {
-            // With a time x, `nums` holds only the series values; otherwise
-            // its first entry is x.
-            let ys = if time_x {
-                &nums[..]
-            } else {
-                x.push(nums[0]);
-                &nums[1..]
-            };
-            for (s, v) in series.iter_mut().zip(ys) {
-                s.push(*v);
-            }
+        let row = schema.parse_row(line, *lineno, row_idx == 0 && !header)?;
+        x.push(row.x);
+        for (s, v) in series.iter_mut().zip(&row.ys) {
+            s.push(*v);
         }
     }
+    let x_epoch = schema.x_epoch();
 
     // Header → series names: with a single column the one name labels the one
     // series; otherwise the first name labels x (unused in v1) and the rest
@@ -205,7 +267,7 @@ fn parse(text: &str, delimiter: Option<&str>, header: bool) -> Result<Table, Str
         (1..ncols).map(|i| header_names.get(i).cloned()).collect()
     };
 
-    Ok(Table { names, x, series, x_epoch })
+    Ok(Table { names, x, series, x_epoch, schema })
 }
 
 #[cfg(test)]

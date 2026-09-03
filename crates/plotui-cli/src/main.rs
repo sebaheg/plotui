@@ -11,6 +11,7 @@ mod build;
 mod dag;
 mod deps;
 mod examples;
+mod follow;
 mod input;
 mod interactive;
 mod lidar;
@@ -20,12 +21,15 @@ mod protein;
 mod record;
 mod render;
 
+use std::cell::RefCell;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use clap::{ArgAction, Parser, Subcommand};
 use plotui_core::BarMode;
+use plotui_ratatui::PlotState;
 use plotui_term::RenderMode;
 
 #[derive(Parser)]
@@ -90,6 +94,10 @@ struct Args {
     /// the x axis)
     #[arg(long)]
     range_slider: bool,
+    /// Keep reading rows as they arrive and append them live. Needs piped
+    /// input and an interactive terminal: `tail -f app.log | plotui line -f`
+    #[arg(short = 'f', long)]
+    follow: bool,
     /// Chart title, drawn above the plot
     #[arg(long)]
     title: Option<String>,
@@ -247,6 +255,73 @@ pub enum ChartKind {
     },
 }
 
+/// A `--follow` session: check that this is somewhere a live chart can even
+/// exist, open the feed, and hand its drain to the frame loop.
+///
+/// The checks come first and the read second, so a mistake fails instantly
+/// instead of after blocking on a pipe that will never satisfy it.
+fn run_follow(kind: ChartKind, args: &Args) -> Result<(), String> {
+    if args.out.is_some() {
+        return Err("--follow draws a live chart; --out writes one frame. Pick one".into());
+    }
+    if args.static_mode {
+        return Err("--follow and --static are opposites: one keeps reading, one draws once".into());
+    }
+    if matches!(kind, ChartKind::Box) {
+        return Err("a box plot summarises a whole column at once, so it has nothing to follow; \
+             try line, scatter, step, bar or hist"
+            .into());
+    }
+    if let Some(f) = args.file.as_deref() {
+        if f.as_os_str() != "-" {
+            return Err(format!(
+                "--follow reads a stream, not a file — pipe one in: tail -f {} | plotui …",
+                f.display()
+            ));
+        }
+    }
+    if !std::io::stdout().is_terminal() {
+        return Err("--follow needs a terminal to draw into; stdout is redirected".into());
+    }
+    if std::io::stdin().is_terminal() {
+        return Err("--follow reads its rows from a pipe, and stdin is a terminal".into());
+    }
+    // The terminal is asked before the feed is: a chart that can never be
+    // drawn should say so now, not after the first row finally arrives.
+    let mode = plotui_term::detect_render_mode();
+    if mode == RenderMode::Unsupported {
+        for line in plotui_term::policy::UNSUPPORTED_MESSAGE {
+            eprintln!("{line}");
+        }
+        return Ok(());
+    }
+
+    let (mut plot, follower) = follow::start(kind, args.delimiter.as_deref(), args.header)?;
+    plot.range_slider = args.range_slider;
+    apply_axes(&mut plot, args).map_err(|e| e.to_string())?;
+
+    // The feed owns the follower for the length of the loop, and the report
+    // is read after it: nothing may print while the plot has the terminal.
+    let follower = Rc::new(RefCell::new(follower));
+    let drained = Rc::clone(&follower);
+    let hooks = interactive::Hooks {
+        feed: Some(Box::new(move |state: &mut PlotState, _dt: f64| {
+            let mut follower = drained.borrow_mut();
+            // Once the writer has hung up there is nothing left to poll for;
+            // the chart stays up and interactive on what it already has.
+            if !follower.ended() && follower.drain(state.plot_mut()) {
+                state.invalidate();
+            }
+        })),
+        ..Default::default()
+    };
+    interactive::run_with(plot, mode, args.width, args.height, hooks).map_err(|e| e.to_string())?;
+    if let Some(report) = follower.borrow().report() {
+        eprintln!("plotui: {report}");
+    }
+    Ok(())
+}
+
 /// The `--title` / `--*-range` / `--log-*` family, applied in the order that
 /// makes both orders work: the scales first, so a range that a log axis
 /// cannot show is rejected outright rather than silently lifted.
@@ -286,6 +361,16 @@ fn main() -> ExitCode {
         Chart::Example(a) => return examples::run(&a),
         Chart::Dag(a) => return dag::run(&a),
     };
+
+    if args.follow {
+        return match run_follow(kind, &args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("plotui: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
 
     let table = match input::load(args.file.as_deref(), args.delimiter.as_deref(), args.header) {
         Ok(t) => t,

@@ -93,11 +93,21 @@ plotui dag pipeline.dot                         # a DAG from a DOT file; hover a
 plotui line --log-y --title "queue depth" \
             --x-title minute --y-title items    # titles and log scales
 plotui line --x-range 0:100 --y-range 0:1       # pin an extent, LO:HI
+tail -f app.log | LC_ALL=C awk '{print $2}' \
+                | plotui line --follow          # live: rows append as they arrive
 plotui example scatter                          # built-in demo scenes, no data needed
 plotui example deps                             # plotui's own dependency graph, laid
                                                 # out live by a force simulation
 plotui example pipeline                         # a nightly forecast DAG, running
 ```
+
+`--follow` (`-f`) keeps the reader open instead of plotting once at EOF: rows
+are parsed as they arrive and appended in place, so the chart grows without a
+redraw from scratch and pan/zoom survive. It needs piped input and a terminal
+to draw into — a malformed line is skipped rather than fatal, and the count is
+reported when you quit. The shape of the input (delimiter, column count,
+whether x is a calendar) is settled by the first row and held for the rest of
+the stream.
 
 Like every plotui frontend, the CLI needs a terminal with Kitty graphics
 (supported terminals below); elsewhere it prints a notice and exits.
