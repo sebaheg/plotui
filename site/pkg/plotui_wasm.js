@@ -70,6 +70,98 @@ export class ForceLayout {
 if (Symbol.dispose) ForceLayout.prototype[Symbol.dispose] = ForceLayout.prototype.free;
 
 /**
+ * A hierarchical ("Sugiyama") layout for a directed graph: rank the nodes
+ * by depth, order each rank to reduce edge crossings, then place them so
+ * edges run as straight as they can. Solved in the constructor — there is
+ * nothing to step, because a pipeline has one right shape.
+ *
+ * Feed `positions()`, `route_pts()` and `route_starts()` straight to
+ * `Plot.add_graph2d`. Deterministic: same input, same output, no
+ * randomness anywhere.
+ */
+export class LayeredLayout {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        LayeredLayoutFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_layeredlayout_free(ptr, 0);
+    }
+    /**
+     * Lay out `n_nodes` connected by `edges` (flat `[a0, b0, a1, b1, …]`
+     * index pairs), flowing in `rankdir` — "TB" (sources on top, the
+     * default) or "LR" (sources on the left). Self-loops and out-of-range
+     * endpoints are inert, and cycles do not hang: a back edge is reversed
+     * for the layout only.
+     * @param {number} n_nodes
+     * @param {Uint32Array} edges
+     * @param {string | null} [rankdir]
+     */
+    constructor(n_nodes, edges, rankdir) {
+        const ptr0 = passArray32ToWasm0(edges, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(rankdir) ? 0 : passStringToWasm0(rankdir, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.layeredlayout_new(n_nodes, ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        LayeredLayoutFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Node centres as a flat `[x0, y0, x1, …]` array, in index order.
+     * @returns {Float32Array}
+     */
+    positions() {
+        const ret = wasm.layeredlayout_positions(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Each node's rank: 0 for a source, one more than its deepest
+     * predecessor otherwise.
+     * @returns {Uint32Array}
+     */
+    ranks() {
+        const ret = wasm.layeredlayout_ranks(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Edge waypoints as a flat `[x0, y0, x1, …]` array — the first half of
+     * the CSR pair `Plot.add_graph2d` takes.
+     * @returns {Float32Array}
+     */
+    route_pts() {
+        const ret = wasm.layeredlayout_route_pts(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * One index per edge into `route_pts()`, in the caller's edge order —
+     * the second half of the CSR pair. Edge `e` owns
+     * `route_starts()[e]..route_starts()[e + 1]`, and an empty run is a
+     * straight edge.
+     * @returns {Uint32Array}
+     */
+    route_starts() {
+        const ret = wasm.layeredlayout_route_starts(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) LayeredLayout.prototype[Symbol.dispose] = LayeredLayout.prototype.free;
+
+/**
  * Generated geometry: vertex coordinates split per axis (the shape
  * `Plot.add_mesh3d` takes) plus the flat `[a0, b0, c0, a1, …]` triangle
  * indices that join them. Returned by `marching_cubes`, `tube` and
@@ -186,6 +278,12 @@ if (Symbol.dispose) PickHit.prototype[Symbol.dispose] = PickHit.prototype.free;
  * frontend for a plot's life.
  */
 export class Plot {
+    static __wrap(ptr) {
+        const obj = Object.create(Plot.prototype);
+        obj.__wbg_ptr = ptr;
+        PlotFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -307,6 +405,66 @@ export class Plot {
         var ptr5 = isLikeNone(axis) ? 0 : passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len5 = WASM_VECTOR_LEN;
         const ret = wasm.plot_add_box2d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Add a directed graph in the 2D plane: labelled boxes at `(xs, ys)`,
+     * wired by `edges` as flat `[a0, b0, a1, b1, …]` index pairs. This is
+     * the pipeline / DAG chart — pair it with `LayeredLayout` for the
+     * positions and routes, or place the nodes yourself.
+     *
+     * `labels` names the boxes; `node_colors` takes one colour shorthand
+     * per node, which is the channel a live pipeline repaints through
+     * `set_graph_colors`; `node_shapes` takes "rounded", "box", "ellipse"
+     * or "diamond" per node. `route_pts` is interleaved x/y waypoints and
+     * `route_starts` one index per edge into them (the CSR pair
+     * `LayeredLayout.routes()` returns).
+     *
+     * Node *centres* are in data coordinates but their boxes are sized in
+     * pixels from the label, so zooming spreads the graph apart while the
+     * text stays legible. A plot whose visible 2D traces are all graphs
+     * draws no axes; see `set_show_axes`.
+     * @param {Float32Array} xs
+     * @param {Float32Array} ys
+     * @param {Uint32Array} edges
+     * @param {string[] | null} [labels]
+     * @param {boolean | null} [directed]
+     * @param {string[] | null} [node_colors]
+     * @param {string | null} [color]
+     * @param {string[] | null} [node_shapes]
+     * @param {string[] | null} [edge_colors]
+     * @param {Float32Array | null} [route_pts]
+     * @param {Uint32Array | null} [route_starts]
+     * @param {string | null} [name]
+     * @returns {number}
+     */
+    add_graph2d(xs, ys, edges, labels, directed, node_colors, color, node_shapes, edge_colors, route_pts, route_starts, name) {
+        const ptr0 = passArrayF32ToWasm0(xs, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(ys, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray32ToWasm0(edges, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        var ptr3 = isLikeNone(labels) ? 0 : passArrayJsValueToWasm0(labels, wasm.__wbindgen_malloc);
+        var len3 = WASM_VECTOR_LEN;
+        var ptr4 = isLikeNone(node_colors) ? 0 : passArrayJsValueToWasm0(node_colors, wasm.__wbindgen_malloc);
+        var len4 = WASM_VECTOR_LEN;
+        var ptr5 = isLikeNone(color) ? 0 : passStringToWasm0(color, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len5 = WASM_VECTOR_LEN;
+        var ptr6 = isLikeNone(node_shapes) ? 0 : passArrayJsValueToWasm0(node_shapes, wasm.__wbindgen_malloc);
+        var len6 = WASM_VECTOR_LEN;
+        var ptr7 = isLikeNone(edge_colors) ? 0 : passArrayJsValueToWasm0(edge_colors, wasm.__wbindgen_malloc);
+        var len7 = WASM_VECTOR_LEN;
+        var ptr8 = isLikeNone(route_pts) ? 0 : passArrayF32ToWasm0(route_pts, wasm.__wbindgen_malloc);
+        var len8 = WASM_VECTOR_LEN;
+        var ptr9 = isLikeNone(route_starts) ? 0 : passArray32ToWasm0(route_starts, wasm.__wbindgen_malloc);
+        var len9 = WASM_VECTOR_LEN;
+        var ptr10 = isLikeNone(name) ? 0 : passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len10 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_add_graph2d(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, isLikeNone(directed) ? 0xFFFFFF : directed ? 1 : 0, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -1096,6 +1254,25 @@ export class Plot {
         }
     }
     /**
+     * Replace a 2D graph's edge waypoints — the second half of a relayout,
+     * after `set_graph_positions` has moved the nodes. `route_pts` is
+     * interleaved x/y and `route_starts` one index per edge into them;
+     * passing both empty restores straight edges.
+     * @param {number} handle
+     * @param {Float32Array} route_pts
+     * @param {Uint32Array} route_starts
+     */
+    set_graph_routes(handle, route_pts, route_starts) {
+        const ptr0 = passArrayF32ToWasm0(route_pts, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(route_starts, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_graph_routes(this.__wbg_ptr, handle, ptr0, len0, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * 2D crosshair: the hovered x in framebuffer pixels (`None` clears);
      * core snaps to the nearest sample and draws the readout.
      * @param {number | null} [x_px]
@@ -1190,6 +1367,18 @@ export class Plot {
     }
     /**
      * Show or hide the 3D bounding-box wireframe.
+     * Draw the 2D chrome — grid, axis rules and tick labels — or not.
+     * `undefined` restores the automatic rule (a frame whose visible 2D
+     * traces are all graphs draws none of it, because a pipeline's
+     * coordinates are a layout rather than measurements); `true` and
+     * `false` pin it. The legend, colorbar, range slider and crosshair are
+     * unaffected either way, and 3D plots ignore it.
+     * @param {boolean | null} [show]
+     */
+    set_show_axes(show) {
+        wasm.plot_set_show_axes(this.__wbg_ptr, isLikeNone(show) ? 0xFFFFFF : show ? 1 : 0);
+    }
+    /**
      * @param {boolean} show
      */
     set_show_box(show) {
@@ -1399,6 +1588,58 @@ export function marching_cubes(values, nx, ny, nz, origin, cell, iso) {
 }
 
 /**
+ * Parse a DOT document, lay it out, and return a ready-to-render plot
+ * whose graph trace is handle 0. `rankdir` overrides the document's own
+ * ("TB" or "LR"); `undefined` honours whatever it says.
+ *
+ * The accepted grammar is a subset: node and edge statements, chains
+ * (`a -> b -> c`), braced fan-outs (`a -> {b c}`), `subgraph`s (contents
+ * hoisted, grouping ignored), attribute defaults, `rankdir`, and `label` /
+ * `color` / `fillcolor` / `shape` / `style=rounded` on nodes with `color`
+ * on edges. Unknown attributes are ignored; HTML labels, node ports and a
+ * mismatched edge operator throw with the line and column.
+ * @param {string} text
+ * @param {string | null} [rankdir]
+ * @returns {Plot}
+ */
+export function plot_from_dot(text, rankdir) {
+    const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    var ptr1 = isLikeNone(rankdir) ? 0 : passStringToWasm0(rankdir, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len1 = WASM_VECTOR_LEN;
+    const ret = wasm.plot_from_dot(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Plot.__wrap(ret[0]);
+}
+
+/**
+ * Which nodes are reachable from node `i` — everything it waits on with
+ * `upstream` true (the default), everything it leads to otherwise —
+ * including `i` itself. Returns one byte per node, 1 where reachable.
+ *
+ * This is the primitive behind "hover a task and light everything upstream
+ * of it": pair it with `Plot.set_graph_colors`.
+ * @param {number} n_nodes
+ * @param {Uint32Array} edges
+ * @param {number} i
+ * @param {boolean | null} [upstream]
+ * @returns {Uint8Array}
+ */
+export function reachable(n_nodes, edges, i, upstream) {
+    const ptr0 = passArray32ToWasm0(edges, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.reachable(n_nodes, ptr0, len0, i, isLikeNone(upstream) ? 0xFFFFFF : upstream ? 1 : 0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * Sweep a flat rectangular cross-section along `path`: `widths` across the
  * face, `thickness` through it.
  *
@@ -1488,6 +1729,9 @@ function __wbg_get_imports() {
 const ForceLayoutFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_forcelayout_free(ptr, 1));
+const LayeredLayoutFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_layeredlayout_free(ptr, 1));
 const MeshFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_mesh_free(ptr, 1));
@@ -1517,6 +1761,11 @@ function getArrayF64FromWasm0(ptr, len) {
 function getArrayU32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 
 let cachedDataViewMemory0 = null;

@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from plotui import Plot
+from plotui import LayeredLayout, Plot, from_dot, reachable
 
 W, H = 120, 80  # default framebuffer size for pixel assertions
 
@@ -764,6 +764,10 @@ def test_extend_error_paths():
     with pytest.raises(ValueError, match="unknown trace handle"):
         plot.set_visible(99, False)
 
+    graph2d = plot.add_graph2d([0.0], [0.0], edges=[])
+    with pytest.raises(ValueError, match="graph2d traces are structural"):
+        plot.extend(graph2d, [1.0], [1.0])
+
 
 def test_extend_tolerates_nan_and_ragged_input():
     plot = Plot()
@@ -979,3 +983,121 @@ def test_drag_x_window_parts_roundtrip():
     assert plot.shift_x_window(0.5) is True
     with pytest.raises(ValueError, match="range part must be"):
         plot.drag_x_window(400, 240, "middle", 1.0)
+
+
+# --- 2D graphs: pipelines and DAGs ---
+
+PIPELINE_EDGES = [(0, 1), (1, 2), (0, 2)]
+
+
+def test_add_graph2d_labels_edges_and_pick():
+    plot = Plot()
+    layout = LayeredLayout(3, PIPELINE_EDGES)
+    xs, ys = layout.positions()
+    handle = plot.add_graph2d(
+        xs,
+        ys,
+        PIPELINE_EDGES,
+        labels=["fetch", "clean", "publish"],
+        node_colors=[(250, 10, 10), (10, 250, 10), (10, 10, 250)],
+        node_shapes=["rounded", "box", "ellipse"],
+        routes=layout.routes(),
+    )
+    assert handle == 0
+    assert plot.node_count() == 3
+    # Every node colour reaches the pixels, and so does the label ink.
+    for color in [(250, 10, 10), (10, 250, 10), (10, 10, 250)]:
+        assert has_color(plot, color, 400, 300)
+    assert has_color(plot, (205, 210, 220), 400, 300), "labels are drawn into the frame"
+
+    # A node's projected centre picks that node — the two are solved once.
+    nodes = plot.project_nodes(400, 300)
+    assert len(nodes) == 3
+    for i, (px, py, depth) in enumerate(nodes):
+        assert depth == 0.0
+        assert plot.pick_element_px(400, 300, px, py, 0.0, 0.0) == ("node", i)
+    assert plot.pick_element_px(400, 300, 2.0, 2.0, 4.0, 4.0) is None
+
+    # And the edge between two boxes picks the edge, not a node.
+    mid = ((nodes[0][0] + nodes[1][0]) / 2, (nodes[0][1] + nodes[1][1]) / 2)
+    assert plot.pick_element_px(400, 300, mid[0], mid[1], 0.0, 3.0) == ("edge", 0)
+
+
+def test_graph2d_hides_axes_and_show_axes_is_a_tri_state():
+    frame = (70, 78, 96)
+    plot = Plot()
+    plot.add_graph2d([0.0, 0.0], [1.0, 0.0], [(0, 1)], labels=["a", "b"])
+    assert plot.show_axes is None
+    assert not has_color(plot, frame, 300, 220)
+    plot.show_axes = True
+    assert has_color(plot, frame, 300, 220)
+    plot.show_axes = None
+    assert not has_color(plot, frame, 300, 220)
+
+
+def test_graph2d_mutators_recolour_and_reroute():
+    plot = Plot()
+    handle = plot.add_graph2d([0.0, 0.0], [1.0, 0.0], [(0, 1)], labels=["a", "b"])
+    plot.set_graph_colors(handle, [(9, 250, 9), (9, 250, 9)], [(250, 9, 9)])
+    assert has_color(plot, (9, 250, 9), 300, 220)
+    plot.set_graph_positions(handle, [0.0, 1.0], [1.0, 0.0], [0.0, 0.0])
+    plot.set_graph_routes(handle, [[(0.5, 0.9)]])
+    plot.set_graph_routes(handle, [[]])
+    plot.extend_graph(
+        handle,
+        [1.0],
+        [-1.0],
+        [0.0],
+        node_colors=[(80, 80, 80)],
+        edges=[(1, 2)],
+        labels=["c"],
+    )
+    assert plot.node_count() == 3
+
+    with pytest.raises(ValueError, match="unknown node shape"):
+        plot.add_graph2d([0.0], [0.0], [], node_shapes=["blob"])
+
+
+def test_layered_layout_is_deterministic():
+    a = LayeredLayout(3, PIPELINE_EDGES)
+    b = LayeredLayout(3, PIPELINE_EDGES)
+    assert a.positions() == b.positions()
+    assert a.ranks() == b.ranks() == [0, 1, 2]
+    # The edge that skips a rank gets one waypoint; the others are straight.
+    assert [len(r) for r in a.routes()] == [0, 0, 1]
+
+    # LR is TB turned a quarter turn.
+    lr = LayeredLayout(3, PIPELINE_EDGES, rankdir="LR")
+    tb_xs, tb_ys = a.positions()
+    lr_xs, lr_ys = lr.positions()
+    assert lr_xs == [-y for y in tb_ys]
+    assert lr_ys == [-x for x in tb_xs]
+
+    with pytest.raises(ValueError, match="unknown rankdir"):
+        LayeredLayout(2, [(0, 1)], rankdir="sideways")
+
+
+def test_from_dot():
+    plot = from_dot("digraph nightly { a -> b -> c; a -> c }")
+    assert plot.node_count() == 3
+    assert plot.show_axes is False, "a graph's coordinates are not a scale"
+    assert drawn_count(plot, 300, 220) > 0
+
+    # rankdir is honoured and overridable.
+    lr = from_dot("digraph { rankdir=LR; a -> b }")
+    assert lr.project_nodes(400, 300)[0][0] < lr.project_nodes(400, 300)[1][0]
+    forced = from_dot("digraph { rankdir=LR; a -> b }", rankdir="TB")
+    assert forced.project_nodes(400, 300)[0][1] < forced.project_nodes(400, 300)[1][1]
+
+    # Errors carry the shared line:col message.
+    with pytest.raises(ValueError, match=r"1:13: '--' joins nodes in a graph"):
+        from_dot("digraph { a -- b }")
+    with pytest.raises(ValueError, match="HTML labels"):
+        from_dot("digraph { a [label=<b>x</b>] }")
+
+
+def test_reachable_follows_direction():
+    assert reachable(3, PIPELINE_EDGES, 2) == [True, True, True]
+    assert reachable(3, PIPELINE_EDGES, 2, upstream=False) == [False, False, True]
+    assert reachable(3, PIPELINE_EDGES, 0, upstream=False) == [True, True, True]
+    assert reachable(3, PIPELINE_EDGES, 99) == [False, False, False]

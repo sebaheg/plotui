@@ -26,6 +26,13 @@
 #define PLOTUI_RENDER_UNSUPPORTED 2
 
 /**
+ * An opaque hierarchical layout (`plotui_core::LayeredLayout`): solved once
+ * in `plotui_layered_layout_new`, then read out. Not thread-safe: one
+ * thread at a time, like `PlotuiPlot`.
+ */
+typedef struct PlotuiLayeredLayout PlotuiLayeredLayout;
+
+/**
  * An opaque 3D force-directed layout (`plotui_core::ForceLayout`): pure
  * math on the host's timer, deterministic for a given seed. Not
  * thread-safe: one thread at a time, like `PlotuiPlot`.
@@ -114,6 +121,45 @@ int32_t plotui_add_scatter3d(struct PlotuiPlot *p,
                              float size,
                              const char *name,
                              size_t *out_handle);
+
+/**
+ * Add a 2D directed graph: labelled boxes at `(xs, ys)`, wired by `edges`.
+ *
+ * `labels` is an array of NUL-terminated strings, one per node (an empty
+ * string draws an unlabelled box); `node_shapes` likewise, taking the names
+ * `rounded`, `box`, `ellipse` and `diamond` plus DOT's synonyms.
+ * `route_pts` is `2 * n_route_pts` floats as interleaved x/y waypoints and
+ * `route_starts` is one u32 per edge indexing into them (CSR) — what
+ * `plotui_layered_layout_routes` writes out. Pass NULL for any of them to
+ * take the default.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions. `edges` is `2 * n_edges`
+ * u32s as (i, j) pairs; `node_rgbs`/`edge_rgbs` are `3 * n` byte triples.
+ */
+int32_t plotui_add_graph2d(struct PlotuiPlot *p,
+                           const float *xs,
+                           size_t nx,
+                           const float *ys,
+                           size_t ny,
+                           const char *const *labels,
+                           size_t n_labels,
+                           const uint32_t *edges,
+                           size_t n_edges,
+                           bool directed,
+                           const uint8_t *node_rgbs,
+                           size_t n_node_rgbs,
+                           const uint8_t *rgb,
+                           const char *const *node_shapes,
+                           size_t n_shapes,
+                           const uint8_t *edge_rgbs,
+                           size_t n_edge_rgbs,
+                           const float *route_pts,
+                           size_t n_route_pts,
+                           const uint32_t *route_starts,
+                           size_t n_route_starts,
+                           const char *name,
+                           size_t *out_handle);
 
 /**
  * # Safety
@@ -508,6 +554,22 @@ int32_t plotui_extend_graph(struct PlotuiPlot *p,
                             size_t n_edges);
 
 /**
+ * Replace a 2D graph's edge waypoints — the second half of a relayout,
+ * after `plotui_set_graph_positions` has moved the nodes. `route_pts` is
+ * `2 * n_route_pts` floats as interleaved x/y and `route_starts` is one u32
+ * per edge indexing into them; passing both empty restores straight edges.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_set_graph_routes(struct PlotuiPlot *p,
+                                size_t handle,
+                                const float *route_pts,
+                                size_t n_route_pts,
+                                const uint32_t *route_starts,
+                                size_t n_route_starts);
+
+/**
  * # Safety
  * Pointer arguments follow the crate conventions.
  */
@@ -789,6 +851,18 @@ int32_t plotui_set_bounds(struct PlotuiPlot *p, const float *lo, const float *hi
 void plotui_set_show_box(struct PlotuiPlot *p, bool show);
 
 /**
+ * Draw the 2D chrome — grid, axis rules and tick labels — or not. `show`
+ * is a tri-state: negative restores the automatic rule (a frame whose
+ * visible 2D traces are all graphs draws no chrome), 0 pins it off, and
+ * any positive value pins it on. The legend, colorbar, range slider and
+ * crosshair are unaffected, and 3D plots ignore it.
+ *
+ * # Safety
+ * `p` must be a live plot handle.
+ */
+void plotui_set_show_axes(struct PlotuiPlot *p, int32_t show);
+
+/**
  * Recolour the non-data chrome; each pointer is NULL (keep) or 3 RGB bytes.
  *
  * # Safety
@@ -1013,6 +1087,98 @@ int32_t plotui_layout_add_node(struct PlotuiLayout *l,
                                const uint32_t *neighbors,
                                size_t n_neighbors,
                                size_t *out_index);
+
+/**
+ * Lay out `n_nodes` connected by `edges` (`2 * n_edges` u32s as (i, j)
+ * pairs) flowing in `rankdir` (`"TB"` or `"LR"`, case-insensitive; NULL
+ * means `"TB"`). Free with `plotui_layered_layout_free`. Returns NULL on a
+ * malformed edge slice or an unknown `rankdir`, with the reason in
+ * `plotui_last_error`.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+struct PlotuiLayeredLayout *plotui_layered_layout_new(size_t n_nodes,
+                                                      const uint32_t *edges,
+                                                      size_t n_edges,
+                                                      const char *rankdir);
+
+/**
+ * Free a layered layout. NULL is a no-op.
+ *
+ * # Safety
+ * `l` must be a pointer from `plotui_layered_layout_new` not yet freed.
+ */
+void plotui_layered_layout_free(struct PlotuiLayeredLayout *l);
+
+/**
+ * How many waypoints the layout produced — the `out_pts` size contract for
+ * `plotui_layered_layout_routes`, which cannot be known before the layout
+ * has run. A NULL layout counts 0.
+ *
+ * # Safety
+ * `l` must be a live layered-layout handle or NULL.
+ */
+size_t plotui_layered_layout_route_count(const struct PlotuiLayeredLayout *l);
+
+/**
+ * Write the node positions as flat `[x0, y0, x1, …]` into `out_xy` (which
+ * must hold `2 * n_nodes` floats) and each node's rank into `out_ranks`
+ * (`n_nodes` u32s, or NULL to skip). Feed the positions to
+ * `plotui_add_graph2d`.
+ *
+ * # Safety
+ * `l` must be a live handle; the outputs must point at enough elements.
+ */
+int32_t plotui_layered_layout_positions(const struct PlotuiLayeredLayout *l,
+                                        float *out_xy,
+                                        uint32_t *out_ranks);
+
+/**
+ * Write the edge waypoints as flat `[x0, y0, x1, …]` into `out_pts` (which
+ * must hold `2 * plotui_layered_layout_route_count(l)` floats) and the CSR
+ * starts into `out_starts` (one u32 per edge). Both feed
+ * `plotui_add_graph2d` and `plotui_set_graph_routes` unchanged.
+ *
+ * # Safety
+ * `l` must be a live handle; the outputs must point at enough elements.
+ */
+int32_t plotui_layered_layout_routes(const struct PlotuiLayeredLayout *l,
+                                     float *out_pts,
+                                     uint32_t *out_starts);
+
+/**
+ * Parse DOT, lay the graph out, and write a ready-to-render plot to
+ * `out_plot` (free it with `plotui_plot_free`) and its graph trace's handle
+ * to `out_handle`. `rankdir` is `"TB"`/`"LR"` or NULL to honour whatever
+ * the document says. A parse error returns `PLOTUI_ERR_INVALID_ARG` with
+ * the `line:col` message in `plotui_last_error`.
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions.
+ */
+int32_t plotui_plot_from_dot(const char *text,
+                             const char *rankdir,
+                             struct PlotuiPlot **out_plot,
+                             size_t *out_handle);
+
+/**
+ * Which nodes are reachable from `from` — upstream (everything that leads
+ * to it) or downstream (everything it leads to), including `from` itself.
+ * `edges` is `2 * n_edges` u32s as (i, j) pairs; `out_flags` receives
+ * `n_nodes` bytes, 1 where reachable. This is the primitive behind "hover a
+ * task and light everything it waits on".
+ *
+ * # Safety
+ * Pointer arguments follow the crate conventions; `out_flags` must point at
+ * `n_nodes` bytes.
+ */
+int32_t plotui_reachable(size_t n_nodes,
+                         const uint32_t *edges,
+                         size_t n_edges,
+                         size_t from,
+                         bool upstream,
+                         uint8_t *out_flags);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -13,7 +13,8 @@ pub mod dot;
 pub use dot::{parse_dot, plot_from_dot, DotEdge, DotGraph, DotNode};
 
 use plotui_core::{
-    BarMode, BinSpec, Colormap, Element, ErrBars, Interp, Orient, Plot, RangeHit, Rgb, Shape, YAxis,
+    BarMode, BinSpec, Colormap, Direction, Element, ErrBars, Interp, NodeShape, Orient, Plot,
+    RangeHit, RankDir, Rgb, Shape, YAxis,
 };
 
 /// Default edge pick radius as a fraction of the node pick radius (the
@@ -84,6 +85,88 @@ pub fn parse_shapes<S: AsRef<str>>(names: &[S]) -> Result<Vec<Shape>, BindError>
             })
         })
         .collect()
+}
+
+/// Per-node graph silhouettes by name; an unknown name is an error. The
+/// counterpart of [`parse_shapes`] for [`Trace::Graph2d`](plotui_core::Trace),
+/// whose boxes are a different vocabulary from the scatter markers.
+pub fn parse_node_shapes<S: AsRef<str>>(names: &[S]) -> Result<Vec<NodeShape>, BindError> {
+    names
+        .iter()
+        .map(|name| {
+            let name = name.as_ref();
+            NodeShape::parse(name).ok_or_else(|| {
+                BindError::invalid(format!(
+                    "unknown node shape {name:?}; expected one of {}",
+                    NodeShape::NAMES.join(", ")
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Validate a graph's CSR edge routes: one start per edge, non-decreasing,
+/// and none of them past the end of the waypoint list. The renderer
+/// tolerates a malformed pair by drawing straight edges, but a binding
+/// caller wants to hear about it.
+pub fn check_routes(n_edges: usize, n_pts: usize, starts: &[u32]) -> Result<(), BindError> {
+    if starts.is_empty() {
+        return Ok(());
+    }
+    if starts.len() != n_edges {
+        return Err(BindError::invalid(format!(
+            "routes must have one entry per edge; got {} for {n_edges} edges",
+            starts.len()
+        )));
+    }
+    let mut prev = 0u32;
+    for (e, &s) in starts.iter().enumerate() {
+        if s < prev {
+            return Err(BindError::invalid(format!(
+                "route starts must not go backwards; edge {e} starts at {s} after {prev}"
+            )));
+        }
+        if s as usize > n_pts {
+            return Err(BindError::invalid(format!(
+                "route start {s} for edge {e} is past the {n_pts} waypoints given"
+            )));
+        }
+        prev = s;
+    }
+    Ok(())
+}
+
+/// Flatten per-edge waypoint lists into the CSR pair the core takes — the
+/// nested-to-flat step [`flatten_box_groups`] does for box groups, for the
+/// bindings that hand routes over as a list of lists.
+pub fn flatten_routes(routes: Vec<Vec<[f32; 2]>>) -> (Vec<[f32; 2]>, Vec<u32>) {
+    let mut pts = Vec::new();
+    let mut starts = Vec::with_capacity(routes.len());
+    for r in routes {
+        starts.push(pts.len() as u32);
+        pts.extend(r);
+    }
+    (pts, starts)
+}
+
+/// Which nodes lie upstream (or downstream) of `from` — the shared closure
+/// behind "hover a task, light everything it waits on". Just
+/// [`plotui_core::reachable`] with the bindings' boolean spelling of the
+/// direction, so no frontend has to name the enum.
+pub fn reachable(n: usize, edges: &[(u32, u32)], from: usize, upstream: bool) -> Vec<bool> {
+    let dir = if upstream { Direction::Upstream } else { Direction::Downstream };
+    plotui_core::reachable(n, edges, from, dir)
+}
+
+/// A layout flow direction by name (`"TB"`/`"TD"` or `"LR"`,
+/// case-insensitive); an unknown name is an error.
+pub fn parse_rankdir(name: &str) -> Result<RankDir, BindError> {
+    RankDir::parse(name).ok_or_else(|| {
+        BindError::invalid(format!(
+            "unknown rankdir {name:?}; expected one of {}",
+            RankDir::NAMES.join(", ")
+        ))
+    })
 }
 
 /// Color-name shorthands, CSS values, shared by every binding. Sorted, so

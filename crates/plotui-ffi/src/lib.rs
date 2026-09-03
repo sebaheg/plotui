@@ -147,10 +147,14 @@ fn axis_of(axis: Option<&str>) -> Result<plotui_core::YAxis, BindError> {
 /// gets the protocol's default id, 4242).
 #[no_mangle]
 pub extern "C" fn plotui_new() -> *mut PlotuiPlot {
-    Box::into_raw(Box::new(PlotuiPlot {
-        plot: Plot::new(),
-        image_id: plotui_term::next_image_id(),
-    }))
+    new_plot_from(Plot::new())
+}
+
+/// Wrap an already-built plot in a fresh handle with its own image id — the
+/// composers (`plotui_plot_from_dot`) hand back a whole plot rather than
+/// filling one in.
+fn new_plot_from(plot: Plot) -> *mut PlotuiPlot {
+    Box::into_raw(Box::new(PlotuiPlot { plot, image_id: plotui_term::next_image_id() }))
 }
 
 /// Free a plot. NULL is a no-op.
@@ -309,6 +313,144 @@ pub unsafe extern "C" fn plotui_add_scatter3d(
     })
 }
 
+/// Read an array of NUL-terminated strings into owned `String`s. Shared by
+/// the label and shape arguments, which are the two places a binding hands
+/// the C ABI a list of names.
+unsafe fn str_array<'a>(
+    ptr: *const *const c_char,
+    n: usize,
+    what: &str,
+) -> Result<Vec<&'a str>, i32> {
+    let ptrs = slice(ptr, n)?;
+    let mut out = Vec::with_capacity(ptrs.len());
+    for &sp in ptrs {
+        match opt_str(sp) {
+            Ok(Some(s)) => out.push(s),
+            Ok(None) => {
+                set_error(&format!("null {what}"));
+                return Err(PLOTUI_ERR_NULL);
+            }
+            Err(s) => return Err(s),
+        }
+    }
+    Ok(out)
+}
+
+/// Add a 2D directed graph: labelled boxes at `(xs, ys)`, wired by `edges`.
+///
+/// `labels` is an array of NUL-terminated strings, one per node (an empty
+/// string draws an unlabelled box); `node_shapes` likewise, taking the names
+/// `rounded`, `box`, `ellipse` and `diamond` plus DOT's synonyms.
+/// `route_pts` is `2 * n_route_pts` floats as interleaved x/y waypoints and
+/// `route_starts` is one u32 per edge indexing into them (CSR) — what
+/// `plotui_layered_layout_routes` writes out. Pass NULL for any of them to
+/// take the default.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions. `edges` is `2 * n_edges`
+/// u32s as (i, j) pairs; `node_rgbs`/`edge_rgbs` are `3 * n` byte triples.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn plotui_add_graph2d(
+    p: *mut PlotuiPlot,
+    xs: *const f32,
+    nx: usize,
+    ys: *const f32,
+    ny: usize,
+    labels: *const *const c_char,
+    n_labels: usize,
+    edges: *const u32,
+    n_edges: usize,
+    directed: bool,
+    node_rgbs: *const u8,
+    n_node_rgbs: usize,
+    rgb: *const u8,
+    node_shapes: *const *const c_char,
+    n_shapes: usize,
+    edge_rgbs: *const u8,
+    n_edge_rgbs: usize,
+    route_pts: *const f32,
+    n_route_pts: usize,
+    route_starts: *const u32,
+    n_route_starts: usize,
+    name: *const c_char,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (xs, ys) = match (slice(xs, nx), slice(ys, ny)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(s), _) | (_, Err(s)) => return s,
+        };
+        let n = xs.len().min(ys.len());
+        let nodes: Vec<[f32; 2]> = (0..n).map(|i| [xs[i], ys[i]]).collect();
+        let labels = match str_array(labels, n_labels, "node label") {
+            Ok(v) => {
+                (0..n).map(|i| v.get(i).copied().unwrap_or("").to_string()).collect::<Vec<String>>()
+            }
+            Err(s) => return s,
+        };
+        let edge_list: Vec<(u32, u32)> = match slice(edges, n_edges * 2) {
+            Ok(e) => e.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect(),
+            Err(s) => return s,
+        };
+        let uniform = p.plot.resolve_color(opt_rgb(rgb));
+        let node_colors = match slice(node_rgbs, n_node_rgbs * 3) {
+            Ok([]) => None,
+            Ok(bytes) => Some(bytes.as_chunks::<3>().0.to_vec()),
+            Err(s) => return s,
+        };
+        let colors = plotui_bind::graph_node_colors(n, node_colors, uniform);
+        let edge_colors = match slice(edge_rgbs, n_edge_rgbs * 3) {
+            Ok([]) => None,
+            Ok(bytes) => Some(bytes.as_chunks::<3>().0.to_vec()),
+            Err(s) => return s,
+        };
+        let shapes = match str_array(node_shapes, n_shapes, "node shape name") {
+            Ok(v) if v.is_empty() => None,
+            Ok(v) => match plotui_bind::parse_node_shapes(&v) {
+                Ok(v) => Some(v),
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        let routes = match (slice(route_pts, n_route_pts * 2), slice(route_starts, n_route_starts))
+        {
+            (Ok([]), Ok([])) => None,
+            (Ok(pts), Ok(starts)) => {
+                let pts: Vec<[f32; 2]> = pts.as_chunks::<2>().0.to_vec();
+                if let Err(e) = plotui_bind::check_routes(edge_list.len(), pts.len(), starts) {
+                    return bind_status(e);
+                }
+                Some((pts, starts.to_vec()))
+            }
+            (Err(s), _) | (_, Err(s)) => return s,
+        };
+        let name = match opt_str(name) {
+            Ok(n) => n.map(str::to_string),
+            Err(s) => return s,
+        };
+        let h = p.plot.add_graph2d(
+            nodes,
+            labels,
+            colors,
+            edge_list,
+            directed,
+            shapes,
+            edge_colors,
+            routes,
+            name,
+        );
+        if !out_handle.is_null() {
+            *out_handle = h;
+        }
+        PLOTUI_OK
+    })
+}
+
 /// # Safety
 /// Pointer arguments follow the crate conventions. `edges` is `2 * n_edges`
 /// u32s as (i, j) pairs; `node_rgbs`/`edge_rgbs` are `3 * n` byte triples;
@@ -370,25 +512,12 @@ pub unsafe extern "C" fn plotui_add_graph3d(
             Ok(bytes) => Some(bytes.as_chunks::<3>().0.to_vec()),
             Err(s) => return s,
         };
-        let shapes = match slice(node_shapes, n_shapes) {
-            Ok([]) => None,
-            Ok(ptrs) => {
-                let mut names = Vec::with_capacity(ptrs.len());
-                for &sp in ptrs {
-                    match opt_str(sp) {
-                        Ok(Some(s)) => names.push(s),
-                        Ok(None) => {
-                            set_error("null node shape name");
-                            return PLOTUI_ERR_NULL;
-                        }
-                        Err(s) => return s,
-                    }
-                }
-                match plotui_bind::parse_shapes(&names) {
-                    Ok(v) => Some(v),
-                    Err(e) => return bind_status(e),
-                }
-            }
+        let shapes = match str_array(node_shapes, n_shapes, "node shape name") {
+            Ok(v) if v.is_empty() => None,
+            Ok(v) => match plotui_bind::parse_shapes(&v) {
+                Ok(v) => Some(v),
+                Err(e) => return bind_status(e),
+            },
             Err(s) => return s,
         };
         let name = match opt_str(name) {
@@ -1348,6 +1477,39 @@ pub unsafe extern "C" fn plotui_extend_graph(
     })
 }
 
+/// Replace a 2D graph's edge waypoints — the second half of a relayout,
+/// after `plotui_set_graph_positions` has moved the nodes. `route_pts` is
+/// `2 * n_route_pts` floats as interleaved x/y and `route_starts` is one u32
+/// per edge indexing into them; passing both empty restores straight edges.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_graph_routes(
+    p: *mut PlotuiPlot,
+    handle: usize,
+    route_pts: *const f32,
+    n_route_pts: usize,
+    route_starts: *const u32,
+    n_route_starts: usize,
+) -> i32 {
+    guard(|| {
+        let p = match plot_mut(p) {
+            Ok(p) => p,
+            Err(s) => return s,
+        };
+        let (pts, starts) =
+            match (slice(route_pts, n_route_pts * 2), slice(route_starts, n_route_starts)) {
+                (Ok(a), Ok(b)) => (a.as_chunks::<2>().0.to_vec(), b.to_vec()),
+                (Err(s), _) | (_, Err(s)) => return s,
+            };
+        match p.plot.set_graph_routes(handle, pts, starts) {
+            Ok(()) => PLOTUI_OK,
+            Err(e) => trace_status(e),
+        }
+    })
+}
+
 /// # Safety
 /// Pointer arguments follow the crate conventions.
 #[no_mangle]
@@ -1994,6 +2156,21 @@ pub unsafe extern "C" fn plotui_set_show_box(p: *mut PlotuiPlot, show: bool) {
     }
 }
 
+/// Draw the 2D chrome — grid, axis rules and tick labels — or not. `show`
+/// is a tri-state: negative restores the automatic rule (a frame whose
+/// visible 2D traces are all graphs draws no chrome), 0 pins it off, and
+/// any positive value pins it on. The legend, colorbar, range slider and
+/// crosshair are unaffected, and 3D plots ignore it.
+///
+/// # Safety
+/// `p` must be a live plot handle.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_show_axes(p: *mut PlotuiPlot, show: i32) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.set_show_axes(if show < 0 { None } else { Some(show > 0) });
+    }
+}
+
 /// Recolour the non-data chrome; each pointer is NULL (keep) or 3 RGB bytes.
 ///
 /// # Safety
@@ -2432,6 +2609,241 @@ pub unsafe extern "C" fn plotui_layout_add_node(
         let idx = l.layout.add_node(ns);
         if !out_index.is_null() {
             *out_index = idx;
+        }
+        PLOTUI_OK
+    })
+}
+
+// ---- layered layout, DOT, reachability ----
+
+/// An opaque hierarchical layout (`plotui_core::LayeredLayout`): solved once
+/// in `plotui_layered_layout_new`, then read out. Not thread-safe: one
+/// thread at a time, like `PlotuiPlot`.
+pub struct PlotuiLayeredLayout {
+    layout: plotui_core::LayeredLayout,
+    n_nodes: usize,
+    n_edges: usize,
+}
+
+/// Lay out `n_nodes` connected by `edges` (`2 * n_edges` u32s as (i, j)
+/// pairs) flowing in `rankdir` (`"TB"` or `"LR"`, case-insensitive; NULL
+/// means `"TB"`). Free with `plotui_layered_layout_free`. Returns NULL on a
+/// malformed edge slice or an unknown `rankdir`, with the reason in
+/// `plotui_last_error`.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_layered_layout_new(
+    n_nodes: usize,
+    edges: *const u32,
+    n_edges: usize,
+    rankdir: *const c_char,
+) -> *mut PlotuiLayeredLayout {
+    let Ok(e) = slice(edges, n_edges * 2) else {
+        return ptr::null_mut();
+    };
+    let dir = match opt_str(rankdir) {
+        Ok(None) => plotui_core::RankDir::TB,
+        Ok(Some(s)) => match plotui_bind::parse_rankdir(s) {
+            Ok(d) => d,
+            Err(err) => {
+                set_error(&err.msg);
+                return ptr::null_mut();
+            }
+        },
+        Err(_) => return ptr::null_mut(),
+    };
+    let pairs: Vec<(u32, u32)> = e.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
+    Box::into_raw(Box::new(PlotuiLayeredLayout {
+        layout: plotui_core::LayeredLayout::new(n_nodes, &pairs, dir),
+        n_nodes,
+        n_edges: pairs.len(),
+    }))
+}
+
+/// Free a layered layout. NULL is a no-op.
+///
+/// # Safety
+/// `l` must be a pointer from `plotui_layered_layout_new` not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_layered_layout_free(l: *mut PlotuiLayeredLayout) {
+    if !l.is_null() {
+        drop(Box::from_raw(l));
+    }
+}
+
+/// How many waypoints the layout produced — the `out_pts` size contract for
+/// `plotui_layered_layout_routes`, which cannot be known before the layout
+/// has run. A NULL layout counts 0.
+///
+/// # Safety
+/// `l` must be a live layered-layout handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_layered_layout_route_count(l: *const PlotuiLayeredLayout) -> usize {
+    match l.as_ref() {
+        Some(l) => l.layout.routes().0.len(),
+        None => 0,
+    }
+}
+
+/// Write the node positions as flat `[x0, y0, x1, …]` into `out_xy` (which
+/// must hold `2 * n_nodes` floats) and each node's rank into `out_ranks`
+/// (`n_nodes` u32s, or NULL to skip). Feed the positions to
+/// `plotui_add_graph2d`.
+///
+/// # Safety
+/// `l` must be a live handle; the outputs must point at enough elements.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_layered_layout_positions(
+    l: *const PlotuiLayeredLayout,
+    out_xy: *mut f32,
+    out_ranks: *mut u32,
+) -> i32 {
+    guard(|| {
+        let Some(l) = l.as_ref() else {
+            set_error("null layout handle");
+            return PLOTUI_ERR_NULL;
+        };
+        if out_xy.is_null() {
+            set_error("null output pointer");
+            return PLOTUI_ERR_NULL;
+        }
+        let pts = l.layout.positions();
+        let dst = std::slice::from_raw_parts_mut(out_xy, pts.len() * 2);
+        for (chunk, p) in dst.as_chunks_mut::<2>().0.iter_mut().zip(pts) {
+            chunk.copy_from_slice(p);
+        }
+        if !out_ranks.is_null() {
+            let ranks = l.layout.ranks();
+            std::slice::from_raw_parts_mut(out_ranks, ranks.len()).copy_from_slice(ranks);
+        }
+        let _ = l.n_nodes;
+        PLOTUI_OK
+    })
+}
+
+/// Write the edge waypoints as flat `[x0, y0, x1, …]` into `out_pts` (which
+/// must hold `2 * plotui_layered_layout_route_count(l)` floats) and the CSR
+/// starts into `out_starts` (one u32 per edge). Both feed
+/// `plotui_add_graph2d` and `plotui_set_graph_routes` unchanged.
+///
+/// # Safety
+/// `l` must be a live handle; the outputs must point at enough elements.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_layered_layout_routes(
+    l: *const PlotuiLayeredLayout,
+    out_pts: *mut f32,
+    out_starts: *mut u32,
+) -> i32 {
+    guard(|| {
+        let Some(l) = l.as_ref() else {
+            set_error("null layout handle");
+            return PLOTUI_ERR_NULL;
+        };
+        let (pts, starts) = l.layout.routes();
+        if !out_pts.is_null() {
+            let dst = std::slice::from_raw_parts_mut(out_pts, pts.len() * 2);
+            for (chunk, p) in dst.as_chunks_mut::<2>().0.iter_mut().zip(pts) {
+                chunk.copy_from_slice(p);
+            }
+        } else if !pts.is_empty() {
+            set_error("null output pointer");
+            return PLOTUI_ERR_NULL;
+        }
+        if !out_starts.is_null() {
+            std::slice::from_raw_parts_mut(out_starts, starts.len()).copy_from_slice(starts);
+        } else if l.n_edges > 0 {
+            set_error("null output pointer");
+            return PLOTUI_ERR_NULL;
+        }
+        PLOTUI_OK
+    })
+}
+
+/// Parse DOT, lay the graph out, and write a ready-to-render plot to
+/// `out_plot` (free it with `plotui_plot_free`) and its graph trace's handle
+/// to `out_handle`. `rankdir` is `"TB"`/`"LR"` or NULL to honour whatever
+/// the document says. A parse error returns `PLOTUI_ERR_INVALID_ARG` with
+/// the `line:col` message in `plotui_last_error`.
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_plot_from_dot(
+    text: *const c_char,
+    rankdir: *const c_char,
+    out_plot: *mut *mut PlotuiPlot,
+    out_handle: *mut usize,
+) -> i32 {
+    guard(|| {
+        let text = match opt_str(text) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                set_error("null DOT text");
+                return PLOTUI_ERR_NULL;
+            }
+            Err(s) => return s,
+        };
+        let dir = match opt_str(rankdir) {
+            Ok(None) => None,
+            Ok(Some(s)) => match plotui_bind::parse_rankdir(s) {
+                Ok(d) => Some(d),
+                Err(e) => return bind_status(e),
+            },
+            Err(s) => return s,
+        };
+        if out_plot.is_null() {
+            set_error("null output pointer");
+            return PLOTUI_ERR_NULL;
+        }
+        match plotui_bind::plot_from_dot(text, dir) {
+            Ok((plot, handle, _)) => {
+                *out_plot = new_plot_from(plot);
+                if !out_handle.is_null() {
+                    *out_handle = handle;
+                }
+                PLOTUI_OK
+            }
+            Err(e) => bind_status(e),
+        }
+    })
+}
+
+/// Which nodes are reachable from `from` — upstream (everything that leads
+/// to it) or downstream (everything it leads to), including `from` itself.
+/// `edges` is `2 * n_edges` u32s as (i, j) pairs; `out_flags` receives
+/// `n_nodes` bytes, 1 where reachable. This is the primitive behind "hover a
+/// task and light everything it waits on".
+///
+/// # Safety
+/// Pointer arguments follow the crate conventions; `out_flags` must point at
+/// `n_nodes` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_reachable(
+    n_nodes: usize,
+    edges: *const u32,
+    n_edges: usize,
+    from: usize,
+    upstream: bool,
+    out_flags: *mut u8,
+) -> i32 {
+    guard(|| {
+        let e = match slice(edges, n_edges * 2) {
+            Ok(e) => e,
+            Err(s) => return s,
+        };
+        if out_flags.is_null() && n_nodes > 0 {
+            set_error("null output pointer");
+            return PLOTUI_ERR_NULL;
+        }
+        let pairs: Vec<(u32, u32)> = e.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
+        let flags = plotui_bind::reachable(n_nodes, &pairs, from, upstream);
+        if n_nodes > 0 {
+            let dst = std::slice::from_raw_parts_mut(out_flags, n_nodes);
+            for (d, f) in dst.iter_mut().zip(&flags) {
+                *d = u8::from(*f);
+            }
         }
         PLOTUI_OK
     })

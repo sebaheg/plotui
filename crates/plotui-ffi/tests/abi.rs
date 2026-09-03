@@ -589,3 +589,184 @@ fn graph_mutators_and_layout_roundtrip() {
         plotui_layout_free(ptr::null_mut()); // NULL is inert
     }
 }
+
+/// A 2D graph over the C ABI: layout, add, pick, relayout, and the DOT
+/// composer — every entry point a frontend needs to draw a pipeline.
+#[test]
+fn graph2d_round_trips_through_the_abi() {
+    // 0 -> 1 -> 2 plus a 0 -> 2 edge that skips a rank, so the layout has a
+    // route to hand back.
+    let edges = [0u32, 1, 1, 2, 0, 2];
+    unsafe {
+        let tb = CString::new("TB").unwrap();
+        let l = plotui_layered_layout_new(3, edges.as_ptr(), 3, tb.as_ptr());
+        assert!(!l.is_null());
+        let mut xy = [0f32; 6];
+        let mut ranks = [0u32; 3];
+        assert_eq!(
+            plotui_layered_layout_positions(l, xy.as_mut_ptr(), ranks.as_mut_ptr()),
+            PLOTUI_OK
+        );
+        assert_eq!(ranks, [0, 1, 2], "rank follows edge direction");
+        let n_pts = plotui_layered_layout_route_count(l);
+        assert_eq!(n_pts, 1, "the skipping edge gets one waypoint");
+        let mut pts = vec![0f32; n_pts * 2];
+        let mut starts = [0u32; 3];
+        assert_eq!(
+            plotui_layered_layout_routes(l, pts.as_mut_ptr(), starts.as_mut_ptr()),
+            PLOTUI_OK
+        );
+
+        let p = plotui_new();
+        let (xs, ys): (Vec<f32>, Vec<f32>) =
+            (xy.chunks(2).map(|c| c[0]).collect(), xy.chunks(2).map(|c| c[1]).collect());
+        let labels: Vec<CString> =
+            ["fetch", "clean", "publish"].iter().map(|s| CString::new(*s).unwrap()).collect();
+        let label_ptrs: Vec<*const std::ffi::c_char> = labels.iter().map(|c| c.as_ptr()).collect();
+        let shapes: Vec<CString> =
+            ["rounded", "box", "ellipse"].iter().map(|s| CString::new(*s).unwrap()).collect();
+        let shape_ptrs: Vec<*const std::ffi::c_char> = shapes.iter().map(|c| c.as_ptr()).collect();
+        let node_rgbs = [250u8, 10, 10, 10, 250, 10, 10, 10, 250];
+        let name = CString::new("nightly").unwrap();
+        let mut h = usize::MAX;
+        assert_eq!(
+            plotui_add_graph2d(
+                p,
+                xs.as_ptr(),
+                3,
+                ys.as_ptr(),
+                3,
+                label_ptrs.as_ptr(),
+                3,
+                edges.as_ptr(),
+                3,
+                true,
+                node_rgbs.as_ptr(),
+                3,
+                ptr::null(),
+                shape_ptrs.as_ptr(),
+                3,
+                ptr::null(),
+                0,
+                pts.as_ptr(),
+                n_pts,
+                starts.as_ptr(),
+                3,
+                name.as_ptr(),
+                &mut h,
+            ),
+            PLOTUI_OK
+        );
+        assert_eq!(plotui_node_count(p), 3);
+
+        // The graph's own nodes are pickable through the 2D path.
+        let mut screen = [0f32; 9];
+        assert_eq!(plotui_project_nodes(p, 400, 300, screen.as_mut_ptr()), PLOTUI_OK);
+        let mut kind = -1i32;
+        let mut index = usize::MAX;
+        assert_eq!(
+            plotui_pick_element_px(
+                p, 400, 300, screen[3], screen[4], 0.0, 0.0, &mut kind, &mut index,
+            ),
+            PLOTUI_OK
+        );
+        assert_eq!((kind, index), (1, 1), "the middle node's own centre picks it");
+
+        // A relayout moves the nodes and rewrites the routes.
+        let (mx, my, mz) = ([0f32, 1.0, 2.0], [2f32, 1.0, 0.0], [0f32; 3]);
+        assert_eq!(
+            plotui_set_graph_positions(p, h, mx.as_ptr(), 3, my.as_ptr(), 3, mz.as_ptr(), 3),
+            PLOTUI_OK
+        );
+        assert_eq!(
+            plotui_set_graph_routes(p, h, pts.as_ptr(), n_pts, starts.as_ptr(), 3),
+            PLOTUI_OK
+        );
+        assert_eq!(plotui_set_graph_routes(p, h, ptr::null(), 0, ptr::null(), 0), PLOTUI_OK);
+
+        // The chrome tri-state is reachable from C.
+        plotui_set_show_axes(p, 1);
+        plotui_set_show_axes(p, 0);
+        plotui_set_show_axes(p, -1);
+
+        // An unknown shape name is the shared message, not a silent default.
+        let bad = CString::new("blob").unwrap();
+        let bad_ptrs = [bad.as_ptr()];
+        assert_eq!(
+            plotui_add_graph2d(
+                p,
+                xs.as_ptr(),
+                1,
+                ys.as_ptr(),
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                true,
+                ptr::null(),
+                0,
+                ptr::null(),
+                bad_ptrs.as_ptr(),
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+            ),
+            PLOTUI_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            last_error(),
+            "unknown node shape \"blob\"; expected one of rounded, box, ellipse, diamond"
+        );
+
+        plotui_free(p);
+        plotui_layered_layout_free(l);
+        plotui_layered_layout_free(ptr::null_mut()); // NULL is inert
+    }
+}
+
+#[test]
+fn plot_from_dot_and_reachable_cross_the_abi() {
+    unsafe {
+        let text = CString::new("digraph nightly { a -> b -> c; a -> c }").unwrap();
+        let mut plot = ptr::null_mut();
+        let mut h = usize::MAX;
+        assert_eq!(plotui_plot_from_dot(text.as_ptr(), ptr::null(), &mut plot, &mut h), PLOTUI_OK);
+        assert!(!plot.is_null());
+        assert_eq!(plotui_node_count(plot), 3);
+        assert_eq!(h, 0);
+        plotui_free(plot);
+
+        // A parse error keeps its line:col and does not hand back a plot.
+        let bad = CString::new("digraph { a -- b }").unwrap();
+        let mut none = ptr::null_mut();
+        assert_eq!(
+            plotui_plot_from_dot(bad.as_ptr(), ptr::null(), &mut none, ptr::null_mut()),
+            PLOTUI_ERR_INVALID_ARG
+        );
+        assert_eq!(last_error(), "1:13: '--' joins nodes in a graph; a digraph uses '->'");
+
+        // And an unknown rankdir is caught before any parsing happens.
+        let sideways = CString::new("sideways").unwrap();
+        assert_eq!(
+            plotui_plot_from_dot(text.as_ptr(), sideways.as_ptr(), &mut none, ptr::null_mut()),
+            PLOTUI_ERR_INVALID_ARG
+        );
+        assert_eq!(last_error(), "unknown rankdir \"sideways\"; expected one of TB, LR");
+
+        // Reachability: upstream of the sink is everything, downstream of it
+        // is only itself.
+        let edges = [0u32, 1, 1, 2, 0, 2];
+        let mut flags = [9u8; 3];
+        assert_eq!(plotui_reachable(3, edges.as_ptr(), 3, 2, true, flags.as_mut_ptr()), PLOTUI_OK);
+        assert_eq!(flags, [1, 1, 1]);
+        assert_eq!(plotui_reachable(3, edges.as_ptr(), 3, 2, false, flags.as_mut_ptr()), PLOTUI_OK);
+        assert_eq!(flags, [0, 0, 1]);
+    }
+}

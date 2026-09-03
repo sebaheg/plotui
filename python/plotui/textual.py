@@ -431,6 +431,13 @@ class PlotWidget(Widget, can_focus=True):
         self._plot.set_graph_positions(handle, xs, ys, zs)
         self.invalidate()
 
+    def set_graph_routes(self, handle: int, routes) -> None:
+        """Replace a 2D graph's edge waypoints and repaint — the second half
+        of a relayout, after :meth:`set_graph_positions` has moved the nodes
+        (see :meth:`Plot.set_graph_routes`, pair with ``LayeredLayout``)."""
+        self._plot.set_graph_routes(handle, [list(r) for r in routes])
+        self.invalidate()
+
     def set_graph_colors(self, handle: int, node_colors, edge_colors=None) -> None:
         """Recolor a graph trace in place and repaint — dim everything,
         brighten a hovered dependency path, restore (see
@@ -439,12 +446,19 @@ class PlotWidget(Widget, can_focus=True):
         self.invalidate()
 
     def extend_graph(
-        self, handle: int, xs, ys, zs, node_colors=None, edges=()
+        self, handle: int, xs, ys, zs, node_colors=None, edges=(), labels=None
     ) -> None:
         """Append nodes and edges to a graph trace and repaint (see
-        :meth:`Plot.extend_graph`, pair with ``ForceLayout.add_node``)."""
+        :meth:`Plot.extend_graph`, pair with ``ForceLayout.add_node``).
+        ``labels`` names the new boxes of a 2D graph; a 3D one ignores it."""
         self._plot.extend_graph(
-            handle, xs, ys, zs, node_colors=node_colors, edges=list(edges)
+            handle,
+            xs,
+            ys,
+            zs,
+            node_colors=node_colors,
+            edges=list(edges),
+            labels=labels,
         )
         self.invalidate()
 

@@ -156,6 +156,51 @@ func (p *Plot) SetBounds(lo, hi *[3]float32) {
 // SetShowBox shows or hides the 3D orientation cube.
 func (p *Plot) SetShowBox(show bool) { C.plotui_set_show_box(p.h, C.bool(show)) }
 
+// SetShowAxes pins the 2D chrome — grid, axis rules and tick labels — on or
+// off. Use SetShowAxesAuto to hand the decision back to the engine, which is
+// the default: a frame whose visible 2D traces are all graphs draws none of
+// it, because a pipeline's coordinates are a layout rather than
+// measurements. The legend, colorbar, range slider and crosshair are
+// unaffected either way, and 3D plots ignore it.
+func (p *Plot) SetShowAxes(show bool) {
+	v := C.int32_t(0)
+	if show {
+		v = 1
+	}
+	C.plotui_set_show_axes(p.h, v)
+}
+
+// SetShowAxesAuto restores the automatic rule described on SetShowAxes.
+func (p *Plot) SetShowAxesAuto() { C.plotui_set_show_axes(p.h, -1) }
+
+// PlotFromDOT parses a DOT document, lays the graph out, and returns a
+// ready-to-render plot whose graph trace is handle 0. rankdir overrides the
+// document's own ("TB" or "LR"); an empty string honours whatever it says.
+//
+// The accepted grammar is a subset: node and edge statements, chains
+// (a -> b -> c), braced fan-outs (a -> {b c}), subgraphs (contents hoisted,
+// grouping ignored), node/edge/graph attribute defaults, rankdir, and
+// label / color / fillcolor / shape / style=rounded on nodes with color on
+// edges. Unknown attributes are ignored; HTML labels, node ports and a
+// mismatched edge operator are an error naming the line and column.
+func PlotFromDOT(text, rankdir string) (*Plot, TraceHandle, error) {
+	ctext := C.CString(text)
+	defer C.free(unsafe.Pointer(ctext))
+	var cdir *C.char
+	if rankdir != "" {
+		cdir = C.CString(rankdir)
+		defer C.free(unsafe.Pointer(cdir))
+	}
+	var h C.size_t
+	var handle *C.PlotuiPlot
+	if err := statusErr(C.plotui_plot_from_dot(ctext, cdir, &handle, &h)); err != nil {
+		return nil, 0, err
+	}
+	p := &Plot{h: handle}
+	runtime.SetFinalizer(p, (*Plot).Close)
+	return p, TraceHandle(h), nil
+}
+
 // Chrome recolors the non-data chrome; nil fields keep their current value.
 type Chrome struct{ BG, Frame, Grid, Ink, InkBright *RGB }
 

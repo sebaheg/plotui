@@ -29,6 +29,77 @@ func (p *Plot) AddScatter3D(xs, ys, zs []float32, opts ...TraceOption) (TraceHan
 	return TraceHandle(h), statusErr(status)
 }
 
+// AddGraph2D adds a directed graph in the 2D plane: labelled boxes at
+// xs/ys, wired by edges as (from, to) index pairs. This is the pipeline /
+// DAG chart — pair it with LayeredLayout for the positions and routes, or
+// place the nodes yourself.
+//
+// Node *centres* are in data coordinates but their boxes are sized in
+// pixels from the label, so zooming spreads the graph apart while the text
+// stays legible. A plot whose visible 2D traces are all graphs draws no
+// axes (see SetShowAxes). Options: WithLabels, WithDirected,
+// WithNodeColors, WithNodeShapeNames, WithEdgeColors, WithRoutes,
+// WithColor, WithName.
+func (p *Plot) AddGraph2D(xs, ys []float32, edges [][2]uint32, opts ...TraceOption) (TraceHandle, error) {
+	o, err := applyOpts(traceOpts{directed: true}, opts)
+	if err != nil {
+		return 0, err
+	}
+	xp, xn := fptr(xs)
+	yp, yn := fptr(ys)
+
+	var ep *C.uint32_t
+	if len(edges) > 0 {
+		ep = (*C.uint32_t)(unsafe.Pointer(&edges[0][0]))
+	}
+	var ncp *C.uint8_t
+	if len(o.nodeColors) > 0 {
+		ncp = (*C.uint8_t)(unsafe.Pointer(&o.nodeColors[0]))
+	}
+	var ecp *C.uint8_t
+	if len(o.edgeColors) > 0 {
+		ecp = (*C.uint8_t)(unsafe.Pointer(&o.edgeColors[0]))
+	}
+	labels, lp := cStrings(o.labels)
+	defer freeCStrings(labels)
+	shapes, shp := cStrings(o.nodeShapes)
+	defer freeCStrings(shapes)
+
+	// Nested routes flatten to the CSR pair the ABI takes, exactly as the
+	// other bindings do: interleaved x/y plus one start per edge.
+	var flat []float32
+	starts := make([]uint32, 0, len(o.routes))
+	for _, r := range o.routes {
+		starts = append(starts, uint32(len(flat)/2))
+		for _, pt := range r {
+			flat = append(flat, pt[0], pt[1])
+		}
+	}
+	rp, _ := fptr(flat)
+	var sp *C.uint32_t
+	if len(starts) > 0 {
+		sp = (*C.uint32_t)(unsafe.Pointer(&starts[0]))
+	}
+
+	name := cstrOrNil(o.name)
+	defer freeCStr(name)
+	var h C.size_t
+	status := C.plotui_add_graph2d(p.h,
+		xp, xn, yp, yn,
+		lp, C.size_t(len(labels)),
+		ep, C.size_t(len(edges)),
+		C.bool(o.directed),
+		ncp, C.size_t(len(o.nodeColors)),
+		rgbPtr(o.color),
+		shp, C.size_t(len(shapes)),
+		ecp, C.size_t(len(o.edgeColors)),
+		rp, C.size_t(len(flat)/2),
+		sp, C.size_t(len(starts)),
+		name,
+		&h)
+	return TraceHandle(h), statusErr(status)
+}
+
 // AddGraph3D adds a 3D graph: nodes at xs/ys/zs, edges as (i, j) index
 // pairs. Default size 3.5; an omitted uniform color takes the next
 // colorway slot.
@@ -54,16 +125,8 @@ func (p *Plot) AddGraph3D(xs, ys, zs []float32, edges [][2]uint32, opts ...Trace
 	if len(o.edgeColors) > 0 {
 		ecp = (*C.uint8_t)(unsafe.Pointer(&o.edgeColors[0]))
 	}
-	var shapes []*C.char
-	var shp **C.char
-	if len(o.nodeShapes) > 0 {
-		shapes = make([]*C.char, len(o.nodeShapes))
-		for i, s := range o.nodeShapes {
-			shapes[i] = C.CString(s)
-			defer C.free(unsafe.Pointer(shapes[i]))
-		}
-		shp = &shapes[0]
-	}
+	shapes, shp := cStrings(o.nodeShapes)
+	defer freeCStrings(shapes)
 
 	name := cstrOrNil(o.name)
 	defer freeCStr(name)
@@ -530,4 +593,24 @@ func elementParts(el *Element) (C.int32_t, C.size_t) {
 		return 0, 0
 	}
 	return C.int32_t(el.Kind), C.size_t(el.Index)
+}
+
+// cStrings marshals a Go string slice into a NULL-terminated-string array
+// for the ABI, returning the owned pointers (free them with freeCStrings)
+// and the array pointer to pass. An empty slice yields a nil array.
+func cStrings(ss []string) ([]*C.char, **C.char) {
+	if len(ss) == 0 {
+		return nil, nil
+	}
+	out := make([]*C.char, len(ss))
+	for i, s := range ss {
+		out[i] = C.CString(s)
+	}
+	return out, &out[0]
+}
+
+func freeCStrings(ss []*C.char) {
+	for _, s := range ss {
+		C.free(unsafe.Pointer(s))
+	}
 }
