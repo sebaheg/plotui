@@ -76,6 +76,42 @@ impl Shape {
     }
 }
 
+/// The silhouette of a [`Trace::Graph2d`] node. Unlike [`Shape`] — a marker
+/// drawn at a nominal radius — these are boxes sized to the label inside
+/// them, which is why a graph node needs its own small enum rather than
+/// reusing the scatter markers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NodeShape {
+    /// A box with rounded corners: the default, and what DOT's
+    /// `style=rounded` asks for.
+    #[default]
+    Rounded,
+    /// A box with square corners (DOT `shape=box`).
+    Box,
+    /// An ellipse inscribed in the label box. A `circle` sized to a label is
+    /// an ellipse, so DOT's `circle` and `oval` land here too.
+    Ellipse,
+    Diamond,
+}
+
+impl NodeShape {
+    /// The wire names, in declaration order — what frontends accept.
+    pub const NAMES: [&'static str; 4] = ["rounded", "box", "ellipse", "diamond"];
+
+    /// Parse a wire (or DOT `shape=`) name, including the DOT synonyms.
+    /// Unknown names return `None`: core supplies the fact, the bindings
+    /// phrase the error, so the message is identical in every language.
+    pub fn parse(name: &str) -> Option<NodeShape> {
+        Some(match name {
+            "rounded" => NodeShape::Rounded,
+            "box" | "rect" | "rectangle" | "square" => NodeShape::Box,
+            "ellipse" | "oval" | "circle" => NodeShape::Ellipse,
+            "diamond" => NodeShape::Diamond,
+            _ => return None,
+        })
+    }
+}
+
 /// Half a box's width in category units. Boxes sit one unit apart (group `g`
 /// at position `g`), so 0.3 leaves a visible gutter between neighbours the way
 /// `bar_halfwidth`'s 40% does.
@@ -608,6 +644,25 @@ impl Framebuffer {
                 let dx = x as f32 + 0.5 - cx;
                 let dy = y as f32 + 0.5 - cy;
                 if inside(dx, dy) {
+                    self.put(x, y, z, c);
+                }
+            }
+        }
+    }
+
+    /// Filled axis-aligned ellipse inscribed in the box centred on
+    /// `(cx, cy)` with half-extents `(rx, ry)` — the [`NodeShape::Ellipse`]
+    /// node body. Shares [`Self::disc`]'s bounding-box scan with the ellipse
+    /// inside test, the way [`Self::mark`] shares it with the marker shapes.
+    pub fn ellipse(&mut self, cx: f32, cy: f32, z: f32, rx: f32, ry: f32, c: Rgb) {
+        let (rx, ry) = (rx.max(0.5), ry.max(0.5));
+        let (x0, x1) = ((cx - rx).floor() as i32, (cx + rx).ceil() as i32);
+        let (y0, y1) = ((cy - ry).floor() as i32, (cy + ry).ceil() as i32);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = (x as f32 + 0.5 - cx) / rx;
+                let dy = (y as f32 + 0.5 - cy) / ry;
+                if dx * dx + dy * dy <= 1.0 {
                     self.put(x, y, z, c);
                 }
             }
@@ -1387,6 +1442,185 @@ fn clip_segment(
     Some(((a.0 + dx * t0, a.1 + dy * t0), (a.0 + dx * t1, a.1 + dy * t1)))
 }
 
+/// Side padding inside a graph node's box, in text-scale units — the air
+/// between the label and the border on each side.
+const NODE_PAD_X_S: i32 = 4;
+/// Padding above and below the label, in text-scale units.
+const NODE_PAD_Y_S: i32 = 3;
+/// Floor on a node box, in text-scale units, so an unlabelled node is still
+/// a box you can see and click rather than a dot.
+const NODE_MIN_W_S: i32 = 8;
+const NODE_MIN_H_S: i32 = 7;
+
+/// One graph node's pixel box: its centre and half-extents. Sized from the
+/// label at the frame's text scale, so it is the *box* that stays constant
+/// under zoom while the centres spread apart.
+///
+/// Shared by drawing and picking — a hit test that measured the box its own
+/// way would drift from what is on screen the moment either changed.
+#[derive(Clone, Copy, Debug)]
+struct NodeBox {
+    cx: f64,
+    cy: f64,
+    hw: f64,
+    hh: f64,
+}
+
+impl NodeBox {
+    /// The inclusive pixel rectangle to fill.
+    fn rect(&self) -> (i32, i32, i32, i32) {
+        (
+            (self.cx - self.hw).round() as i32,
+            (self.cy - self.hh).round() as i32,
+            (self.cx + self.hw).round() as i32 - 1,
+            (self.cy + self.hh).round() as i32 - 1,
+        )
+    }
+
+    /// Grow by `m` pixels on every side — the halo box behind a hovered or
+    /// selected node.
+    fn grown(&self, m: f64) -> NodeBox {
+        NodeBox { cx: self.cx, cy: self.cy, hw: self.hw + m, hh: self.hh + m }
+    }
+
+    /// Where the ray leaving the centre along `(dx, dy)` crosses the
+    /// silhouette — where an edge must stop so it meets the box instead of
+    /// running under it to the label.
+    fn boundary(&self, shape: NodeShape, dx: f64, dy: f64) -> (f64, f64) {
+        let (hw, hh) = (self.hw.max(1e-6), self.hh.max(1e-6));
+        let (ax, ay) = (dx.abs(), dy.abs());
+        if ax < 1e-9 && ay < 1e-9 {
+            return (self.cx, self.cy + hh);
+        }
+        let t = match shape {
+            NodeShape::Rounded | NodeShape::Box => {
+                let tx = if ax > 1e-9 { hw / ax } else { f64::INFINITY };
+                let ty = if ay > 1e-9 { hh / ay } else { f64::INFINITY };
+                tx.min(ty)
+            }
+            NodeShape::Ellipse => 1.0 / ((ax / hw).powi(2) + (ay / hh).powi(2)).sqrt(),
+            NodeShape::Diamond => 1.0 / (ax / hw + ay / hh),
+        };
+        (self.cx + dx * t, self.cy + dy * t)
+    }
+}
+
+/// Round the corners of a polyline: each interior waypoint becomes a short
+/// quadratic Bezier tangent to both of its segments, flattened into straight
+/// runs the [`stroke`] helper can draw. There is no curve primitive in the
+/// framebuffer, and a routed edge that turned a hard corner at every rank
+/// would read as a staircase rather than as one wire.
+fn smooth_polyline(pts: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    /// Flattening steps per corner: enough that the arc reads as a curve at
+    /// terminal resolution, few enough to stay cheap on a dense graph.
+    const STEPS: usize = 8;
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let dist = |a: (f64, f64), b: (f64, f64)| (b.0 - a.0).hypot(b.1 - a.1);
+    let along = |from: (f64, f64), to: (f64, f64), t: f64| {
+        (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+    };
+    let mut out = vec![pts[0]];
+    for i in 1..pts.len() - 1 {
+        let (prev, c, next) = (pts[i - 1], pts[i], pts[i + 1]);
+        let (d0, d1) = (dist(prev, c), dist(c, next));
+        // The cut is bounded by both neighbours, so two corners a few pixels
+        // apart never eat past each other into a self-crossing curve.
+        let r = (0.4 * d0.min(d1)).min(14.0);
+        if r < 1.0 || d0 <= 0.0 || d1 <= 0.0 {
+            out.push(c);
+            continue;
+        }
+        let a = along(c, prev, r / d0);
+        let b = along(c, next, r / d1);
+        out.push(a);
+        for k in 1..STEPS {
+            let t = k as f64 / STEPS as f64;
+            let u = 1.0 - t;
+            out.push((
+                u * u * a.0 + 2.0 * u * t * c.0 + t * t * b.0,
+                u * u * a.1 + 2.0 * u * t * c.1 + t * t * b.1,
+            ));
+        }
+        out.push(b);
+    }
+    out.push(pts[pts.len() - 1]);
+    out
+}
+
+/// Pull a colour toward white — how a node's card fill is derived from the
+/// chrome background, so the box reads as a panel rather than as a hole.
+#[inline]
+fn lighten(c: Rgb, by: u8) -> Rgb {
+    [c[0].saturating_add(by), c[1].saturating_add(by), c[2].saturating_add(by)]
+}
+
+/// One node's pixel box, from its data centre and its label at text scale
+/// `s`. The label sets the width; the height is one text cell plus padding,
+/// so every box in a graph is the same height and the ranks line up.
+fn node_box(m: &Map2d, p: [f32; 2], label: &str, s: i32) -> NodeBox {
+    let w = (text_width(label, s) + 2 * NODE_PAD_X_S * s).max(NODE_MIN_W_S * s);
+    let h = (CHAR_H * s + 2 * NODE_PAD_Y_S * s).max(NODE_MIN_H_S * s);
+    NodeBox { cx: m.sx(p[0] as f64), cy: m.sy(p[1] as f64), hw: w as f64 * 0.5, hh: h as f64 * 0.5 }
+}
+
+/// Edge `e`'s waypoints out of the CSR pair, exactly the way [`box_groups`]
+/// reads its groups: a run that runs off the end, or backwards, is an empty
+/// one — a straight edge — rather than a panic. The renderer must not be the
+/// thing that trusts the bindings' validation.
+fn edge_route<'a>(pts: &'a [[f32; 2]], starts: &[u32], e: usize) -> &'a [[f32; 2]] {
+    let Some(&a) = starts.get(e) else { return &[] };
+    let b = starts.get(e + 1).map_or(pts.len(), |v| *v as usize);
+    let a = a as usize;
+    if a <= b && b <= pts.len() {
+        &pts[a..b]
+    } else {
+        &[]
+    }
+}
+
+/// A filled diamond inscribed in `b`, as two triangles sharing the waist.
+fn diamond_fill(fb: &mut Framebuffer, b: &NodeBox, c: Rgb) {
+    let (cx, cy) = (b.cx as f32, b.cy as f32);
+    let (hw, hh) = (b.hw as f32, b.hh as f32);
+    let (l, r) = ([cx - hw, cy, 0.0], [cx + hw, cy, 0.0]);
+    fb.tri(l, [cx, cy - hh, 0.0], r, c);
+    fb.tri(l, [cx, cy + hh, 0.0], r, c);
+}
+
+/// One node body: a `fill`ed silhouette with a `border`-coloured outline
+/// `1.5 · s` px wide, drawn inside the shape so the box never grows past
+/// what the hit test measured.
+///
+/// The rounded and square cases go through [`rounded_panel`], the one
+/// rounded-rect primitive in the crate; the other two draw the outline as a
+/// larger silhouette with a smaller one painted over it, which is cheaper
+/// than a signed-distance pass and indistinguishable at these sizes.
+fn draw_node_body(fb: &mut Framebuffer, b: &NodeBox, shape: NodeShape, fill: Rgb, border: Rgb) {
+    let bw = 1.5;
+    let (x0, y0, x1, y1) = b.rect();
+    match shape {
+        NodeShape::Rounded | NodeShape::Box => {
+            let r = if shape == NodeShape::Box { 0.0 } else { (b.hh as f32 * 0.45).min(6.0) };
+            rounded_panel(fb, x0, y0, x1, y1, r, bw, 0.0, fill, border);
+        }
+        NodeShape::Ellipse => {
+            let (rx, ry) = (b.hw as f32, b.hh as f32);
+            fb.ellipse(b.cx as f32, b.cy as f32, 0.0, rx, ry, border);
+            fb.ellipse(b.cx as f32, b.cy as f32, 0.0, (rx - bw).max(0.5), (ry - bw).max(0.5), fill);
+        }
+        NodeShape::Diamond => {
+            diamond_fill(fb, b, border);
+            // A diamond's edge runs diagonally, so a border of `bw` pixels
+            // needs the inner shape inset by more than `bw` on each axis.
+            let inset = bw as f64 * std::f64::consts::SQRT_2;
+            let inner = NodeBox { hw: (b.hw - inset).max(1.0), hh: (b.hh - inset).max(1.0), ..*b };
+            diamond_fill(fb, &inner, fill);
+        }
+    }
+}
+
 /// Which y scale a 2D series is measured against. `Y2` and `Y3` are
 /// independent right-hand axes: each autoscales from its own traces and gets
 /// its own tick-label column (Y2 innermost, Y3 outermost). The grid always
@@ -1551,6 +1785,38 @@ pub enum Trace {
         name: Option<String>,
         axis: YAxis,
     },
+    Graph2d {
+        /// Node centres in data coordinates. The *box* around each centre is
+        /// sized in pixels from its label, so zooming spreads the nodes apart
+        /// while the labels stay legible — the only readable choice at
+        /// terminal resolution.
+        nodes: Vec<[f32; 2]>,
+        /// One label per node; an empty string draws an unlabelled box.
+        /// Short lists pad rather than truncate, as the per-point style
+        /// arrays do.
+        labels: Vec<String>,
+        /// One colour per node — the border of its box, and the channel a
+        /// live pipeline repaints through [`Plot::set_graph_colors`].
+        node_colors: Vec<Rgb>,
+        /// Per-node silhouette; [`NodeShape::Rounded`] where absent.
+        node_shapes: Option<Vec<NodeShape>>,
+        /// Directed pairs `(from, to)` of node indices. Endpoints out of
+        /// range are kept but inert, so an edge never loses its flat index.
+        edges: Vec<(u32, u32)>,
+        /// Draw an arrowhead at each edge's target end.
+        directed: bool,
+        /// Per-edge colour override; without it an edge takes a dimmed
+        /// average of its endpoint colours, as [`Trace::Graph3d`] does.
+        edge_colors: Option<Vec<Rgb>>,
+        /// Optional waypoints per edge, in data coordinates and CSR order:
+        /// `route_starts[e]..route_starts[e + 1]` indexes `route_pts`.
+        /// Waypoints exclude the endpoints, so an empty run is a straight
+        /// edge. This is how a layered layout routes an edge that spans
+        /// several ranks around the nodes between them.
+        route_pts: Vec<[f32; 2]>,
+        route_starts: Vec<u32>,
+        name: Option<String>,
+    },
     Mesh3d {
         /// Indexed triangles: `tris[t]` names three vertices of `verts`, in
         /// the same (x, y, z) space as `Scatter3d`. A triangle with an
@@ -1605,6 +1871,7 @@ impl Trace {
     pub fn structural_reason(&self) -> Option<(&'static str, &'static str)> {
         match self {
             Trace::Graph3d { .. } => Some(("graph3d", "edges reference node indices")),
+            Trace::Graph2d { .. } => Some(("graph2d", "edges reference node indices")),
             Trace::Surface3d { .. } => Some(("surface3d", "a fixed grid")),
             Trace::Mesh3d { .. } => Some(("mesh3d", "triangles reference vertex indices")),
             Trace::Heatmap2d { .. } => Some(("heatmap", "a fixed grid")),
@@ -1643,6 +1910,7 @@ impl Trace {
             | Trace::Heatmap2d { name, .. }
             | Trace::Band2d { name, .. }
             | Trace::Box2d { name, .. }
+            | Trace::Graph2d { name, .. }
             | Trace::Mesh3d { name, .. } => name.as_deref(),
         }
     }
@@ -1665,7 +1933,7 @@ impl Trace {
             // A colormapped grid has no single color; its legend swatch is a
             // sample from the upper half of the ramp, as surfaces do.
             Trace::Heatmap2d { colormap, .. } => colormap.sample(0.75),
-            Trace::Graph3d { node_colors, .. } => {
+            Trace::Graph3d { node_colors, .. } | Trace::Graph2d { node_colors, .. } => {
                 node_colors.first().copied().unwrap_or([120, 180, 230])
             }
         }
@@ -1681,7 +1949,9 @@ impl Trace {
             | Trace::Box2d { axis, .. } => *axis,
             // A grid spans both axes itself; binding it to a second y scale
             // would ask which of two scales its rows are measured against.
-            Trace::Heatmap2d { .. } => YAxis::Primary,
+            // A graph's coordinates are a layout, not a measurement, so the
+            // same reasoning keeps it on the primary axis.
+            Trace::Heatmap2d { .. } | Trace::Graph2d { .. } => YAxis::Primary,
             traces_3d!() => YAxis::Primary,
         }
     }
@@ -2068,6 +2338,25 @@ fn compute_meta(t: &Trace) -> TraceMeta {
                 bins: None,
             }
         }
+        Trace::Graph2d { nodes, route_pts, .. } => {
+            let mut b = b2_empty(None);
+            if let (CachedBounds::B2 { xlo, xhi, ylo, yhi, .. }, Some((a, c, d, e))) =
+                (&mut b, graph_extent(nodes, route_pts))
+            {
+                *xlo = a;
+                *xhi = c;
+                *ylo = d;
+                *yhi = e;
+            }
+            TraceMeta {
+                visible: true,
+                muted: false,
+                node_len: nodes.len(),
+                vert_len: nodes.len(),
+                bounds: b,
+                bins: None,
+            }
+        }
         Trace::Scatter3d { pts, .. } => {
             let mut b = b3_empty();
             b3_seen_all(&mut b, pts);
@@ -2141,6 +2430,34 @@ fn compute_meta(t: &Trace) -> TraceMeta {
             }
         }
     }
+}
+
+/// A graph's data extent `(xlo, xhi, ylo, yhi)`: its node centres and edge
+/// waypoints, widened so the outermost boxes are not clipped by the frame.
+/// `None` when nothing finite was found.
+///
+/// A node's box is measured in *pixels*, so no data-space pad is right at
+/// every zoom; a share of the extent (with a floor for the degenerate
+/// single-node case) is the compromise. Every bounds path goes through this
+/// one function, so a desynced cache still frames a graph identically.
+fn graph_extent(nodes: &[[f32; 2]], route_pts: &[[f32; 2]]) -> Option<(f64, f64, f64, f64)> {
+    let (mut xlo, mut xhi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut ylo, mut yhi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in nodes.iter().chain(route_pts) {
+        let (x, y) = (p[0] as f64, p[1] as f64);
+        if x.is_finite() && y.is_finite() {
+            xlo = xlo.min(x);
+            xhi = xhi.max(x);
+            ylo = ylo.min(y);
+            yhi = yhi.max(y);
+        }
+    }
+    if !xlo.is_finite() {
+        return None;
+    }
+    let pad = |lo: f64, hi: f64| if hi > lo { (hi - lo) * 0.12 } else { 0.5 };
+    let (px, py) = (pad(xlo, xhi), pad(ylo, yhi));
+    Some((xlo - px, xhi + px, ylo - py, yhi + py))
 }
 
 fn b2_empty(pad: Option<(f64, f64)>) -> CachedBounds {
@@ -2295,6 +2612,16 @@ pub struct Plot {
     pub traces: Vec<Trace>,
     pub camera: Camera,
     pub show_box: bool,
+    /// Whether the 2D frame draws its chrome — grid, axis rules and tick
+    /// labels. `None`, the default, decides automatically: a frame whose
+    /// visible 2D traces are *all* [`Trace::Graph2d`] draws none of it,
+    /// because a pipeline's coordinates are a layout, not measurements, and
+    /// a numeric ladder beside one says nothing true. `Some(true)` always
+    /// draws the chrome (useful to see where a layout actually put its
+    /// nodes), `Some(false)` never does. Set it through
+    /// [`Self::set_show_axes`]; the legend, colorbar, range slider and
+    /// crosshair are unaffected either way. Ignored by 3D plots.
+    pub show_axes: Option<bool>,
     /// Explicit 3D data frame `(lo, hi)`; without it the frame is the bounding
     /// box of the node points. A host that rebuilds a plot with a changing
     /// subset of the same data pins this so the view does not re-centre.
@@ -2381,6 +2708,7 @@ impl Default for Plot {
             traces: Vec::new(),
             camera: Camera::default(),
             show_box: true,
+            show_axes: None,
             bounds_override: None,
             selected: None,
             hovered: None,
@@ -2476,6 +2804,70 @@ impl Plot {
             node_shapes,
             name,
         })
+    }
+
+    /// Add a directed graph in the 2D plane: labelled boxes at `nodes`, wired
+    /// by `edges` (pairs of node indices). `labels`, `node_colors` and
+    /// `node_shapes` are per node; `edge_colors` and the CSR `routes` are per
+    /// edge. Short per-node lists fall back to the defaults rather than
+    /// dropping nodes, so a partial mapping never loses geometry.
+    ///
+    /// `routes` gives each edge its waypoints — what
+    /// [`LayeredLayout`](crate::LayeredLayout) emits for an edge that spans
+    /// more than one rank — with an empty list for a straight edge. Pass
+    /// `None` for straight edges throughout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_graph2d(
+        &mut self,
+        nodes: Vec<[f32; 2]>,
+        labels: Vec<String>,
+        node_colors: Vec<Rgb>,
+        edges: Vec<(u32, u32)>,
+        directed: bool,
+        node_shapes: Option<Vec<NodeShape>>,
+        edge_colors: Option<Vec<Rgb>>,
+        routes: Option<(Vec<[f32; 2]>, Vec<u32>)>,
+        name: Option<String>,
+    ) -> TraceId {
+        let (route_pts, route_starts) = routes.unwrap_or_default();
+        self.push_trace(Trace::Graph2d {
+            nodes,
+            labels,
+            node_colors,
+            node_shapes,
+            edges,
+            directed,
+            edge_colors,
+            route_pts,
+            route_starts,
+            name,
+        })
+    }
+
+    /// Set [`Self::show_axes`]. `false`/`true` pin the chrome off or on;
+    /// `None` restores the automatic rule.
+    pub fn set_show_axes(&mut self, show: impl Into<Option<bool>>) {
+        self.show_axes = show.into();
+    }
+
+    /// Does this 2D frame skip its grid, axis rules and tick labels? See
+    /// [`Self::show_axes`] for the rule; a frame with no visible 2D trace at
+    /// all keeps its chrome, so an empty plot still looks like a chart.
+    fn chrome_hidden(&self) -> bool {
+        if let Some(show) = self.show_axes {
+            return !show;
+        }
+        let mut any = false;
+        for (i, t) in self.traces.iter().enumerate() {
+            if t.is_3d() || !self.is_visible(i) {
+                continue;
+            }
+            any = true;
+            if !matches!(t, Trace::Graph2d { .. }) {
+                return false;
+            }
+        }
+        any
     }
 
     /// Add a 3D polyline through `pts` in order. Vertices are not pickable;
@@ -4159,6 +4551,12 @@ impl Plot {
                             }
                         }
                     }
+                    Trace::Graph2d { nodes, route_pts, .. } => {
+                        if let Some((a, b, c, d)) = graph_extent(nodes, route_pts) {
+                            seen(a, b, c, slot);
+                            seen(a, b, d, slot);
+                        }
+                    }
                     traces_3d!() => {}
                 }
             }
@@ -4256,6 +4654,12 @@ impl Plot {
                                 seen(x - hx, y - hy, slot);
                                 seen(x + hx, y + hy, slot);
                             }
+                        }
+                    }
+                    Trace::Graph2d { nodes, route_pts, .. } => {
+                        if let Some((a, b, c, d)) = graph_extent(nodes, route_pts) {
+                            seen(a, c, slot);
+                            seen(b, d, slot);
                         }
                     }
                     Trace::Bar2d { xs, heights, orient, .. } => {
@@ -4386,14 +4790,18 @@ impl Plot {
         // text, so the frame gives up a line of top margin for it.
         let caption = self.colorbar.as_ref().and_then(|cb| cb.label.clone());
         let top = 2 * pad + caption.as_ref().map_or(0, |_| ch + pad);
-        let bottom = ch + tick_len + 2 * pad;
+        // Without chrome there is no tick-label column to reserve on any
+        // side, so every margin collapses to the same small air gap and the
+        // graph gets the whole frame.
+        let hidden = self.chrome_hidden();
+        let bottom = if hidden { 2 * pad } else { ch + tick_len + 2 * pad };
         // The strip reserve is a pure function of `s` and `h`, decided before
         // the margin fixed-point below — a reserve that changed inside the
         // loop could keep it from settling in two passes.
         let strip_on = self.range_slider && h >= STRIP_MIN_H * s;
         let strip_h = STRIP_H_S * s;
         let strip_reserve = if strip_on { strip_h + pad } else { 0 };
-        let mut left = (8 * cw).min(w / 3);
+        let mut left = if hidden { 2 * pad } else { (8 * cw).min(w / 3) };
         let mut right = 2 * pad;
         let (mut x0, mut y0, mut x1, mut y1) = (0, 0, 0, 0);
         let mut map = Map2d::default();
@@ -4418,8 +4826,16 @@ impl Plot {
             let ty = (((y1 - y0) / (3 * ch)) as usize).clamp(2, 10);
             (xticks, xlabels) = self.x_axis_ticks(vxlo, vxhi, tx);
             (yticks, ylabels) = self.y_axis_ticks(vylo, vyhi, ty);
+            if hidden {
+                // Solved and then dropped rather than skipped: the tick
+                // *positions* are what size the margins, and clearing them
+                // here is what makes "no chrome" one decision instead of a
+                // condition repeated at every draw site.
+                (xticks, xlabels) = (Vec::new(), Vec::new());
+                (yticks, ylabels) = (Vec::new(), Vec::new());
+            }
             let label_w = ylabels.iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
-            left = (label_w + tick_len + 2 * pad).min(w / 3);
+            left = if hidden { 2 * pad } else { (label_w + tick_len + 2 * pad).min(w / 3) };
             // The right margin stacks outward from x1: tick-label columns
             // first (innermost axis nearest the frame), then the colorbar.
             let mut used = 2 * pad;
@@ -4433,12 +4849,13 @@ impl Plot {
                     maps_r[k] = Map2d::new((dxlo, dxhi, rlo, rhi), rect, cam);
                     let (vlo, vhi) = (maps_r[k].inv_y(y1 as f64), maps_r[k].inv_y(y0 as f64));
                     let (t, labels) = numeric_ticks(vlo, vhi, ty);
-                    (rticks[k], rlabels[k]) = (t, labels);
+                    (rticks[k], rlabels[k]) =
+                        if hidden { (Vec::new(), Vec::new()) } else { (t, labels) };
                     let wk = rlabels[k].iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
                     col_x[k] = off;
                     off += wk + 2 * pad;
                 }
-                used = off - pad;
+                used = if hidden { 2 * pad } else { off - pad };
             }
             cbar_x = used + pad;
             right = (used + cbar_reserve).min(w / 3);
@@ -4831,6 +5248,7 @@ impl Plot {
                         );
                     }
                 }
+                Trace::Graph2d { .. } => self.draw_graph2d(&mut fb, ti, m, s),
                 traces_3d!() => {}
             }
         }
@@ -4841,10 +5259,15 @@ impl Plot {
         // labels alone carry the positions. Right axes share one rule at x1
         // (a second rule at the outer column would close the figure into a
         // box and anchor nothing); each column's tint says who owns it.
-        fb.rect_fill(x0, y1, x1, y1, 0.0, self.chrome.frame);
-        fb.rect_fill(x0, y0, x0, y1, 0.0, self.chrome.frame);
-        if l.has_right.iter().any(|b| *b) {
-            fb.rect_fill(x1, y0, x1, y1, 0.0, self.chrome.frame);
+        // The tick lists are already empty when the chrome is hidden (see
+        // `layout_2d`), so the label loops below sit out on their own; the
+        // rules are the one thing that has to be asked.
+        if !self.chrome_hidden() {
+            fb.rect_fill(x0, y1, x1, y1, 0.0, self.chrome.frame);
+            fb.rect_fill(x0, y0, x0, y1, 0.0, self.chrome.frame);
+            if l.has_right.iter().any(|b| *b) {
+                fb.rect_fill(x1, y0, x1, y1, 0.0, self.chrome.frame);
+            }
         }
         for (v, label) in l.xticks.iter().zip(&l.xlabels) {
             let px = map.sx(*v).round() as i32;
@@ -4942,6 +5365,9 @@ impl Plot {
                     // Box plots are a categorical summary; squeezed into the
                     // strip they say nothing about where the x window is.
                     Trace::Box2d { .. } => {}
+                    // A graph's x coordinates are ranks or columns, not a
+                    // sweep; there is nothing along x for a window to select.
+                    Trace::Graph2d { .. } => {}
                     Trace::Band2d { xs, lo, hi, color, .. } => {
                         let n = xs.len().min(lo.len()).min(hi.len());
                         let cols: Vec<(f64, f64, f64)> = (0..n)
@@ -5295,6 +5721,10 @@ impl Plot {
                 // A grid snaps to its columns: the crosshair is a vertical
                 // guide, so the x coordinates are the ones it can land on.
                 Trace::Heatmap2d { xs, .. } => xs,
+                // Hovering a graph means hovering a *node*, which is a
+                // different gesture from the x crosshair — and a column of
+                // node centres is not a series to read a value off.
+                Trace::Graph2d { .. } => continue,
                 traces_3d!() => continue,
             };
             for &x in xs {
@@ -5375,6 +5805,7 @@ impl Plot {
                         // what a heatmap wants, and that is a different
                         // gesture from the x crosshair.
                         Trace::Heatmap2d { .. } => continue,
+                        Trace::Graph2d { .. } => continue,
                         traces_3d!() => continue,
                     };
                     let Some(i) = xs.iter().position(|&x| x == snap) else { continue };
@@ -5508,6 +5939,216 @@ impl Plot {
             };
             ps.chip(fb, bx0, ey, s, z, chip);
             ps.label(fb, bx0 + ps.text_dx(), ey, row.name, z, ink, self.chrome.bg);
+        }
+    }
+
+    /// Where trace `ti`'s block starts in the flat node and edge index
+    /// spaces — the `(node, edge)` offsets [`Element`] indices are counted
+    /// from. Insertion order, and hidden traces keep their block, exactly as
+    /// [`Self::node_count`] describes.
+    fn flat_base(&self, ti: usize) -> (usize, usize) {
+        let (mut n, mut e) = (0usize, 0usize);
+        for t in self.traces.iter().take(ti) {
+            match t {
+                Trace::Scatter3d { pts, .. } => n += pts.len(),
+                Trace::Graph3d { nodes, edges, .. } => {
+                    n += nodes.len();
+                    e += edges.len();
+                }
+                Trace::Graph2d { nodes, edges, .. } => {
+                    n += nodes.len();
+                    e += edges.len();
+                }
+                _ => {}
+            }
+        }
+        (n, e)
+    }
+
+    /// Every node's pixel box for trace `ti` under map `m`, indexed by node.
+    /// Empty for anything that is not a [`Trace::Graph2d`]. Drawing and
+    /// picking both start here, so what is on screen and what a click
+    /// resolves to are the same rectangles.
+    fn graph2d_boxes(&self, ti: usize, m: &Map2d, s: i32) -> Vec<NodeBox> {
+        let Some(Trace::Graph2d { nodes, labels, .. }) = self.traces.get(ti) else {
+            return Vec::new();
+        };
+        nodes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| node_box(m, *p, labels.get(i).map_or("", String::as_str), s))
+            .collect()
+    }
+
+    /// One edge's pixel polyline: source box boundary, waypoints, target box
+    /// boundary. `None` when either endpoint is out of range or non-finite,
+    /// or when the edge is a self-loop (v1 has no loop geometry). When
+    /// `trim_arrow` is set the target end stops short by that many pixels,
+    /// leaving room for the arrowhead to be the thing that touches the box.
+    fn graph2d_edge_path(
+        &self,
+        ti: usize,
+        boxes: &[NodeBox],
+        m: &Map2d,
+        e: usize,
+        trim_arrow: f64,
+    ) -> Option<Vec<(f64, f64)>> {
+        let Some(Trace::Graph2d { nodes, node_shapes, edges, route_pts, route_starts, .. }) =
+            self.traces.get(ti)
+        else {
+            return None;
+        };
+        let &(a, b) = edges.get(e)?;
+        let (a, b) = (a as usize, b as usize);
+        if a == b {
+            return None;
+        }
+        let (ba, bb) = (boxes.get(a)?, boxes.get(b)?);
+        for p in [nodes.get(a)?, nodes.get(b)?] {
+            if !p[0].is_finite() || !p[1].is_finite() {
+                return None;
+            }
+        }
+        let shape_of =
+            |i: usize| node_shapes.as_ref().and_then(|v| v.get(i)).copied().unwrap_or_default();
+        let mut pts: Vec<(f64, f64)> = Vec::with_capacity(2);
+        pts.push((ba.cx, ba.cy));
+        for w in edge_route(route_pts, route_starts, e) {
+            let (x, y) = (m.sx(w[0] as f64), m.sy(w[1] as f64));
+            if x.is_finite() && y.is_finite() {
+                pts.push((x, y));
+            }
+        }
+        pts.push((bb.cx, bb.cy));
+        // Both ends are solved against the *unclipped* polyline, so the
+        // first clip cannot move the point the second one aims at.
+        let next = pts[1];
+        let prev = pts[pts.len() - 2];
+        let start = ba.boundary(shape_of(a), next.0 - ba.cx, next.1 - ba.cy);
+        let mut end = bb.boundary(shape_of(b), prev.0 - bb.cx, prev.1 - bb.cy);
+        if trim_arrow > 0.0 {
+            let (dx, dy) = (end.0 - prev.0, end.1 - prev.1);
+            let len = dx.hypot(dy);
+            if len > trim_arrow {
+                end = (end.0 - dx / len * trim_arrow, end.1 - dy / len * trim_arrow);
+            }
+        }
+        let last = pts.len() - 1;
+        pts[0] = start;
+        pts[last] = end;
+        Some(smooth_polyline(&pts))
+    }
+
+    /// Draw a [`Trace::Graph2d`]: edges with their arrowheads first, then the
+    /// node boxes over them, then each label. Node centres come from the data
+    /// map; box sizes are in pixels, so zooming spreads the graph out while
+    /// the text stays the size it has to be to be read.
+    fn draw_graph2d(&self, fb: &mut Framebuffer, ti: usize, m: &Map2d, s: i32) {
+        let Some(Trace::Graph2d {
+            nodes,
+            labels,
+            node_colors,
+            node_shapes,
+            edges,
+            directed,
+            edge_colors,
+            ..
+        }) = self.traces.get(ti)
+        else {
+            return;
+        };
+        let (node0, edge0) = self.flat_base(ti);
+        let ts = s as f32;
+        let card = lighten(self.chrome.bg, 8);
+        let boxes = self.graph2d_boxes(ti, m, s);
+        let color_of = |i: usize| node_colors.get(i).copied().unwrap_or([120, 180, 230]);
+        let shape_of =
+            |i: usize| node_shapes.as_ref().and_then(|v| v.get(i)).copied().unwrap_or_default();
+        // The arrowhead is the thing that says which way an edge points, so
+        // it is sized against the text scale rather than the edge width.
+        let (head_len, head_half) = (4.0 * ts as f64, 2.5 * ts as f64);
+        let trim = if *directed { head_len * 0.9 } else { 0.0 };
+
+        for (k, &(a, b)) in edges.iter().enumerate() {
+            let el = Element::Edge(edge0 + k);
+            let Some(poly) = self.graph2d_edge_path(ti, &boxes, m, k, trim) else { continue };
+            let hot = (self.selected == Some(el))
+                .then_some(1.6 * ts)
+                .or_else(|| (self.hovered == Some(el)).then_some(1.0 * ts));
+            if let Some(r) = hot {
+                for w in poly.windows(2) {
+                    let a = [w[0].0 as f32, w[0].1 as f32, 0.0];
+                    let b = [w[1].0 as f32, w[1].1 as f32, 0.0];
+                    edge_glow(fb, a, b, r);
+                }
+                continue;
+            }
+            let (a, b) = (a as usize, b as usize);
+            let ec = match edge_colors.as_ref().and_then(|v| v.get(k)) {
+                Some(c) => *c,
+                None => {
+                    let (ca, cb) = (color_of(a), color_of(b));
+                    [
+                        ((ca[0] as u16 + cb[0] as u16) / 2) as u8 / 2 + 20,
+                        ((ca[1] as u16 + cb[1] as u16) / 2) as u8 / 2 + 20,
+                        ((ca[2] as u16 + cb[2] as u16) / 2) as u8 / 2 + 20,
+                    ]
+                }
+            };
+            for w in poly.windows(2) {
+                stroke(fb, w[0], w[1], 0.5 * ts, ec);
+            }
+            if *directed {
+                let (tail, tip) = (poly[poly.len() - 2], *poly.last().expect("two ends"));
+                // The head sits past the trimmed end, so its tip is what
+                // meets the target box.
+                let (dx, dy) = (tip.0 - tail.0, tip.1 - tail.1);
+                let len = dx.hypot(dy);
+                if len > 1e-9 {
+                    let (ux, uy) = (dx / len, dy / len);
+                    let apex = (tip.0 + ux * trim, tip.1 + uy * trim);
+                    let base = (apex.0 - ux * head_len, apex.1 - uy * head_len);
+                    fb.tri(
+                        [apex.0 as f32, apex.1 as f32, 0.0],
+                        [(base.0 - uy * head_half) as f32, (base.1 + ux * head_half) as f32, 0.0],
+                        [(base.0 + uy * head_half) as f32, (base.1 - ux * head_half) as f32, 0.0],
+                        ec,
+                    );
+                }
+            }
+        }
+
+        for (i, p) in nodes.iter().enumerate() {
+            if !p[0].is_finite() || !p[1].is_finite() {
+                continue;
+            }
+            let b = &boxes[i];
+            let shape = shape_of(i);
+            let el = Element::Node(node0 + i);
+            // A halo drawn first and covered by the body leaves a ring, so
+            // the highlight reads as an outline the way the 3D one does
+            // without a second silhouette primitive.
+            let halo = (self.selected == Some(el))
+                .then_some(2.2 * ts as f64)
+                .or_else(|| (self.hovered == Some(el)).then_some(1.2 * ts as f64));
+            if let Some(margin) = halo {
+                let white = [255, 255, 255];
+                draw_node_body(fb, &b.grown(margin), shape, white, white);
+            }
+            draw_node_body(fb, b, shape, card, color_of(i));
+            let label = labels.get(i).map_or("", String::as_str);
+            if !label.is_empty() {
+                let tw = text_width(label, s);
+                draw_text(
+                    fb,
+                    (b.cx - tw as f64 * 0.5).round() as i32,
+                    (b.cy - (CHAR_H * s) as f64 * 0.5).round() as i32,
+                    label,
+                    s,
+                    0.0,
+                    self.chrome.ink_bright,
+                );
+            }
         }
     }
 

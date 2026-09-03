@@ -4,7 +4,9 @@
 //! compared within one process) rather than hard-coded image hashes, so they
 //! hold on any platform regardless of libm rounding in the camera trig.
 
-use plotui_core::{draw_text, nice_ticks, Element, Framebuffer, Plot, TraceError, YAxis, PALETTE};
+use plotui_core::{
+    draw_text, nice_ticks, Element, Framebuffer, NodeShape, Plot, TraceError, YAxis, PALETTE,
+};
 
 /// FNV-1a over the RGBA buffer — stable fingerprint for same-process compares.
 fn hash(fb: &Framebuffer) -> u64 {
@@ -109,6 +111,8 @@ fn render_is_deterministic() {
     assert_eq!(hash(&p.render(320, 200)), hash(&p.render(320, 200)));
     let p2 = demo_2d();
     assert_eq!(hash(&p2.render(320, 200)), hash(&p2.render(320, 200)));
+    let p3 = demo_graph2d();
+    assert_eq!(hash(&p3.render(320, 200)), hash(&p3.render(320, 200)));
 }
 
 #[test]
@@ -1482,4 +1486,141 @@ fn legend_overlay_matches_the_rendered_legend() {
     for i in &lit {
         assert_eq!(&full[i * 4..i * 4 + 3], &overlay[i * 4..i * 4 + 3], "pixel {i} differs");
     }
+}
+
+// --- 2D graphs (Graph2d) ---
+
+/// The node card fill: `Chrome::default().bg` lightened by 8, so a box reads
+/// as a panel over the frame rather than as a hole in it.
+const CARD: [u8; 3] = [34, 38, 52];
+
+/// A two-node pipeline with contrasting colours on the nodes and the wire, at
+/// a size whose text scale is 1 — the bitmap font writes its ink unblended,
+/// which is what lets a probe compare against an exact colour.
+fn demo_graph2d() -> Plot {
+    let mut p = Plot::new();
+    p.add_graph2d(
+        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        None,
+        Some(vec![[10, 10, 250]]),
+        None,
+        None,
+    );
+    p
+}
+
+#[test]
+fn graph2d_draws_labels_boxes_and_arrowheads() {
+    let fb = demo_graph2d().render(300, 220);
+    assert!(has_color(&fb, CARD), "node boxes are filled with the card colour");
+    for c in [[250, 10, 10], [10, 250, 10], [10, 10, 250]] {
+        assert!(has_color(&fb, c), "{c:?} must reach the pixels");
+    }
+
+    // Labels go into the framebuffer (never an overlay), so their ink is on
+    // the buffer — and it has to be inside a box, not floating beside one.
+    let px = drawn_pixels(&fb);
+    let fill: Vec<_> = px.iter().filter(|(_, _, c)| *c == CARD).collect();
+    assert!(!fill.is_empty());
+    let (x0, x1) =
+        (fill.iter().map(|f| f.0).min().unwrap(), fill.iter().map(|f| f.0).max().unwrap());
+    let (y0, y1) =
+        (fill.iter().map(|f| f.1).min().unwrap(), fill.iter().map(|f| f.1).max().unwrap());
+    assert!(
+        px.iter().any(|(x, y, c)| {
+            *c == [205, 210, 220] && (x0..=x1).contains(x) && (y0..=y1).contains(y)
+        }),
+        "label ink must land inside the node boxes"
+    );
+
+    // The arrowhead is a filled triangle in the edge colour, so somewhere the
+    // wire is several pixels wide across a row; the 1px stroke never is.
+    let mut per_row = std::collections::BTreeMap::<usize, usize>::new();
+    for (_, y, _) in px.iter().filter(|(_, _, c)| *c == [10, 10, 250]) {
+        *per_row.entry(*y).or_default() += 1;
+    }
+    let widest = per_row.values().copied().max().unwrap_or(0);
+    assert!(widest >= 4, "no arrowhead: widest edge row is {widest}px");
+}
+
+#[test]
+fn graph2d_alone_hides_axes_and_show_axes_restores_them() {
+    const FRAME: [u8; 3] = [70, 78, 96];
+    let mut p = demo_graph2d();
+    assert!(!has_color(&p.render(300, 220), FRAME), "a graph-only frame draws no axis rules");
+    p.set_show_axes(true);
+    assert!(has_color(&p.render(300, 220), FRAME), "show_axes = true restores them");
+    p.set_show_axes(None);
+    assert!(!has_color(&p.render(300, 220), FRAME), "None restores the automatic rule");
+
+    // One ordinary 2D trace alongside the graph brings the chrome back: its
+    // values *are* measurements, and they need a scale to be read against.
+    let mut mixed = demo_graph2d();
+    mixed.add_line2d(vec![0.0, 1.0], vec![0.0, 1.0], PALETTE[0], 2.0, None, YAxis::Primary);
+    assert!(has_color(&mixed.render(300, 220), FRAME), "a mixed frame keeps its axes");
+
+    // And show_axes = false hides the chrome on an ordinary chart too. The
+    // series is unnamed on purpose: the legend keeps its own frame-coloured
+    // border either way, because hiding the axes is not hiding the legend.
+    let mut chart = Plot::new();
+    chart.add_line2d(
+        vec![0.0, 1.0, 2.0],
+        vec![0.0, 1.0, 0.5],
+        PALETTE[0],
+        2.0,
+        None,
+        YAxis::Primary,
+    );
+    assert!(has_color(&chart.render(300, 220), FRAME));
+    chart.set_show_axes(false);
+    assert!(!has_color(&chart.render(300, 220), FRAME));
+}
+
+#[test]
+fn graph2d_node_shapes_and_routes_change_the_drawing() {
+    let base = hash(&demo_graph2d().render(300, 220));
+
+    let mut shaped = Plot::new();
+    shaped.add_graph2d(
+        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        Some(vec![NodeShape::Ellipse, NodeShape::Diamond]),
+        Some(vec![[10, 10, 250]]),
+        None,
+        None,
+    );
+    assert_ne!(hash(&shaped.render(300, 220)), base, "node shapes must change the pixels");
+
+    // A waypoint bends the edge away from the straight run between the boxes.
+    let mut routed = demo_graph2d();
+    let mut with_route = Plot::new();
+    with_route.add_graph2d(
+        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        None,
+        Some(vec![[10, 10, 250]]),
+        Some((vec![[0.6, 0.5]], vec![0])),
+        None,
+    );
+    assert_ne!(
+        hash(&with_route.render(300, 220)),
+        hash(&routed.render(300, 220)),
+        "an edge waypoint must route the edge somewhere else"
+    );
+    routed.set_show_axes(false);
+    assert_eq!(
+        hash(&routed.render(300, 220)),
+        base,
+        "pinning show_axes off matches what the automatic rule already did"
+    );
 }
