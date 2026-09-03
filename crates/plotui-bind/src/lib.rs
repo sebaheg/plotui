@@ -8,6 +8,10 @@
 //! crate is that single home, so Python and Go callers see identical
 //! behavior down to the error text.
 
+pub mod dot;
+
+pub use dot::{parse_dot, plot_from_dot, DotEdge, DotGraph, DotNode};
+
 use plotui_core::{
     BarMode, BinSpec, Colormap, Element, ErrBars, Interp, Orient, Plot, RangeHit, Rgb, Shape, YAxis,
 };
