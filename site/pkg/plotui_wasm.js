@@ -797,6 +797,20 @@ export class Plot {
         wasm.plot_clear_bounds(this.__wbg_ptr);
     }
     /**
+     * Clear an axis's explicit range, back to autoscale.
+     * @param {string} axis
+     * @returns {boolean}
+     */
+    clear_range(axis) {
+        const ptr0 = passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_clear_range(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * Clear the x window (back to full-extent autoscale).
      * @returns {boolean}
      */
@@ -1117,6 +1131,24 @@ export class Plot {
         wasm.plot_rotate(this.__wbg_ptr, d_yaw, d_pitch);
     }
     /**
+     * An axis's title ("x" or "y"): what its numbers mean. The x title sits
+     * under its tick labels, the y title rotated in the left margin.
+     * @param {string} axis
+     * @param {string | null} [text]
+     * @returns {boolean}
+     */
+    set_axis_title(axis, text) {
+        const ptr0 = passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(text) ? 0 : passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_axis_title(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * Set how bar series share positions: "overlay", "group" or "stack".
      * @param {string} mode
      * @returns {boolean}
@@ -1327,6 +1359,22 @@ export class Plot {
         }
     }
     /**
+     * Scale an axis ("x" or "y") by log10. Ignored on a categorical or time
+     * axis, and on the right-hand axes, which stay linear.
+     * @param {string} axis
+     * @param {boolean} on
+     * @returns {boolean}
+     */
+    set_log(axis, on) {
+        const ptr0 = passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_log(this.__wbg_ptr, ptr0, len0, on);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * Style a 2D scatter point by point: `colors` as shorthand strings,
      * `sizes` as radii, `shapes` as silhouette names. An empty or omitted
      * list leaves that channel uniform.
@@ -1346,6 +1394,24 @@ export class Plot {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * Pin an axis's extent ("x" or "y") to `[lo, hi]`. Unlike an x window
+     * this decides the extent only — zoom and pan still compose on top —
+     * and it is used exactly as given, without autoscale's padding.
+     * @param {string} axis
+     * @param {number} lo
+     * @param {number} hi
+     * @returns {boolean}
+     */
+    set_range(axis, lo, hi) {
+        const ptr0 = passStringToWasm0(axis, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_range(this.__wbg_ptr, ptr0, len0, lo, hi);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
     }
     /**
      * Toggle the range-slider strip; returns whether a repaint is needed.
@@ -1412,6 +1478,21 @@ export class Plot {
         var ptr0 = isLikeNone(xyz) ? 0 : passArrayF32ToWasm0(xyz, wasm.__wbindgen_malloc);
         var len0 = WASM_VECTOR_LEN;
         const ret = wasm.plot_set_surface_selected(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * The chart title, drawn centered above the plot area; `None` or an
+     * empty string clears it.
+     * @param {string | null} [text]
+     * @returns {boolean}
+     */
+    set_title(text) {
+        var ptr0 = isLikeNone(text) ? 0 : passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.plot_set_title(this.__wbg_ptr, ptr0, len0);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
