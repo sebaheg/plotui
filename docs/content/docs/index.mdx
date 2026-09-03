@@ -35,18 +35,23 @@ can back every frontend — and be unit-tested by hashing pixel buffers.
 
 ## What works today
 
-- **2D** — line, scatter, and bar charts with automatic axes, ticks, and a
-  legend; up to two independent right-hand y-axes; a hover crosshair with a
-  value readout.
+- **2D** — line, scatter, step, bar, histogram, box, heatmap and band charts
+  with automatic axes, ticks, titles, a legend and a colorbar; explicit ranges
+  and log scales; up to two independent right-hand y-axes; a hover crosshair
+  with a value readout.
+- **Time series and live feeds** — calendar axes from ISO-8601 or `datetime`
+  columns, a range-slider strip you can drag, and a CLI that keeps reading
+  (`--follow`) with the view held on the newest data (`--window`, `--last`).
 - **DAGs and pipelines** — directed graphs as labelled boxes wired by arrows,
   laid out by rank, with per-node colour a running pipeline can repaint live
   and hover lighting everything a task waits on. Read a DOT file straight in,
   or lay one out yourself.
 - **3D** — scatter clouds, node-link graphs with hover/click picking,
-  polylines, and Gouraud-shaded grid surfaces with viridis/plasma colormaps —
-  all under one orbit camera.
+  polylines, triangle meshes, and Gouraud-shaded grid surfaces with
+  viridis/plasma colormaps — all under one orbit camera.
 - **Textual widget** — `PlotWidget` picks the right render path per terminal,
   routes mouse and keyboard input to the camera, and repaints without flicker.
 
-Status: **early scaffold** — APIs may still move. Build from source with
-[maturin](/docs/installation); wheels are coming.
+Status: **early scaffold** — APIs may still move. Install with
+`pip install plotui`, a prebuilt binary, or Homebrew; see
+[installation](/docs/installation).

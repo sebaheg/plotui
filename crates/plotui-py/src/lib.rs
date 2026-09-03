@@ -1580,5 +1580,9 @@ fn _plotui(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(cell_px_from_winsize, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(tmux_wrap, m)?)?;
     m.add("__doc__", "Native rendering core for plotui.")?;
+    // The one version in the build: the Python package re-exports this
+    // rather than repeating the number, which is how it drifted to 0.3.0
+    // while the crates were on 0.4.2.
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

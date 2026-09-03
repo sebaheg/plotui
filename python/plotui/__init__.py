@@ -32,7 +32,16 @@ Pipelines and DAGs::
     # In Textual:   use plotui.textual.PlotWidget(plot)
 """
 
-from ._plotui import ForceLayout, LayeredLayout, Plot, from_dot, reachable
+from ._plotui import (
+    ForceLayout,
+    LayeredLayout,
+    Plot,
+    __version__,
+    from_dot,
+    reachable,
+)
 
-__all__ = ["ForceLayout", "LayeredLayout", "Plot", "from_dot", "reachable"]
-__version__ = "0.3.0"
+# `__version__` comes from the native module, which takes it from the crate:
+# one number for the whole build. Repeating it here is how it drifted to
+# 0.3.0 while the crates were on 0.4.2.
+__all__ = ["ForceLayout", "LayeredLayout", "Plot", "__version__", "from_dot", "reachable"]

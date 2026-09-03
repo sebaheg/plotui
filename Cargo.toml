@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/sebaheg/plotui"
@@ -24,11 +24,11 @@ keywords = ["plot", "terminal", "tui", "kitty", "visualization"]
 categories = ["visualization", "command-line-utilities"]
 
 [workspace.dependencies]
-plotui-core = { version = "0.4.2", path = "crates/plotui-core" }
-plotui-protocol = { version = "0.4.2", path = "crates/plotui-protocol" }
-plotui-term = { version = "0.4.2", path = "crates/plotui-term" }
-plotui-bind = { version = "0.4.2", path = "crates/plotui-bind" }
-plotui-ratatui = { version = "0.4.2", path = "crates/plotui-ratatui" }
+plotui-core = { version = "0.5.0", path = "crates/plotui-core" }
+plotui-protocol = { version = "0.5.0", path = "crates/plotui-protocol" }
+plotui-term = { version = "0.5.0", path = "crates/plotui-term" }
+plotui-bind = { version = "0.5.0", path = "crates/plotui-bind" }
+plotui-ratatui = { version = "0.5.0", path = "crates/plotui-ratatui" }
 ratatui = { version = "0.30", default-features = false }
 crossterm = "0.29"
 
