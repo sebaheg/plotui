@@ -15,7 +15,7 @@
 use std::io::BufRead;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use plotui_core::{Plot, TraceId};
+use plotui_core::{Plot, Trace, TraceId};
 
 #[cfg(test)]
 use crate::input::Table;
@@ -26,6 +26,30 @@ use crate::ChartKind;
 /// drained over several frames rather than holding one open: falling behind
 /// by a frame is invisible, a frame that never ends is not.
 const MAX_ROWS_PER_FRAME: usize = 20_000;
+
+/// How a follow session keeps the view on the newest data. Both shapes end
+/// up in the same place — an `x_window` whose high end is the head — because
+/// that window already autoscales y to what is inside it and already draws
+/// itself on the range slider. Nothing is dropped: this moves the view, not
+/// the data, so scrolling back stays possible.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Window {
+    /// The last `n` samples.
+    Samples(usize),
+    /// The last span of x — seconds on a time axis, x units otherwise.
+    Span(f64),
+}
+
+/// The x column a window slides along. Every series in a CLI table shares
+/// one x, so the first trace speaks for all of them.
+fn head_xs(plot: &Plot) -> Option<&[f32]> {
+    match plot.traces.first()? {
+        Trace::Line2d { xs, .. } | Trace::Scatter2d { xs, .. } | Trace::Bar2d { xs, .. } => {
+            Some(xs)
+        }
+        _ => None,
+    }
+}
 
 /// A live feed of rows, appended to the plot one frame at a time.
 pub struct Follower {
@@ -45,6 +69,13 @@ pub struct Follower {
     /// The writer closed the pipe. The plot stays up and interactive — a
     /// finished run is still worth reading.
     ended: bool,
+    /// Keep the view on the newest data; `None` shows the whole run.
+    window: Option<Window>,
+    /// Whether the window is still tracking the head. The first finished
+    /// gesture hands the view to the reader — someone who just dragged back
+    /// to an incident does not want the next row to yank them forward — and
+    /// `f` hands it back.
+    armed: bool,
 }
 
 /// Read stdin on a thread, one line at a time, forwarding to `tx` until the
@@ -107,6 +138,8 @@ pub fn start(
         first_error: None,
         skipped: 0,
         ended: false,
+        window: None,
+        armed: true,
     };
     Ok((plot, follower))
 }
@@ -124,6 +157,8 @@ impl Follower {
             first_error: None,
             skipped: 0,
             ended: false,
+            window: None,
+            armed: true,
         }
     }
 
@@ -176,7 +211,46 @@ impl Follower {
             // here is a bug in this file, not bad input.
             debug_assert!(appended.is_ok(), "follow: {appended:?}");
         }
+        if self.armed {
+            self.slide(plot);
+        }
         true
+    }
+
+    /// Follow the head: put the window's high end on the newest x and its low
+    /// end a window back. Until there is more data than the window asks for
+    /// there is nothing to slide past, so the view is left alone and keeps
+    /// autoscale's padding.
+    fn slide(&self, plot: &mut Plot) {
+        let Some(window) = self.window else { return };
+        let Some(xs) = head_xs(plot) else { return };
+        let Some(&hi) = xs.last() else { return };
+        let (hi, first) = (hi as f64, xs[0] as f64);
+        let lo = match window {
+            Window::Samples(n) if xs.len() > n => xs[xs.len() - n] as f64,
+            Window::Span(span) if first < hi - span => hi - span,
+            _ => return,
+        };
+        if lo < hi {
+            plot.x_window = Some((lo, hi));
+        }
+    }
+
+    /// Follow the newest data as it arrives (see [`Window`]).
+    pub fn set_window(&mut self, window: Window) {
+        self.window = Some(window);
+    }
+
+    /// The reader took the view: stop following until told otherwise.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Go live again, jumping to the head rather than waiting for the next
+    /// row — pressing a key should do something visible.
+    pub fn rearm(&mut self, plot: &mut Plot) {
+        self.armed = true;
+        self.slide(plot);
     }
 
     /// Has the writer closed the pipe?
@@ -292,5 +366,88 @@ mod tests {
         let mut f = Follower::from_parts(feed(&["7", "9"]), &t, true);
         assert!(f.drain(&mut plot));
         assert_eq!(len_of(&plot), 4, "samples accumulate and the bins resolve again");
+    }
+
+    /// Rows for x = 1.. with y = 10x, as a feed.
+    fn rows(from: i32, to: i32) -> Vec<String> {
+        (from..=to).map(|i| format!("{i} {}", i * 10)).collect()
+    }
+
+    #[test]
+    fn a_sample_window_slides_with_the_head() {
+        let t = table("1 10\n2 20\n");
+        let mut plot = crate::build::build_plot(ChartKind::Line, &t);
+        let lines = rows(3, 10);
+        let mut f = Follower::from_parts(
+            feed(&lines.iter().map(String::as_str).collect::<Vec<_>>()),
+            &t,
+            false,
+        );
+        f.set_window(Window::Samples(4));
+        f.drain(&mut plot);
+        // Ten samples, a window of four: x runs 7..10, and the data is all
+        // still there behind it.
+        assert_eq!(plot.x_window, Some((7.0, 10.0)));
+        let Trace::Line2d { xs, .. } = &plot.traces[0] else { panic!() };
+        assert_eq!(xs.len(), 10, "the view moved, nothing was dropped");
+    }
+
+    #[test]
+    fn a_window_waits_until_there_is_more_data_than_it_asks_for() {
+        let t = table("1 10\n");
+        let mut plot = crate::build::build_plot(ChartKind::Line, &t);
+        let mut f = Follower::from_parts(feed(&["2 20", "3 30"]), &t, false);
+        f.set_window(Window::Samples(10));
+        f.drain(&mut plot);
+        // Three of ten: there is nothing to slide past yet, so the frame keeps
+        // autoscale's padding rather than pinning three points to the edges.
+        assert_eq!(plot.x_window, None);
+    }
+
+    #[test]
+    fn a_span_window_keeps_the_last_span_of_x() {
+        let t = table("0 5\n");
+        let mut plot = crate::build::build_plot(ChartKind::Line, &t);
+        let lines: Vec<String> = (1..=100).map(|i| format!("{i} {i}")).collect();
+        let mut f = Follower::from_parts(
+            feed(&lines.iter().map(String::as_str).collect::<Vec<_>>()),
+            &t,
+            false,
+        );
+        f.set_window(Window::Span(30.0));
+        f.drain(&mut plot);
+        assert_eq!(plot.x_window, Some((70.0, 100.0)));
+    }
+
+    #[test]
+    fn the_reader_taking_the_view_stops_the_follow() {
+        let t = table("1 10\n");
+        let mut plot = crate::build::build_plot(ChartKind::Line, &t);
+        let lines = rows(2, 10);
+        let mut f = Follower::from_parts(
+            feed(&lines.iter().map(String::as_str).collect::<Vec<_>>()),
+            &t,
+            false,
+        );
+        f.set_window(Window::Samples(3));
+        f.drain(&mut plot);
+        assert_eq!(plot.x_window, Some((8.0, 10.0)));
+
+        // The reader drags back; later rows must not yank the view forward.
+        f.disarm();
+        plot.x_window = Some((2.0, 5.0));
+        let more = rows(11, 20);
+        let (tx, rx) = mpsc::channel();
+        for l in &more {
+            tx.send(l.clone()).unwrap();
+        }
+        drop(tx);
+        f.rx = rx;
+        f.drain(&mut plot);
+        assert_eq!(plot.x_window, Some((2.0, 5.0)), "a disarmed view stays put");
+
+        // `f` goes live again, and jumps rather than waiting for a row.
+        f.rearm(&mut plot);
+        assert_eq!(plot.x_window, Some((18.0, 20.0)));
     }
 }

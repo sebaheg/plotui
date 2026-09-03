@@ -94,7 +94,7 @@ plotui line --log-y --title "queue depth" \
             --x-title minute --y-title items    # titles and log scales
 plotui line --x-range 0:100 --y-range 0:1       # pin an extent, LO:HI
 tail -f app.log | LC_ALL=C awk '{print $2}' \
-                | plotui line --follow          # live: rows append as they arrive
+                | plotui line -f --window 200   # live, on the last 200 samples
 plotui example scatter                          # built-in demo scenes, no data needed
 plotui example deps                             # plotui's own dependency graph, laid
                                                 # out live by a force simulation
@@ -108,6 +108,14 @@ to draw into — a malformed line is skipped rather than fatal, and the count is
 reported when you quit. The shape of the input (delimiter, column count,
 whether x is a calendar) is settled by the first row and held for the rest of
 the stream.
+
+On a long feed the whole run compresses into a sliver, so `--window <N>` keeps
+the view on the last N samples and `--last <span>` on the last `30s` / `5m` /
+`2h` of x. Neither drops data: the window is a *view*, drawn on the range
+slider (which a window switches on) against the entire run, so you can drag
+back through everything that has arrived. Doing so hands the view over — a
+reader who has scrolled back to an incident does not want the next row to
+yank them forward — and **f** goes live again, jumping to the head.
 
 Like every plotui frontend, the CLI needs a terminal with Kitty graphics
 (supported terminals below); elsewhere it prints a notice and exits.

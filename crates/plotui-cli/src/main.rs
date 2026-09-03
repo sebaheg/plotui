@@ -28,8 +28,9 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use clap::{ArgAction, Parser, Subcommand};
+use crossterm::event::KeyCode;
 use plotui_core::BarMode;
-use plotui_ratatui::PlotState;
+use plotui_ratatui::{PlotEvent, PlotState};
 use plotui_term::RenderMode;
 
 #[derive(Parser)]
@@ -98,6 +99,14 @@ struct Args {
     /// input and an interactive terminal: `tail -f app.log | plotui line -f`
     #[arg(short = 'f', long)]
     follow: bool,
+    /// With --follow: keep the view on the last N samples. Press f to go
+    /// live again after dragging the range slider back
+    #[arg(long, value_name = "N", conflicts_with = "last")]
+    window: Option<usize>,
+    /// With --follow: keep the view on the last span of x — 30s, 5m, 2h, 1d,
+    /// or a bare number in x units
+    #[arg(long, value_name = "SPAN", value_parser = parse_span)]
+    last: Option<f64>,
     /// Chart title, drawn above the plot
     #[arg(long)]
     title: Option<String>,
@@ -215,6 +224,26 @@ pub struct ExampleArgs {
     fps: u32,
 }
 
+/// A span of x: `30s`, `5m`, `2h`, `1d`, or a bare number in x units. The
+/// suffixes are seconds-based because that is what a time axis counts in;
+/// on a numeric axis a bare number is the honest way to say it.
+fn parse_span(s: &str) -> Result<f64, String> {
+    let err = || format!("expected a span like 30s, 5m, 2h or a number, got '{s}'");
+    let t = s.trim();
+    let (num, mult) = match t.chars().last() {
+        Some('s') => (&t[..t.len() - 1], 1.0),
+        Some('m') => (&t[..t.len() - 1], 60.0),
+        Some('h') => (&t[..t.len() - 1], 3600.0),
+        Some('d') => (&t[..t.len() - 1], 86_400.0),
+        _ => (t, 1.0),
+    };
+    let v: f64 = num.trim().parse().map_err(|_| err())?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!("a span must be positive, got '{s}'"));
+    }
+    Ok(v * mult)
+}
+
 /// `LO:HI`, gnuplot's range syntax. A colon rather than a comma so a decimal
 /// comma can never be read as a separator — the same reason the input parser
 /// leaves comma decimals alone.
@@ -272,6 +301,19 @@ fn run_follow(kind: ChartKind, args: &Args) -> Result<(), String> {
              try line, scatter, step, bar or hist"
             .into());
     }
+    let window = match (args.window, args.last) {
+        (Some(n), _) if n < 2 => return Err("--window needs at least 2 samples".into()),
+        (Some(n), _) => Some(follow::Window::Samples(n)),
+        (_, Some(span)) => Some(follow::Window::Span(span)),
+        _ => None,
+    };
+    if window.is_some() && matches!(kind, ChartKind::Hist { .. }) {
+        return Err(
+            "a histogram's x is its bins, not the order samples arrived, so there is nothing \
+             to slide along; drop --window/--last, or plot the series with line or scatter"
+                .into(),
+        );
+    }
     if let Some(f) = args.file.as_deref() {
         if f.as_os_str() != "-" {
             return Err(format!(
@@ -296,14 +338,23 @@ fn run_follow(kind: ChartKind, args: &Args) -> Result<(), String> {
         return Ok(());
     }
 
-    let (mut plot, follower) = follow::start(kind, args.delimiter.as_deref(), args.header)?;
-    plot.range_slider = args.range_slider;
+    let (mut plot, mut follower) = follow::start(kind, args.delimiter.as_deref(), args.header)?;
+    if let Some(w) = window {
+        follower.set_window(w);
+        // A sliding view without the strip is a chart that quietly hides most
+        // of its data; with it, the window is drawn against the whole run and
+        // is draggable back through it.
+        plot.range_slider = true;
+    } else {
+        plot.range_slider = args.range_slider;
+    }
     apply_axes(&mut plot, args).map_err(|e| e.to_string())?;
 
     // The feed owns the follower for the length of the loop, and the report
     // is read after it: nothing may print while the plot has the terminal.
     let follower = Rc::new(RefCell::new(follower));
-    let drained = Rc::clone(&follower);
+    let (drained, taken, rearmed) =
+        (Rc::clone(&follower), Rc::clone(&follower), Rc::clone(&follower));
     let hooks = interactive::Hooks {
         feed: Some(Box::new(move |state: &mut PlotState, _dt: f64| {
             let mut follower = drained.borrow_mut();
@@ -312,6 +363,24 @@ fn run_follow(kind: ChartKind, args: &Args) -> Result<(), String> {
             if !follower.ended() && follower.drain(state.plot_mut()) {
                 state.invalidate();
             }
+        })),
+        // A finished gesture on the window is the reader saying "I'll drive":
+        // someone who dragged back to an incident does not want the next row
+        // to yank them forward again.
+        on_plot_event: Some(Box::new(move |_state: &mut PlotState, event: PlotEvent| {
+            if matches!(event, PlotEvent::RangeChanged(_)) {
+                taken.borrow_mut().disarm();
+            }
+        })),
+        // …and `f` is how they hand it back, jumping to the head rather than
+        // waiting for the next row, so the key does something visible.
+        on_key: Some(Box::new(move |state: &mut PlotState, code: KeyCode| {
+            if code != KeyCode::Char('f') {
+                return false;
+            }
+            rearmed.borrow_mut().rearm(state.plot_mut());
+            state.invalidate();
+            true
         })),
         ..Default::default()
     };
@@ -370,6 +439,11 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         };
+    }
+
+    if args.window.is_some() || args.last.is_some() {
+        eprintln!("plotui: --window and --last follow a live feed; add --follow");
+        return ExitCode::from(2);
     }
 
     let table = match input::load(args.file.as_deref(), args.delimiter.as_deref(), args.header) {
