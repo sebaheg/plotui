@@ -17,6 +17,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("stream", "Live streaming plot — three series appended at 20 Hz"),
     ("timeseries", "A year of daily data with a range slider — drag it to zoom the x axis"),
     ("deps", "plotui's own dependency graph, laid out live by a force simulation"),
+    ("pipeline", "A nightly forecasting DAG running live — tasks turn green, one fails"),
     ("lidar", "Streaming LiDAR sweep — a scanned room arriving beam by beam, height-colored"),
     ("aizawa", "The Aizawa attractor drawing itself — an RK4 trajectory, colored by speed"),
     ("protein", "A protein cartoon folding itself in — ubiquitin, ribbons from its own PDB file"),
@@ -105,6 +106,7 @@ pub fn run(args: &ExampleArgs) -> ExitCode {
             }
         }
         "deps" => crate::deps::run(args, output),
+        "pipeline" => crate::pipeline::run(args, output),
         "lidar" => crate::lidar::run(args, output),
         "aizawa" => crate::aizawa::run(args, output),
         "protein" => crate::protein::run(args, output),

@@ -17,6 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 plotui-core = { workspace = true }
+# The DOT parser and its error messages, shared with every other binding.
+plotui-bind = { workspace = true }
 plotui-term = { workspace = true }
 plotui-ratatui = { workspace = true }
 ratatui = { workspace = true, features = ["crossterm"] }

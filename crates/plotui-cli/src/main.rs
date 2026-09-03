@@ -8,12 +8,14 @@
 
 mod aizawa;
 mod build;
+mod dag;
 mod deps;
 mod examples;
 mod input;
 mod interactive;
 mod lidar;
 mod mandelbulb;
+mod pipeline;
 mod protein;
 mod record;
 mod render;
@@ -56,6 +58,8 @@ enum Chart {
     Hist(HistArgs),
     /// Box plot — one box per column, showing quartiles, whiskers and outliers
     Box(Args),
+    /// Directed graph from a DOT file — a pipeline, a DAG, a dependency tree
+    Dag(DagArgs),
     /// Run a built-in example scene (no input data; lists them when run bare)
     Example(ExampleArgs),
 }
@@ -108,6 +112,32 @@ struct BarArgs {
     /// Draw the series side by side within each position
     #[arg(long)]
     group: bool,
+}
+
+#[derive(clap::Args)]
+#[command(disable_help_flag = true)]
+struct DagArgs {
+    /// DOT file; "-" or absent reads stdin
+    file: Option<PathBuf>,
+    /// Flow direction: "tb" (top to bottom) or "lr" (left to right);
+    /// default: whatever the file's rankdir says, else tb
+    #[arg(long)]
+    rankdir: Option<String>,
+    /// Plot width in terminal cells (default: terminal width)
+    #[arg(short = 'w', long)]
+    width: Option<u16>,
+    /// Plot height in terminal cells (default: terminal height minus 2)
+    #[arg(short = 'h', long)]
+    height: Option<u16>,
+    /// Render one frame and exit (default when stdout is not a terminal)
+    #[arg(long = "static")]
+    static_mode: bool,
+    /// Export to a file instead of the terminal (.png; needs ffmpeg on PATH)
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Export frame size as WxH pixels (only with --out)
+    #[arg(long, default_value = "1280x720", value_parser = parse_size)]
+    size: (u16, u16),
 }
 
 #[derive(clap::Args)]
@@ -207,6 +237,7 @@ fn main() -> ExitCode {
             (ChartKind::Hist { bins: a.bins, bin_width: a.bin_width }, a.common)
         }
         Chart::Example(a) => return examples::run(&a),
+        Chart::Dag(a) => return dag::run(&a),
     };
 
     let table = match input::load(args.file.as_deref(), args.delimiter.as_deref(), args.header) {

@@ -1122,6 +1122,7 @@ version = "0.4.2"
 dependencies = [
  "clap",
  "crossterm",
+ "plotui-bind",
  "plotui-core",
  "plotui-ratatui",
  "plotui-term",

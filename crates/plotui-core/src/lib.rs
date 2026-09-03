@@ -2458,14 +2458,14 @@ fn compute_meta(t: &Trace) -> TraceMeta {
     }
 }
 
-/// A graph's data extent `(xlo, xhi, ylo, yhi)`: its node centres and edge
-/// waypoints, widened so the outermost boxes are not clipped by the frame.
-/// `None` when nothing finite was found.
+/// A graph's data extent `(xlo, xhi, ylo, yhi)`: the box its node centres
+/// and edge waypoints occupy. `None` when nothing finite was found.
 ///
-/// A node's box is measured in *pixels*, so no data-space pad is right at
-/// every zoom; a share of the extent (with a floor for the degenerate
-/// single-node case) is the compromise. Every bounds path goes through this
-/// one function, so a desynced cache still frames a graph identically.
+/// Only the *centres*. A node's box is measured in pixels, so the room it
+/// needs cannot be expressed here at all — that is
+/// [`Plot::graph_box_inset`]'s job, in the frame where pixels exist. The one
+/// widening this does is for a degenerate span (a single node, or a rank of
+/// one), which would otherwise give the axis map nothing to scale by.
 fn graph_extent(nodes: &[[f32; 2]], route_pts: &[[f32; 2]]) -> Option<(f64, f64, f64, f64)> {
     let (mut xlo, mut xhi) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut ylo, mut yhi) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -2481,7 +2481,7 @@ fn graph_extent(nodes: &[[f32; 2]], route_pts: &[[f32; 2]]) -> Option<(f64, f64,
     if !xlo.is_finite() {
         return None;
     }
-    let pad = |lo: f64, hi: f64| if hi > lo { (hi - lo) * 0.12 } else { 0.5 };
+    let pad = |lo: f64, hi: f64| if hi > lo { 0.0 } else { 0.5 };
     let (px, py) = (pad(xlo, xhi), pad(ylo, yhi));
     Some((xlo - px, xhi + px, ylo - py, yhi + py))
 }
@@ -2874,6 +2874,35 @@ impl Plot {
     /// `None` restores the automatic rule.
     pub fn set_show_axes(&mut self, show: impl Into<Option<bool>>) {
         self.show_axes = show.into();
+    }
+
+    /// Half the widest and tallest node box among the visible 2D graphs, in
+    /// pixels at text scale `s` — how much room the plot rect has to give up
+    /// on each side so an outermost box is not clipped.
+    ///
+    /// This is the one thing a data-space pad cannot express: a graph's
+    /// centres are in data units and its boxes are in pixels, so the right
+    /// margin depends on the label text and not on the extent at all. Solved
+    /// here, in the frame, where both are known.
+    fn graph_box_inset(&self, s: i32) -> (i32, i32) {
+        let (mut hw, mut hh) = (0, 0);
+        for (i, t) in self.traces.iter().enumerate() {
+            let Trace::Graph2d { nodes, labels, .. } = t else { continue };
+            if nodes.is_empty() || !self.is_visible(i) {
+                continue;
+            }
+            for j in 0..nodes.len() {
+                let label = labels.get(j).map_or("", String::as_str);
+                let w = (text_width(label, s) + 2 * NODE_PAD_X_S * s).max(NODE_MIN_W_S * s);
+                hw = hw.max((w + 1) / 2);
+            }
+            let h = (CHAR_H * s + 2 * NODE_PAD_Y_S * s).max(NODE_MIN_H_S * s);
+            hh = hh.max((h + 1) / 2);
+        }
+        // The halo a hovered box grows by, plus the border, so a highlight
+        // does not reach past the frame either.
+        let halo = if hw > 0 { 3 * s } else { 0 };
+        (hw + halo, hh + halo)
     }
 
     /// Does this 2D frame skip its grid, axis rules and tick labels? See
@@ -5019,6 +5048,9 @@ impl Plot {
         // side, so every margin collapses to the same small air gap and the
         // graph gets the whole frame.
         let hidden = self.chrome_hidden();
+        // A graph's boxes reach past their centres by a pixel amount no
+        // data-space pad can know; the map below gives them that room.
+        let (box_hw, box_hh) = self.graph_box_inset(s);
         let bottom = if hidden { 2 * pad } else { ch + tick_len + 2 * pad };
         // The strip reserve is a pure function of `s` and `h`, decided before
         // the margin fixed-point below — a reserve that changed inside the
@@ -5043,7 +5075,21 @@ impl Plot {
             x1 = (w - 1 - right).max(x0 + 4);
             y1 = (h - 1 - (bottom.min(h / 3) + strip_reserve)).max(y0 + 4);
             let rect = (x0 as f64, y0 as f64, x1 as f64, y1 as f64);
-            map = Map2d::new((dxlo, dxhi, dylo, dyhi), rect, cam);
+            // Widen the data range by whatever the widest node box needs, so
+            // the *centres* land inside the plot rect with room for their
+            // boxes. Solved against the rect rather than folded into bounds
+            // because the answer is in pixels and only the frame has those.
+            let room = |lo: f64, hi: f64, span_px: f64, inset: i32| -> (f64, f64) {
+                let usable = span_px - 2.0 * inset as f64;
+                if inset == 0 || usable <= 1.0 || hi <= lo {
+                    return (lo, hi);
+                }
+                let d = (hi - lo) * inset as f64 / usable;
+                (lo - d, hi + d)
+            };
+            let (mxlo, mxhi) = room(dxlo, dxhi, (x1 - x0) as f64, box_hw);
+            let (mylo, myhi) = room(dylo, dyhi, (y1 - y0) as f64, box_hh);
+            map = Map2d::new((mxlo, mxhi, mylo, myhi), rect, cam);
             // Ticks cover what is actually visible after zoom/pan.
             let (vxlo, vxhi) = (map.inv_x(x0 as f64), map.inv_x(x1 as f64));
             let (vylo, vyhi) = (map.inv_y(y1 as f64), map.inv_y(y0 as f64));
@@ -5071,7 +5117,7 @@ impl Plot {
                         continue;
                     }
                     let (rlo, rhi) = dright[k];
-                    maps_r[k] = Map2d::new((dxlo, dxhi, rlo, rhi), rect, cam);
+                    maps_r[k] = Map2d::new((mxlo, mxhi, rlo, rhi), rect, cam);
                     let (vlo, vhi) = (maps_r[k].inv_y(y1 as f64), maps_r[k].inv_y(y0 as f64));
                     let (t, labels) = numeric_ticks(vlo, vhi, ty);
                     (rticks[k], rlabels[k]) =
