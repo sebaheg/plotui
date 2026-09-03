@@ -48,11 +48,19 @@ pub struct Plot {
     frame: Vec<u8>,
 }
 
+impl Plot {
+    /// Wrap an already-built core plot — what the composers
+    /// (`plot_from_dot`) hand back, rather than filling one in.
+    fn from_core(inner: plotui_core::Plot) -> Plot {
+        Plot { inner, frame: Vec::new() }
+    }
+}
+
 #[wasm_bindgen]
 impl Plot {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Plot {
-        Plot { inner: plotui_core::Plot::new(), frame: Vec::new() }
+        Plot::from_core(plotui_core::Plot::new())
     }
 
     /// Swap the color sequence for traces added without an explicit color:
@@ -123,6 +131,85 @@ impl Plot {
             None,
             None,
             None,
+            name,
+        ))
+    }
+
+    /// Add a directed graph in the 2D plane: labelled boxes at `(xs, ys)`,
+    /// wired by `edges` as flat `[a0, b0, a1, b1, …]` index pairs. This is
+    /// the pipeline / DAG chart — pair it with `LayeredLayout` for the
+    /// positions and routes, or place the nodes yourself.
+    ///
+    /// `labels` names the boxes; `node_colors` takes one colour shorthand
+    /// per node, which is the channel a live pipeline repaints through
+    /// `set_graph_colors`; `node_shapes` takes "rounded", "box", "ellipse"
+    /// or "diamond" per node. `route_pts` is interleaved x/y waypoints and
+    /// `route_starts` one index per edge into them (the CSR pair
+    /// `LayeredLayout.routes()` returns).
+    ///
+    /// Node *centres* are in data coordinates but their boxes are sized in
+    /// pixels from the label, so zooming spreads the graph apart while the
+    /// text stays legible. A plot whose visible 2D traces are all graphs
+    /// draws no axes; see `set_show_axes`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_graph2d(
+        &mut self,
+        xs: &[f32],
+        ys: &[f32],
+        edges: &[u32],
+        labels: Option<Vec<String>>,
+        directed: Option<bool>,
+        node_colors: Option<Vec<String>>,
+        color: Option<String>,
+        node_shapes: Option<Vec<String>>,
+        edge_colors: Option<Vec<String>>,
+        route_pts: Option<Vec<f32>>,
+        route_starts: Option<Vec<u32>>,
+        name: Option<String>,
+    ) -> Result<usize, JsError> {
+        if !edges.len().is_multiple_of(2) {
+            return Err(JsError::new("edges must be flat [a, b] index pairs; got an odd length"));
+        }
+        let uniform = resolve_color(&self.inner, color.as_deref())?;
+        let n = xs.len().min(ys.len());
+        let nodes: Vec<[f32; 2]> = (0..n).map(|i| [xs[i], ys[i]]).collect();
+        let labels = labels.unwrap_or_default();
+        let labels: Vec<String> =
+            (0..n).map(|i| labels.get(i).cloned().unwrap_or_default()).collect();
+        let parse = |v: Vec<String>| -> Result<Vec<[u8; 3]>, JsError> {
+            v.iter().map(|s| plotui_bind::parse_color(s).map_err(to_js)).collect()
+        };
+        let nc = node_colors.map(parse).transpose()?;
+        let colors = plotui_bind::graph_node_colors(n, nc, uniform);
+        let ec = edge_colors.map(parse).transpose()?;
+        let shapes = match node_shapes {
+            Some(names) => Some(plotui_bind::parse_node_shapes(&names).map_err(to_js)?),
+            None => None,
+        };
+        let pairs: Vec<(u32, u32)> =
+            edges.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
+        let routes = match (route_pts, route_starts) {
+            (Some(pts), Some(starts)) => {
+                if !pts.len().is_multiple_of(2) {
+                    return Err(JsError::new(
+                        "route_pts must be flat [x, y] pairs; got an odd length",
+                    ));
+                }
+                let pts: Vec<[f32; 2]> = pts.as_chunks::<2>().0.to_vec();
+                plotui_bind::check_routes(pairs.len(), pts.len(), &starts).map_err(to_js)?;
+                Some((pts, starts))
+            }
+            _ => None,
+        };
+        Ok(self.inner.add_graph2d(
+            nodes,
+            labels,
+            colors,
+            pairs,
+            directed.unwrap_or(true),
+            shapes,
+            ec,
+            routes,
             name,
         ))
     }
@@ -468,6 +555,25 @@ impl Plot {
         self.inner.set_graph_positions(handle, pts).map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// Replace a 2D graph's edge waypoints — the second half of a relayout,
+    /// after `set_graph_positions` has moved the nodes. `route_pts` is
+    /// interleaved x/y and `route_starts` one index per edge into them;
+    /// passing both empty restores straight edges.
+    pub fn set_graph_routes(
+        &mut self,
+        handle: usize,
+        route_pts: &[f32],
+        route_starts: Vec<u32>,
+    ) -> Result<(), JsError> {
+        if !route_pts.len().is_multiple_of(2) {
+            return Err(JsError::new("route_pts must be flat [x, y] pairs; got an odd length"));
+        }
+        let pts: Vec<[f32; 2]> = route_pts.as_chunks::<2>().0.to_vec();
+        self.inner
+            .set_graph_routes(handle, pts, route_starts)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Recolor a graph trace in place: one color shorthand per node, and
     /// optionally one per edge (`None` restores the default dimmed endpoint
     /// blend) — the host-side highlight primitive.
@@ -512,7 +618,7 @@ impl Plot {
         let pairs: Vec<(u32, u32)> =
             edges.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
         self.inner
-            .extend_graph(handle, &pts, &colors, &pairs)
+            .extend_graph(handle, &pts, &colors, &pairs, None)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -548,6 +654,16 @@ impl Plot {
     }
 
     /// Show or hide the 3D bounding-box wireframe.
+    /// Draw the 2D chrome — grid, axis rules and tick labels — or not.
+    /// `undefined` restores the automatic rule (a frame whose visible 2D
+    /// traces are all graphs draws none of it, because a pipeline's
+    /// coordinates are a layout rather than measurements); `true` and
+    /// `false` pin it. The legend, colorbar, range slider and crosshair are
+    /// unaffected either way, and 3D plots ignore it.
+    pub fn set_show_axes(&mut self, show: Option<bool>) {
+        self.inner.set_show_axes(show);
+    }
+
     pub fn set_show_box(&mut self, show: bool) {
         self.inner.show_box = show;
     }
@@ -904,6 +1020,113 @@ impl ForceLayout {
     pub fn add_node(&mut self, neighbors: &[u32]) -> usize {
         self.inner.add_node(neighbors)
     }
+}
+
+/// A hierarchical ("Sugiyama") layout for a directed graph: rank the nodes
+/// by depth, order each rank to reduce edge crossings, then place them so
+/// edges run as straight as they can. Solved in the constructor — there is
+/// nothing to step, because a pipeline has one right shape.
+///
+/// Feed `positions()`, `route_pts()` and `route_starts()` straight to
+/// `Plot.add_graph2d`. Deterministic: same input, same output, no
+/// randomness anywhere.
+#[wasm_bindgen]
+pub struct LayeredLayout {
+    inner: plotui_core::LayeredLayout,
+}
+
+#[wasm_bindgen]
+impl LayeredLayout {
+    /// Lay out `n_nodes` connected by `edges` (flat `[a0, b0, a1, b1, …]`
+    /// index pairs), flowing in `rankdir` — "TB" (sources on top, the
+    /// default) or "LR" (sources on the left). Self-loops and out-of-range
+    /// endpoints are inert, and cycles do not hang: a back edge is reversed
+    /// for the layout only.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        n_nodes: usize,
+        edges: &[u32],
+        rankdir: Option<String>,
+    ) -> Result<LayeredLayout, JsError> {
+        if !edges.len().is_multiple_of(2) {
+            return Err(JsError::new("edges must be flat [a, b] index pairs; got an odd length"));
+        }
+        let dir = match rankdir.as_deref() {
+            None => plotui_core::RankDir::TB,
+            Some(s) => plotui_bind::parse_rankdir(s).map_err(to_js)?,
+        };
+        let pairs: Vec<(u32, u32)> =
+            edges.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
+        Ok(LayeredLayout { inner: plotui_core::LayeredLayout::new(n_nodes, &pairs, dir) })
+    }
+
+    /// Node centres as a flat `[x0, y0, x1, …]` array, in index order.
+    pub fn positions(&self) -> Vec<f32> {
+        self.inner.positions().iter().flatten().copied().collect()
+    }
+
+    /// Each node's rank: 0 for a source, one more than its deepest
+    /// predecessor otherwise.
+    pub fn ranks(&self) -> Vec<u32> {
+        self.inner.ranks().to_vec()
+    }
+
+    /// Edge waypoints as a flat `[x0, y0, x1, …]` array — the first half of
+    /// the CSR pair `Plot.add_graph2d` takes.
+    pub fn route_pts(&self) -> Vec<f32> {
+        self.inner.routes().0.iter().flatten().copied().collect()
+    }
+
+    /// One index per edge into `route_pts()`, in the caller's edge order —
+    /// the second half of the CSR pair. Edge `e` owns
+    /// `route_starts()[e]..route_starts()[e + 1]`, and an empty run is a
+    /// straight edge.
+    pub fn route_starts(&self) -> Vec<u32> {
+        self.inner.routes().1.to_vec()
+    }
+}
+
+/// Parse a DOT document, lay it out, and return a ready-to-render plot
+/// whose graph trace is handle 0. `rankdir` overrides the document's own
+/// ("TB" or "LR"); `undefined` honours whatever it says.
+///
+/// The accepted grammar is a subset: node and edge statements, chains
+/// (`a -> b -> c`), braced fan-outs (`a -> {b c}`), `subgraph`s (contents
+/// hoisted, grouping ignored), attribute defaults, `rankdir`, and `label` /
+/// `color` / `fillcolor` / `shape` / `style=rounded` on nodes with `color`
+/// on edges. Unknown attributes are ignored; HTML labels, node ports and a
+/// mismatched edge operator throw with the line and column.
+#[wasm_bindgen]
+pub fn plot_from_dot(text: &str, rankdir: Option<String>) -> Result<Plot, JsError> {
+    let dir = match rankdir.as_deref() {
+        None => None,
+        Some(s) => Some(plotui_bind::parse_rankdir(s).map_err(to_js)?),
+    };
+    let (plot, _, _) = plotui_bind::plot_from_dot(text, dir).map_err(to_js)?;
+    Ok(Plot::from_core(plot))
+}
+
+/// Which nodes are reachable from node `i` — everything it waits on with
+/// `upstream` true (the default), everything it leads to otherwise —
+/// including `i` itself. Returns one byte per node, 1 where reachable.
+///
+/// This is the primitive behind "hover a task and light everything upstream
+/// of it": pair it with `Plot.set_graph_colors`.
+#[wasm_bindgen]
+pub fn reachable(
+    n_nodes: usize,
+    edges: &[u32],
+    i: usize,
+    upstream: Option<bool>,
+) -> Result<Vec<u8>, JsError> {
+    if !edges.len().is_multiple_of(2) {
+        return Err(JsError::new("edges must be flat [a, b] index pairs; got an odd length"));
+    }
+    let pairs: Vec<(u32, u32)> = edges.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
+    Ok(plotui_bind::reachable(n_nodes, &pairs, i, upstream.unwrap_or(true))
+        .into_iter()
+        .map(u8::from)
+        .collect())
 }
 
 /// Generated geometry: vertex coordinates split per axis (the shape

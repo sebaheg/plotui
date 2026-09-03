@@ -10,6 +10,8 @@
 // the fallback path (a static import would abort this whole module).
 let Plot = null;
 let ForceLayout = null;
+let LayeredLayout = null;
+let plot_reachable = null;
 let marching_cubes = null;
 let catmull_rom = null;
 let tube = null;
@@ -1016,6 +1018,119 @@ const EXAMPLES = {
     },
   },
 
+  dag2d: {
+    is3d: false, pick: 'element',
+    setup(plot, ui) {
+      // The nine-task nightly forecast the CLI's `example pipeline` runs.
+      const TASKS = [
+        'fetch_prices', 'fetch_weather', 'clean_prices', 'clean_weather',
+        'join_frames', 'build_features', 'train_model', 'backtest', 'publish',
+      ];
+      // (from, to): `to` waits on `from`. The last one skips two ranks, so
+      // the layout has a long edge to route around what is between them.
+      const EDGES = [
+        [0, 2], [1, 3], [2, 4], [3, 4], [4, 5], [5, 6], [5, 7], [6, 8], [7, 8], [2, 7],
+      ];
+      // train_model fails: it is not a leaf, so publish is stranded while
+      // backtest beside it still finishes — the thing a status table cannot
+      // show you.
+      const FAILS = 6;
+      const DONE = '#199e70', RUNNING = T2, FAILED = '#e66767', PENDING = '#3a4054';
+      const STEP_MS = 1200, RESTART_MS = 2600;
+
+      const layout = new LayeredLayout(9, new Uint32Array(EDGES.flat()), 'TB');
+      const pos = layout.positions();
+      const xs = new Float32Array(9), ys = new Float32Array(9);
+      for (let i = 0; i < 9; i++) { xs[i] = pos[i * 2]; ys[i] = pos[i * 2 + 1]; }
+
+      const h = plot.add_graph2d(
+        xs, ys, new Uint32Array(EDGES.flat()),
+        TASKS, true, undefined, undefined,
+        TASKS.map((_, i) => (i === 8 ? 'ellipse' : 'rounded')),
+        undefined, layout.route_pts(), layout.route_starts(), undefined,
+      );
+      // Four empty graph traces: no geometry, one legend row each. The
+      // states need a key, and a key is what the legend is.
+      for (const [name, c] of [['done', DONE], ['running', RUNNING], ['failed', FAILED], ['pending', PENDING]]) {
+        plot.add_graph2d(new Float32Array(), new Float32Array(), new Uint32Array(),
+          undefined, true, [c], undefined, undefined, undefined, undefined, undefined, name);
+      }
+
+      // A topological order — the order a scheduler with one worker runs in.
+      const order = (() => {
+        const indeg = new Array(9).fill(0);
+        for (const [, b] of EDGES) indeg[b] += 1;
+        const out = [], done = new Array(9).fill(false);
+        while (out.length < 9) {
+          const next = indeg.findIndex((d, i) => !done[i] && d === 0);
+          if (next < 0) break;
+          done[next] = true;
+          out.push(next);
+          for (const [a, b] of EDGES) if (a === next) indeg[b] -= 1;
+        }
+        return out;
+      })();
+
+      let states = new Array(9).fill(PENDING);
+      let at = 0, last = performance.now();
+      const paint = () => { plot.set_graph_colors(h, states, undefined); ui.markDirty(); };
+      paint();
+
+      const dim = (hex) => {
+        const v = parseInt(hex.slice(1), 16);
+        const q = (x) => (x >> 2) + 12;
+        return '#' + ((q(v >> 16 & 255) << 16) | (q(v >> 8 & 255) << 8) | q(v & 255))
+          .toString(16).padStart(6, '0');
+      };
+      // Everything the hovered task waits on, straight from the engine, so
+      // the browser and the terminal agree on what a highlight means.
+      const upstream = (i) => plot_reachable(9, new Uint32Array(EDGES.flat()), i, true);
+
+      return {
+        tick() {
+          const now = performance.now();
+          const over = at >= order.length && !states.includes(RUNNING);
+          if (now - last < (over ? RESTART_MS : STEP_MS)) return;
+          last = now;
+          if (over) { states = new Array(9).fill(PENDING); at = 0; paint(); return; }
+          states = states.map((s, i) => (s === RUNNING ? (i === FAILS ? FAILED : DONE) : s));
+          while (at < order.length) {
+            const next = order[at];
+            at += 1;
+            // A task whose upstream failed never runs — which is what makes
+            // the failure legible on everything downstream of it.
+            const blocked = EDGES.some(([a, b]) => b === next && states[a] !== DONE);
+            if (!blocked) { states[next] = RUNNING; break; }
+          }
+          paint();
+        },
+        hover(hit) {
+          if (hit && !hit.isEdge && hit.index < 9) {
+            const on = upstream(hit.index);
+            plot.set_graph_colors(
+              h,
+              states.map((c, j) => (on[j] ? c : dim(c))),
+              EDGES.map(([a, b]) => (on[a] && on[b] ? '#aab0b8' : '#282d3c')),
+            );
+          } else {
+            plot.set_graph_colors(h, states, undefined);
+          }
+          ui.markDirty();
+        },
+        tooltip(hit) {
+          if (hit.isEdge) {
+            const [a, b] = EDGES[hit.index];
+            return `<span class="sw" style="background:${T2}"></span>${TASKS[a]} → ${TASKS[b]}`;
+          }
+          if (hit.index >= 9) return '';
+          const waits = upstream(hit.index).reduce((n, on) => n + (on ? 1 : 0), 0) - 1;
+          return `<span class="sw" style="background:${states[hit.index]}"></span>`
+            + `${TASKS[hit.index]}<br>waits on ${waits}`;
+        },
+      };
+    },
+  },
+
   bars2d: {
     is3d: false, hover2d: true,
     setup(plot) {
@@ -1372,6 +1487,8 @@ function showFallback() {
     const wasm = await mod.default({ module_or_path: new URL('./pkg/plotui_wasm_bg.wasm?v=1', document.baseURI) });
     Plot = mod.Plot;
     ForceLayout = mod.ForceLayout;
+    LayeredLayout = mod.LayeredLayout;
+    plot_reachable = mod.reachable;
     marching_cubes = mod.marching_cubes;
     catmull_rom = mod.catmull_rom;
     tube = mod.tube;

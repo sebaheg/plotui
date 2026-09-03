@@ -8,8 +8,13 @@
 //! crate is that single home, so Python and Go callers see identical
 //! behavior down to the error text.
 
+pub mod dot;
+
+pub use dot::{parse_dot, plot_from_dot, DotEdge, DotGraph, DotNode};
+
 use plotui_core::{
-    BarMode, BinSpec, Colormap, Element, ErrBars, Interp, Orient, Plot, RangeHit, Rgb, Shape, YAxis,
+    BarMode, BinSpec, Colormap, Direction, Element, ErrBars, Interp, NodeShape, Orient, Plot,
+    RangeHit, RankDir, Rgb, Shape, YAxis,
 };
 
 /// Default edge pick radius as a fraction of the node pick radius (the
@@ -80,6 +85,88 @@ pub fn parse_shapes<S: AsRef<str>>(names: &[S]) -> Result<Vec<Shape>, BindError>
             })
         })
         .collect()
+}
+
+/// Per-node graph silhouettes by name; an unknown name is an error. The
+/// counterpart of [`parse_shapes`] for [`Trace::Graph2d`](plotui_core::Trace),
+/// whose boxes are a different vocabulary from the scatter markers.
+pub fn parse_node_shapes<S: AsRef<str>>(names: &[S]) -> Result<Vec<NodeShape>, BindError> {
+    names
+        .iter()
+        .map(|name| {
+            let name = name.as_ref();
+            NodeShape::parse(name).ok_or_else(|| {
+                BindError::invalid(format!(
+                    "unknown node shape {name:?}; expected one of {}",
+                    NodeShape::NAMES.join(", ")
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Validate a graph's CSR edge routes: one start per edge, non-decreasing,
+/// and none of them past the end of the waypoint list. The renderer
+/// tolerates a malformed pair by drawing straight edges, but a binding
+/// caller wants to hear about it.
+pub fn check_routes(n_edges: usize, n_pts: usize, starts: &[u32]) -> Result<(), BindError> {
+    if starts.is_empty() {
+        return Ok(());
+    }
+    if starts.len() != n_edges {
+        return Err(BindError::invalid(format!(
+            "routes must have one entry per edge; got {} for {n_edges} edges",
+            starts.len()
+        )));
+    }
+    let mut prev = 0u32;
+    for (e, &s) in starts.iter().enumerate() {
+        if s < prev {
+            return Err(BindError::invalid(format!(
+                "route starts must not go backwards; edge {e} starts at {s} after {prev}"
+            )));
+        }
+        if s as usize > n_pts {
+            return Err(BindError::invalid(format!(
+                "route start {s} for edge {e} is past the {n_pts} waypoints given"
+            )));
+        }
+        prev = s;
+    }
+    Ok(())
+}
+
+/// Flatten per-edge waypoint lists into the CSR pair the core takes — the
+/// nested-to-flat step [`flatten_box_groups`] does for box groups, for the
+/// bindings that hand routes over as a list of lists.
+pub fn flatten_routes(routes: Vec<Vec<[f32; 2]>>) -> (Vec<[f32; 2]>, Vec<u32>) {
+    let mut pts = Vec::new();
+    let mut starts = Vec::with_capacity(routes.len());
+    for r in routes {
+        starts.push(pts.len() as u32);
+        pts.extend(r);
+    }
+    (pts, starts)
+}
+
+/// Which nodes lie upstream (or downstream) of `from` — the shared closure
+/// behind "hover a task, light everything it waits on". Just
+/// [`plotui_core::reachable`] with the bindings' boolean spelling of the
+/// direction, so no frontend has to name the enum.
+pub fn reachable(n: usize, edges: &[(u32, u32)], from: usize, upstream: bool) -> Vec<bool> {
+    let dir = if upstream { Direction::Upstream } else { Direction::Downstream };
+    plotui_core::reachable(n, edges, from, dir)
+}
+
+/// A layout flow direction by name (`"TB"`/`"TD"` or `"LR"`,
+/// case-insensitive); an unknown name is an error.
+pub fn parse_rankdir(name: &str) -> Result<RankDir, BindError> {
+    RankDir::parse(name).ok_or_else(|| {
+        BindError::invalid(format!(
+            "unknown rankdir {name:?}; expected one of {}",
+            RankDir::NAMES.join(", ")
+        ))
+    })
 }
 
 /// Color-name shorthands, CSS values, shared by every binding. Sorted, so
@@ -440,8 +527,15 @@ pub fn set_point_styles(
 
 /// The graph node-color rule: one color per node, padding or truncating a
 /// partial `node_colors` with the uniform fallback.
+///
+/// A graph with *no* nodes keeps whatever list it was given rather than
+/// coming back empty. Such a trace exists only for its legend row — a
+/// pipeline's four state colours need a key, and a key is what the legend
+/// is — and the row's swatch is read from the first node colour, so
+/// truncating to zero would drain the one thing about it that matters.
 pub fn graph_node_colors(n: usize, node_colors: Option<Vec<Rgb>>, uniform: Rgb) -> Vec<Rgb> {
     match node_colors {
+        Some(c) if n == 0 => c,
         Some(c) => (0..n).map(|i| c.get(i).copied().unwrap_or(uniform)).collect(),
         None => vec![uniform; n],
     }
@@ -621,6 +715,43 @@ mod tests {
         // "off" is directionless: it names itself and parses back uninverted.
         assert_eq!(camera_control_name(C::Off, true), "off");
         assert_eq!(parse_camera_control("off").unwrap(), (C::Off, false));
+    }
+
+    #[test]
+    fn graph_node_colors_pads_but_never_drains_a_legend_only_trace() {
+        let uniform = [1, 2, 3];
+        assert_eq!(graph_node_colors(3, None, uniform), vec![uniform; 3]);
+        // A short list pads with the uniform colour rather than truncating.
+        assert_eq!(
+            graph_node_colors(3, Some(vec![[9, 9, 9]]), uniform),
+            vec![[9, 9, 9], uniform, uniform]
+        );
+        // A node-less graph is a legend row; its colour is all it has.
+        assert_eq!(graph_node_colors(0, Some(vec![[9, 9, 9]]), uniform), vec![[9, 9, 9]]);
+        assert!(graph_node_colors(0, None, uniform).is_empty());
+    }
+
+    #[test]
+    fn routes_are_validated_as_csr() {
+        assert!(check_routes(2, 3, &[]).is_ok(), "no routes is always fine");
+        assert!(check_routes(2, 3, &[0, 2]).is_ok());
+        assert_eq!(
+            check_routes(2, 3, &[0]).unwrap_err().msg,
+            "routes must have one entry per edge; got 1 for 2 edges"
+        );
+        assert_eq!(
+            check_routes(2, 3, &[2, 0]).unwrap_err().msg,
+            "route starts must not go backwards; edge 1 starts at 0 after 2"
+        );
+        assert_eq!(
+            check_routes(2, 3, &[0, 9]).unwrap_err().msg,
+            "route start 9 for edge 1 is past the 3 waypoints given"
+        );
+        // Flattening is the inverse: nested runs in, CSR out.
+        let (pts, starts) = flatten_routes(vec![vec![], vec![[1.0, 2.0], [3.0, 4.0]], vec![]]);
+        assert_eq!(pts, vec![[1.0, 2.0], [3.0, 4.0]]);
+        assert_eq!(starts, vec![0, 0, 2]);
+        assert!(check_routes(3, pts.len(), &starts).is_ok());
     }
 
     #[test]

@@ -80,3 +80,106 @@ func (l *ForceLayout) AddNode(neighbors []uint32) int {
 	C.plotui_layout_add_node(l.h, np, C.size_t(len(neighbors)), &idx)
 	return int(idx)
 }
+
+// LayeredLayout is a hierarchical ("Sugiyama") layout for a directed graph:
+// rank the nodes by depth, order each rank to reduce edge crossings, then
+// place them so edges run as straight as they can. Solved in the
+// constructor — there is nothing to step, because a pipeline has one right
+// shape and watching a simulation converge on it says nothing about the
+// pipeline.
+//
+// Feed Positions and Routes straight to Plot.AddGraph2D. Deterministic:
+// same input, same output, no randomness anywhere. Like Plot, not
+// thread-safe: one goroutine at a time.
+type LayeredLayout struct {
+	h      *C.PlotuiLayeredLayout
+	nNodes int
+	nEdges int
+}
+
+// NewLayeredLayout lays out n nodes connected by edges as (from, to) index
+// pairs, flowing in rankdir — "TB" (sources on top; also the empty-string
+// default) or "LR" (sources on the left). Self-loops and out-of-range
+// endpoints are kept inert, so an edge list can be passed verbatim from the
+// plot; cycles do not hang, since a back edge is reversed for the layout
+// only. An unknown rankdir returns the shared parse error.
+func NewLayeredLayout(n int, edges [][2]uint32, rankdir string) (*LayeredLayout, error) {
+	var ep *C.uint32_t
+	if len(edges) > 0 {
+		ep = (*C.uint32_t)(unsafe.Pointer(&edges[0][0]))
+	}
+	var cdir *C.char
+	if rankdir != "" {
+		cdir = C.CString(rankdir)
+		defer C.free(unsafe.Pointer(cdir))
+	}
+	h := C.plotui_layered_layout_new(C.size_t(n), ep, C.size_t(len(edges)), cdir)
+	if h == nil {
+		return nil, &Error{Code: -1, Message: C.GoString(C.plotui_last_error())}
+	}
+	l := &LayeredLayout{h: h, nNodes: n, nEdges: len(edges)}
+	runtime.SetFinalizer(l, (*LayeredLayout).Close)
+	return l, nil
+}
+
+// Close frees the engine-side layout. Safe to call twice.
+func (l *LayeredLayout) Close() {
+	if l.h != nil {
+		C.plotui_layered_layout_free(l.h)
+		l.h = nil
+		runtime.SetFinalizer(l, nil)
+	}
+}
+
+// Positions returns the node centres as xs, ys slices in the caller's index
+// order, and each node's rank (0 for a source, one more than its deepest
+// predecessor otherwise).
+func (l *LayeredLayout) Positions() (xs, ys []float32, ranks []uint32) {
+	if l.nNodes == 0 {
+		return nil, nil, nil
+	}
+	flat := make([]float32, l.nNodes*2)
+	ranks = make([]uint32, l.nNodes)
+	C.plotui_layered_layout_positions(l.h,
+		(*C.float)(unsafe.Pointer(&flat[0])),
+		(*C.uint32_t)(unsafe.Pointer(&ranks[0])))
+	xs, ys = make([]float32, l.nNodes), make([]float32, l.nNodes)
+	for i := 0; i < l.nNodes; i++ {
+		xs[i], ys[i] = flat[i*2], flat[i*2+1]
+	}
+	return xs, ys, ranks
+}
+
+// Routes returns each edge's waypoints — one list of (x, y) points per edge,
+// in the caller's edge order and direction, empty for a straight edge. Pass
+// it straight to Plot.AddGraph2D via WithRoutes.
+func (l *LayeredLayout) Routes() [][][2]float32 {
+	if l.nEdges == 0 {
+		return nil
+	}
+	n := int(C.plotui_layered_layout_route_count(l.h))
+	flat := make([]float32, n*2)
+	starts := make([]uint32, l.nEdges)
+	var fp *C.float
+	if n > 0 {
+		fp = (*C.float)(unsafe.Pointer(&flat[0]))
+	}
+	C.plotui_layered_layout_routes(l.h, fp, (*C.uint32_t)(unsafe.Pointer(&starts[0])))
+	out := make([][][2]float32, l.nEdges)
+	for e := 0; e < l.nEdges; e++ {
+		a := int(starts[e])
+		b := n
+		if e+1 < l.nEdges {
+			b = int(starts[e+1])
+		}
+		if a > b || b > n {
+			continue
+		}
+		run := make([][2]float32, 0, b-a)
+		for i := a; i < b; i++ {
+			run = append(run, [2]float32{flat[i*2], flat[i*2+1]})
+		}
+		out[e] = run
+	}
+	return out
+}

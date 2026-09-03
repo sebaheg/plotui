@@ -38,6 +38,9 @@ type traceOpts struct {
 	nodeSizes     []float32
 	edgeColors    []RGB
 	nodeShapes    []string
+	labels        []string
+	directed      bool
+	routes        [][][2]float32
 	step          string
 	bins          int
 	binWidth      float64
@@ -117,6 +120,29 @@ func WithEdgeColors(colors []RGB) TraceOption { return func(o *traceOpts) { o.ed
 // WithNodeShapes picks a marker silhouette per node: "disc", "ring",
 // "square", "triangle", "diamond", "diamond-open", "dot".
 func WithNodeShapes(shapes []string) TraceOption { return func(o *traceOpts) { o.nodeShapes = shapes } }
+
+// WithLabels names each node of a 2D graph; the box is sized to its label.
+// A short list leaves the remaining nodes unlabelled rather than dropping
+// them.
+func WithLabels(labels []string) TraceOption { return func(o *traceOpts) { o.labels = labels } }
+
+// WithDirected draws (or, with false, omits) the arrowhead at each edge's
+// target end of a 2D graph. Directed is the default.
+func WithDirected(directed bool) TraceOption { return func(o *traceOpts) { o.directed = directed } }
+
+// WithNodeShapeNames picks a box silhouette per node of a 2D graph:
+// "rounded" (the default), "box", "ellipse", "diamond", plus DOT's synonyms.
+// This is the 2D counterpart of WithNodeShapes, whose marker vocabulary a
+// labelled box does not share.
+func WithNodeShapeNames(shapes []string) TraceOption {
+	return func(o *traceOpts) { o.nodeShapes = shapes }
+}
+
+// WithRoutes gives each edge of a 2D graph its waypoints — what
+// LayeredLayout.Routes returns — with an empty list for a straight edge.
+func WithRoutes(routes [][][2]float32) TraceOption {
+	return func(o *traceOpts) { o.routes = routes }
+}
 
 func applyOpts(seed traceOpts, opts []TraceOption) (traceOpts, error) {
 	for _, opt := range opts {

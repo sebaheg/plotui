@@ -4,7 +4,9 @@
 //! compared within one process) rather than hard-coded image hashes, so they
 //! hold on any platform regardless of libm rounding in the camera trig.
 
-use plotui_core::{draw_text, nice_ticks, Element, Framebuffer, Plot, TraceError, YAxis, PALETTE};
+use plotui_core::{
+    draw_text, nice_ticks, Element, Framebuffer, NodeShape, Plot, TraceError, YAxis, PALETTE,
+};
 
 /// FNV-1a over the RGBA buffer — stable fingerprint for same-process compares.
 fn hash(fb: &Framebuffer) -> u64 {
@@ -109,6 +111,8 @@ fn render_is_deterministic() {
     assert_eq!(hash(&p.render(320, 200)), hash(&p.render(320, 200)));
     let p2 = demo_2d();
     assert_eq!(hash(&p2.render(320, 200)), hash(&p2.render(320, 200)));
+    let p3 = demo_graph2d();
+    assert_eq!(hash(&p3.render(320, 200)), hash(&p3.render(320, 200)));
 }
 
 #[test]
@@ -1340,7 +1344,7 @@ fn extend_graph_renders_like_one_shot_and_keeps_flat_slots() {
     let all: Vec<[f32; 3]> = base.iter().chain(&extra).copied().collect();
     let (oneshot, _) = graph_at(&all, &[(0, 1), (1, 2)]);
     let (mut inc, h) = graph_at(&base, &[(0, 1)]);
-    inc.extend_graph(h, &extra, &[[200, 120, 90]], &[(1, 2)]).unwrap();
+    inc.extend_graph(h, &extra, &[[200, 120, 90]], &[(1, 2)], None).unwrap();
     assert_eq!(
         hash(&inc.render(300, 200)),
         hash(&oneshot.render(300, 200)),
@@ -1364,7 +1368,7 @@ fn extend_graph_renders_like_one_shot_and_keeps_flat_slots() {
     p.bounds_override = Some(([-1.0; 3], [3.0; 3]));
     p.selected = Some(Element::Node(2)); // the scatter's point
     p.hovered = Some(Element::Edge(0));
-    p.extend_graph(g, &extra, &[[200, 120, 90]], &[(1, 2)]).unwrap();
+    p.extend_graph(g, &extra, &[[200, 120, 90]], &[(1, 2)], None).unwrap();
     assert_eq!(p.selected, Some(Element::Node(3)), "downstream node index remapped");
     assert_eq!(p.hovered, Some(Element::Edge(0)), "edge before the append keeps its index");
 }
@@ -1381,7 +1385,7 @@ fn graph_mutator_error_paths() {
         p.set_graph_colors(h, vec![[0; 3]; 2], Some(vec![])),
         Err(TraceError::LengthMismatch)
     );
-    assert_eq!(p.extend_graph(s, &[], &[], &[]), Err(TraceError::WrongKind));
+    assert_eq!(p.extend_graph(s, &[], &[], &[], None), Err(TraceError::WrongKind));
     // The failed calls must not have desynced anything: a good call still works.
     assert!(p.set_graph_positions(h, vec![[0.5; 3], [1.5; 3]]).is_ok());
 }
@@ -1482,4 +1486,346 @@ fn legend_overlay_matches_the_rendered_legend() {
     for i in &lit {
         assert_eq!(&full[i * 4..i * 4 + 3], &overlay[i * 4..i * 4 + 3], "pixel {i} differs");
     }
+}
+
+// --- 2D graphs (Graph2d) ---
+
+/// The node card fill: `Chrome::default().bg` lightened by 8, so a box reads
+/// as a panel over the frame rather than as a hole in it.
+const CARD: [u8; 3] = [34, 38, 52];
+
+/// A two-node pipeline with contrasting colours on the nodes and the wire, at
+/// a size whose text scale is 1 — the bitmap font writes its ink unblended,
+/// which is what lets a probe compare against an exact colour.
+fn demo_graph2d() -> Plot {
+    let mut p = Plot::new();
+    p.add_graph2d(
+        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        None,
+        Some(vec![[10, 10, 250]]),
+        None,
+        None,
+    );
+    p
+}
+
+#[test]
+fn graph2d_draws_labels_boxes_and_arrowheads() {
+    let fb = demo_graph2d().render(300, 220);
+    assert!(has_color(&fb, CARD), "node boxes are filled with the card colour");
+    for c in [[250, 10, 10], [10, 250, 10], [10, 10, 250]] {
+        assert!(has_color(&fb, c), "{c:?} must reach the pixels");
+    }
+
+    // Labels go into the framebuffer (never an overlay), so their ink is on
+    // the buffer — and it has to be inside a box, not floating beside one.
+    let px = drawn_pixels(&fb);
+    let fill: Vec<_> = px.iter().filter(|(_, _, c)| *c == CARD).collect();
+    assert!(!fill.is_empty());
+    let (x0, x1) =
+        (fill.iter().map(|f| f.0).min().unwrap(), fill.iter().map(|f| f.0).max().unwrap());
+    let (y0, y1) =
+        (fill.iter().map(|f| f.1).min().unwrap(), fill.iter().map(|f| f.1).max().unwrap());
+    assert!(
+        px.iter().any(|(x, y, c)| {
+            *c == [205, 210, 220] && (x0..=x1).contains(x) && (y0..=y1).contains(y)
+        }),
+        "label ink must land inside the node boxes"
+    );
+
+    // The arrowhead is a filled triangle in the edge colour, so somewhere the
+    // wire is several pixels wide across a row; the 1px stroke never is.
+    let mut per_row = std::collections::BTreeMap::<usize, usize>::new();
+    for (_, y, _) in px.iter().filter(|(_, _, c)| *c == [10, 10, 250]) {
+        *per_row.entry(*y).or_default() += 1;
+    }
+    let widest = per_row.values().copied().max().unwrap_or(0);
+    assert!(widest >= 4, "no arrowhead: widest edge row is {widest}px");
+}
+
+#[test]
+fn graph2d_alone_hides_axes_and_show_axes_restores_them() {
+    const FRAME: [u8; 3] = [70, 78, 96];
+    let mut p = demo_graph2d();
+    assert!(!has_color(&p.render(300, 220), FRAME), "a graph-only frame draws no axis rules");
+    p.set_show_axes(true);
+    assert!(has_color(&p.render(300, 220), FRAME), "show_axes = true restores them");
+    p.set_show_axes(None);
+    assert!(!has_color(&p.render(300, 220), FRAME), "None restores the automatic rule");
+
+    // One ordinary 2D trace alongside the graph brings the chrome back: its
+    // values *are* measurements, and they need a scale to be read against.
+    let mut mixed = demo_graph2d();
+    mixed.add_line2d(vec![0.0, 1.0], vec![0.0, 1.0], PALETTE[0], 2.0, None, YAxis::Primary);
+    assert!(has_color(&mixed.render(300, 220), FRAME), "a mixed frame keeps its axes");
+
+    // And show_axes = false hides the chrome on an ordinary chart too. The
+    // series is unnamed on purpose: the legend keeps its own frame-coloured
+    // border either way, because hiding the axes is not hiding the legend.
+    let mut chart = Plot::new();
+    chart.add_line2d(
+        vec![0.0, 1.0, 2.0],
+        vec![0.0, 1.0, 0.5],
+        PALETTE[0],
+        2.0,
+        None,
+        YAxis::Primary,
+    );
+    assert!(has_color(&chart.render(300, 220), FRAME));
+    chart.set_show_axes(false);
+    assert!(!has_color(&chart.render(300, 220), FRAME));
+}
+
+#[test]
+fn graph2d_node_shapes_and_routes_change_the_drawing() {
+    let base = hash(&demo_graph2d().render(300, 220));
+
+    let mut shaped = Plot::new();
+    shaped.add_graph2d(
+        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        Some(vec![NodeShape::Ellipse, NodeShape::Diamond]),
+        Some(vec![[10, 10, 250]]),
+        None,
+        None,
+    );
+    assert_ne!(hash(&shaped.render(300, 220)), base, "node shapes must change the pixels");
+
+    // A waypoint bends the edge away from the straight run between the boxes.
+    let mut routed = demo_graph2d();
+    let mut with_route = Plot::new();
+    with_route.add_graph2d(
+        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        None,
+        Some(vec![[10, 10, 250]]),
+        Some((vec![[0.6, 0.5]], vec![0])),
+        None,
+    );
+    assert_ne!(
+        hash(&with_route.render(300, 220)),
+        hash(&routed.render(300, 220)),
+        "an edge waypoint must route the edge somewhere else"
+    );
+    routed.set_show_axes(false);
+    assert_eq!(
+        hash(&routed.render(300, 220)),
+        base,
+        "pinning show_axes off matches what the automatic rule already did"
+    );
+}
+
+#[test]
+fn graph2d_pick_element_hits_boxes_and_edges() {
+    let (w, h) = (400usize, 300usize);
+    let p = demo_graph2d();
+    let nodes = p.project_nodes(w, h);
+    assert_eq!(nodes.len(), 2, "a 2D graph's nodes are in the flat index space");
+    assert_eq!(p.node_count(), 2);
+
+    // A node is its box: the centre hits, and so does a point well off the
+    // centre that is still inside the box.
+    for (i, n) in nodes.iter().enumerate() {
+        assert_eq!(
+            p.pick_element(w, h, n[0], n[1], 0.0, 0.0),
+            Some(Element::Node(i)),
+            "node {i} must pick at its own centre"
+        );
+        assert_eq!(
+            p.pick_element(w, h, n[0] + 12.0, n[1], 0.0, 0.0),
+            Some(Element::Node(i)),
+            "node {i} must pick off-centre but inside its box"
+        );
+    }
+
+    // The edge runs between the two boxes; its midpoint picks the edge, not
+    // either node, because nodes take priority only where they actually are.
+    let mid = [(nodes[0][0] + nodes[1][0]) * 0.5, (nodes[0][1] + nodes[1][1]) * 0.5];
+    assert_eq!(
+        p.pick_element(w, h, mid[0], mid[1], 0.0, 3.0),
+        Some(Element::Edge(0)),
+        "the wire between the boxes must pick the edge"
+    );
+
+    // Far from everything: nothing.
+    assert_eq!(p.pick_element(w, h, 2.0, 2.0, 4.0, 4.0), None);
+}
+
+#[test]
+fn project_nodes_matches_pick_in_2d() {
+    // The projected position of every node must be exactly where picking
+    // finds it — the two must never be solved separately.
+    let (w, h) = (500usize, 360usize);
+    let mut p = demo_graph2d();
+    p.camera.zoom_by(1.7);
+    p.camera.pan(11.0, -6.0);
+    for (i, n) in p.project_nodes(w, h).iter().enumerate() {
+        assert_eq!(p.pick(w, h, n[0], n[1], 0.0), Some(i), "node {i} moved under the camera");
+        assert_eq!(n[2], 0.0, "a 2D node reports no depth");
+    }
+}
+
+#[test]
+fn graph2d_hover_and_selection_light_nodes_and_edges() {
+    let (w, h) = (400usize, 300usize);
+    let mut p = demo_graph2d();
+    let plain = hash(&p.render(w, h));
+    for el in [Element::Node(0), Element::Node(1), Element::Edge(0)] {
+        p.hovered = Some(el);
+        let lit = p.render(w, h);
+        assert_ne!(hash(&lit), plain, "{el:?} hovered must change the frame");
+        assert!(has_color(&lit, [255, 255, 255]), "{el:?} hovered must light up white");
+        p.hovered = None;
+        p.selected = Some(el);
+        assert_ne!(hash(&p.render(w, h)), plain, "{el:?} selected must change the frame");
+        p.selected = None;
+    }
+    assert_eq!(hash(&p.render(w, h)), plain, "clearing both restores the frame exactly");
+}
+
+#[test]
+fn graph2d_is_structural_and_extend_graph_grows_it() {
+    let mut p = demo_graph2d();
+    let h = 0;
+    assert_eq!(p.extend_xy(h, &[0.0], &[0.0]), Err(TraceError::Structural));
+
+    let one_shot = {
+        let mut q = Plot::new();
+        q.add_graph2d(
+            vec![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+            vec!["alpha".into(), "beta".into(), "gamma".into()],
+            vec![[250, 10, 10], [10, 250, 10], [80, 80, 80]],
+            vec![(0, 1), (1, 2)],
+            true,
+            None,
+            Some(vec![[10, 10, 250], [10, 10, 250]]),
+            None,
+            None,
+        );
+        q
+    };
+    p.extend_graph(h, &[[1.0, 0.0, 0.0]], &[[80, 80, 80]], &[(1, 2)], Some(&["gamma".into()]))
+        .unwrap();
+    // The appended edge inherits the trace's default colour rule, so the
+    // one-shot build names it explicitly to match.
+    p.set_graph_colors(
+        h,
+        vec![[250, 10, 10], [10, 250, 10], [80, 80, 80]],
+        Some(vec![[10, 10, 250]; 2]),
+    )
+    .unwrap();
+    assert_eq!(p.node_count(), 3, "appended nodes join the flat index space");
+    assert_eq!(
+        hash(&p.render(320, 240)),
+        hash(&one_shot.render(320, 240)),
+        "append must render exactly like a one-shot build"
+    );
+}
+
+#[test]
+fn graph2d_mutators_move_recolor_and_reroute() {
+    let target = vec![[0.0, 2.0, 0.0], [1.0, 0.0, 0.0]];
+    let one_shot = {
+        let mut q = Plot::new();
+        q.add_graph2d(
+            vec![[0.0, 2.0], [1.0, 0.0]],
+            vec!["alpha".into(), "beta".into()],
+            vec![[250, 10, 10], [10, 250, 10]],
+            vec![(0, 1)],
+            true,
+            None,
+            Some(vec![[10, 10, 250]]),
+            None,
+            None,
+        );
+        q
+    };
+    // Start much wider than the target, so a widen-only bounds cache would
+    // keep the old frame and the hashes would differ.
+    let mut p = Plot::new();
+    let h = p.add_graph2d(
+        vec![[-9.0, 9.0], [9.0, -9.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        None,
+        Some(vec![[10, 10, 250]]),
+        None,
+        None,
+    );
+    p.set_graph_positions(h, target).unwrap();
+    assert_eq!(
+        hash(&p.render(320, 240)),
+        hash(&one_shot.render(320, 240)),
+        "a moved 2D graph must render like one built in place (bounds must shrink)"
+    );
+
+    // Muting survives a relayout: it is the host's intent, not geometry.
+    p.set_muted(h, true).unwrap();
+    p.set_graph_positions(h, vec![[0.0, 2.0, 0.0], [1.0, 0.0, 0.0]]).unwrap();
+    assert!(!has_color(&p.render(320, 240), CARD), "a muted graph stays hidden across a relayout");
+    p.set_muted(h, false).unwrap();
+
+    let straight = hash(&p.render(320, 240));
+    p.set_graph_routes(h, vec![[1.0, 2.0]], vec![0]).unwrap();
+    assert_ne!(hash(&p.render(320, 240)), straight, "a waypoint must reroute the edge");
+    p.set_graph_routes(h, vec![], vec![]).unwrap();
+    assert_eq!(hash(&p.render(320, 240)), straight, "clearing routes restores straight edges");
+
+    assert_eq!(p.set_graph_routes(99, vec![], vec![]), Err(TraceError::UnknownTrace));
+    assert_eq!(p.set_graph_routes(h, vec![], vec![0, 1, 2]), Err(TraceError::LengthMismatch));
+    assert_eq!(p.set_graph_positions(h, vec![[0.0; 3]]), Err(TraceError::LengthMismatch));
+    assert_eq!(p.set_graph_colors(h, vec![[0; 3]], None), Err(TraceError::LengthMismatch));
+}
+
+#[test]
+fn a_named_graph_keeps_its_nodes_clear_of_the_legend() {
+    // On a chart the legend merely overlaps some data; on a graph it would
+    // cover a *node*, which is a task missing from the pipeline. The frame
+    // reserves the legend's width, so no box reaches under it.
+    let (w, h) = (420usize, 300usize);
+    let mut p = Plot::new();
+    p.add_graph2d(
+        // Two nodes side by side, so one of them is as far right as the
+        // layout goes — exactly where the legend sits.
+        vec![[0.0, 0.0], [1.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![],
+        true,
+        None,
+        None,
+        None,
+        Some("nightly forecast".into()),
+    );
+    let fb = p.render(w, h);
+    let px = drawn_pixels(&fb);
+    // With the chrome hidden the frame colour appears only in the legend's
+    // border, so its leftmost pixel is the legend's left edge.
+    let legend_left =
+        px.iter().filter(|(_, _, c)| *c == [70, 78, 96]).map(|f| f.0).min().expect("a legend");
+    // The rightmost node's box, measured on the row through its centre —
+    // the legend sits well above that row, so nothing else can be there.
+    let row = p.project_nodes(w, h).iter().map(|n| n[1]).fold(0.0f32, f32::max).round() as usize;
+    let box_right = px
+        .iter()
+        .filter(|(_, y, c)| *y == row && *c == CARD)
+        .map(|f| f.0)
+        .max()
+        .expect("a node box on the node row");
+    assert!(
+        box_right < legend_left,
+        "a node box reaches under the legend: box to {box_right}, legend from {legend_left}"
+    );
 }

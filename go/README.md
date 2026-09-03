@@ -50,6 +50,30 @@ base → calendar ticks), and the gesture calls `RangeSliderHit`,
 (see `window.go`). Interactive teaplot wiring is not built in yet — forward
 mouse events to these calls from your `Update`.
 
+Pipelines and DAGs go through `AddGraph2D` — labelled boxes wired by
+directed edges, with per-node colour a running pipeline can repaint live:
+
+```go
+// Straight from a DOT file, laid out and ready to render:
+p, h, err := plotui.PlotFromDOT(dot, "")   // "" honours the file's rankdir
+
+// Or lay one out yourself:
+l, _ := plotui.NewLayeredLayout(len(tasks), edges, "TB")
+defer l.Close()
+xs, ys, _ := l.Positions()
+h, _ := p.AddGraph2D(xs, ys, edges,
+    plotui.WithLabels(tasks),
+    plotui.WithRoutes(l.Routes()),          // long edges route around ranks
+    plotui.WithNodeColors(states))
+_ = p.SetGraphColors(h, states, nil)        // repaint as the run advances
+
+// Hover a task and light everything it waits on:
+lit := plotui.Reachable(len(tasks), edges, hovered, true)
+```
+
+A graph-only frame draws no axes; `SetShowAxes(true)` forces them back on
+and `SetShowAxesAuto()` restores the automatic rule.
+
 Zero-option calls reproduce the Python binding's defaults exactly (palette
 auto-assignment included), and error messages are byte-identical across
 bindings.

@@ -329,6 +329,70 @@ impl Plot {
         Ok(self.inner.add_graph3d(nodes, colors, edges, size, node_sizes, ec, shapes, name))
     }
 
+    /// Add a directed graph in the 2D plane: labelled boxes at (xs, ys),
+    /// wired by `edges` as (from, to) index pairs. This is the pipeline /
+    /// DAG chart — pair it with `LayeredLayout` for the positions, or place
+    /// the nodes yourself.
+    ///
+    /// `labels` names the boxes (defaulting to unlabelled); `node_colors`
+    /// takes one colour per node, which is the channel a live pipeline
+    /// repaints through `set_graph_colors`; `node_shapes` takes "rounded",
+    /// "box", "ellipse" or "diamond" per node, and an unknown name is a
+    /// ValueError. `routes` gives each edge its waypoints as a list of
+    /// (x, y) lists — what `LayeredLayout.routes()` returns — with an empty
+    /// list for a straight edge. `directed=False` drops the arrowheads.
+    ///
+    /// Node *centres* are in data coordinates but their boxes are sized in
+    /// pixels from the label, so zooming spreads the graph apart while the
+    /// text stays legible. A plot whose visible 2D traces are all graphs
+    /// draws no axes; see the `show_axes` property.
+    #[pyo3(signature = (
+        xs, ys, edges, labels=None, directed=true, node_colors=None, color=None,
+        node_shapes=None, edge_colors=None, routes=None, name=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_graph2d(
+        &mut self,
+        xs: Coords,
+        ys: Coords,
+        edges: Vec<(u32, u32)>,
+        labels: Option<Vec<String>>,
+        directed: bool,
+        node_colors: Option<Vec<ColorArg>>,
+        color: Option<ColorArg>,
+        node_shapes: Option<Vec<String>>,
+        edge_colors: Option<Vec<ColorArg>>,
+        routes: Option<Vec<Vec<(f32, f32)>>>,
+        name: Option<String>,
+    ) -> PyResult<usize> {
+        let uniform = resolve_color(&self.inner, color)?;
+        let n = xs.0.len().min(ys.0.len());
+        let nodes: Vec<[f32; 2]> = (0..n).map(|i| [xs.0[i], ys.0[i]]).collect();
+        let labels = labels.unwrap_or_default();
+        // Short lists pad rather than truncate, the way the per-point style
+        // arrays do: a partial mapping must never drop a node.
+        let labels: Vec<String> =
+            (0..n).map(|i| labels.get(i).cloned().unwrap_or_default()).collect();
+        let nc = node_colors.map(rgb_list).transpose()?;
+        let colors = plotui_bind::graph_node_colors(n, nc, uniform);
+        let ec = edge_colors.map(rgb_list).transpose()?;
+        let shapes = match node_shapes {
+            Some(names) => Some(plotui_bind::parse_node_shapes(&names).map_err(to_py)?),
+            None => None,
+        };
+        let routes = match routes {
+            None => None,
+            Some(rs) => {
+                let nested: Vec<Vec<[f32; 2]>> =
+                    rs.into_iter().map(|r| r.into_iter().map(|(x, y)| [x, y]).collect()).collect();
+                let (pts, starts) = plotui_bind::flatten_routes(nested);
+                plotui_bind::check_routes(edges.len(), pts.len(), &starts).map_err(to_py)?;
+                Some((pts, starts))
+            }
+        };
+        Ok(self.inner.add_graph2d(nodes, labels, colors, edges, directed, shapes, ec, routes, name))
+    }
+
     /// Add a 3D polyline through (xs, ys, zs) in order — a trajectory or
     /// curve in the same space as `add_scatter3d`. With `color=None`, palette
     /// slots are assigned in fixed order. A NaN vertex breaks the line into
@@ -693,6 +757,17 @@ impl Plot {
         self.inner.set_graph_positions(handle, pts).map_err(trace_to_py)
     }
 
+    /// Replace a 2D graph's edge waypoints — the second half of a relayout,
+    /// after `set_graph_positions` has moved the nodes. `routes` is one list
+    /// of (x, y) points per edge (what `LayeredLayout.routes()` returns);
+    /// pass an empty list to restore straight edges.
+    fn set_graph_routes(&mut self, handle: usize, routes: Vec<Vec<(f32, f32)>>) -> PyResult<()> {
+        let nested: Vec<Vec<[f32; 2]>> =
+            routes.into_iter().map(|r| r.into_iter().map(|(x, y)| [x, y]).collect()).collect();
+        let (pts, starts) = plotui_bind::flatten_routes(nested);
+        self.inner.set_graph_routes(handle, pts, starts).map_err(trace_to_py)
+    }
+
     /// Recolor a graph trace in place — the host-side highlight primitive:
     /// dim everything, brighten a hovered dependency path, restore.
     /// `node_colors` needs one color per node; `edge_colors`, when given,
@@ -745,7 +820,8 @@ impl Plot {
     /// node-bearing trace shifts the flat indices of every node (and edge)
     /// after it — plotui remaps its own selection/hover, hosts holding
     /// indices must do the same.
-    #[pyo3(signature = (handle, xs, ys, zs, node_colors=None, edges=vec![]))]
+    #[pyo3(signature = (handle, xs, ys, zs, node_colors=None, edges=vec![], labels=None))]
+    #[allow(clippy::too_many_arguments)]
     fn extend_graph(
         &mut self,
         handle: usize,
@@ -754,10 +830,16 @@ impl Plot {
         zs: Coords,
         node_colors: Option<Vec<ColorArg>>,
         edges: Vec<(u32, u32)>,
+        labels: Option<Vec<String>>,
     ) -> PyResult<()> {
         let pts = zip3(xs, ys, zs);
         let colors = node_colors.map(rgb_list).transpose()?.unwrap_or_default();
-        self.inner.extend_graph(handle, &pts, &colors, &edges).map_err(trace_to_py)
+        // A 2D graph takes the same (xs, ys, zs) with z dropped, so one call
+        // grows either dimension; `labels` names the new boxes and a 3D
+        // graph, which has no labels, ignores it.
+        self.inner
+            .extend_graph(handle, &pts, &colors, &edges, labels.as_deref())
+            .map_err(trace_to_py)
     }
 
     /// Show or hide a trace by handle. Returns True when the state changed,
@@ -1035,6 +1117,23 @@ impl Plot {
         self.inner.show_box = show;
     }
 
+    /// Whether the 2D frame draws its chrome — grid, axis rules and tick
+    /// labels. `None` (the default) decides automatically: a frame whose
+    /// visible 2D traces are all graphs draws none of it, because a
+    /// pipeline's coordinates are a layout rather than measurements. `True`
+    /// always draws it (useful to see where a layout put its nodes), `False`
+    /// never does. The legend, colorbar, range slider and crosshair are
+    /// unaffected either way, and 3D plots ignore it.
+    #[getter]
+    fn get_show_axes(&self) -> Option<bool> {
+        self.inner.show_axes
+    }
+
+    #[setter]
+    fn set_show_axes(&mut self, show: Option<bool>) {
+        self.inner.set_show_axes(show);
+    }
+
     /// Recolour the chrome (everything that is not data) to sit on the
     /// host's own background. Each is an `(r, g, b)` tuple; omitted ones keep
     /// their current value. `bg` fills the legend box, `frame` draws the
@@ -1295,10 +1394,100 @@ impl ForceLayout {
     }
 }
 
+/// A hierarchical ("Sugiyama") layout for a directed graph: rank the nodes
+/// by depth, order each rank to reduce edge crossings, then place them so
+/// edges run as straight as they can. Solved in the constructor — there is
+/// nothing to step, because a pipeline has one right shape.
+///
+/// Feed `positions()` and `routes()` straight to `Plot.add_graph2d`.
+/// Deterministic: same input, same output, no randomness anywhere.
+#[pyclass]
+struct LayeredLayout {
+    inner: plotui_core::LayeredLayout,
+}
+
+#[pymethods]
+impl LayeredLayout {
+    /// Lay out `n_nodes` connected by `edges` as (from, to) index pairs,
+    /// flowing in `rankdir` — "TB" (sources on top, the default) or "LR"
+    /// (sources on the left). Self-loops and out-of-range endpoints are kept
+    /// inert, so an edge list can be passed verbatim from the plot; cycles
+    /// do not hang, since a back edge is reversed for the layout only.
+    #[new]
+    #[pyo3(signature = (n_nodes, edges, rankdir="TB"))]
+    fn new(n_nodes: usize, edges: Vec<(u32, u32)>, rankdir: &str) -> PyResult<Self> {
+        let dir = plotui_bind::parse_rankdir(rankdir).map_err(to_py)?;
+        Ok(LayeredLayout { inner: plotui_core::LayeredLayout::new(n_nodes, &edges, dir) })
+    }
+
+    /// Node centres as (xs, ys) lists, in the caller's index order.
+    fn positions(&self) -> (Vec<f32>, Vec<f32>) {
+        let pts = self.inner.positions();
+        (pts.iter().map(|p| p[0]).collect(), pts.iter().map(|p| p[1]).collect())
+    }
+
+    /// Each node's rank: 0 for a source, one more than its deepest
+    /// predecessor otherwise.
+    fn ranks(&self) -> Vec<u32> {
+        self.inner.ranks().to_vec()
+    }
+
+    /// Edge waypoints: one list of (x, y) points per edge, in the caller's
+    /// edge order and direction, empty for a straight edge. Pass this
+    /// straight to `Plot.add_graph2d(routes=...)`.
+    fn routes(&self) -> Vec<Vec<(f32, f32)>> {
+        let (pts, starts) = self.inner.routes();
+        (0..starts.len())
+            .map(|e| {
+                let a = starts[e] as usize;
+                let b = starts.get(e + 1).map_or(pts.len(), |v| *v as usize);
+                pts[a.min(pts.len())..b.min(pts.len())].iter().map(|p| (p[0], p[1])).collect()
+            })
+            .collect()
+    }
+}
+
+/// Parse a DOT document, lay it out, and return a ready-to-render `Plot`
+/// whose graph trace is handle 0. `rankdir` overrides the document's own
+/// ("TB" or "LR"); `None` honours whatever it says.
+///
+/// The accepted grammar is a subset: node and edge statements, chains
+/// (`a -> b -> c`), braced fan-outs (`a -> {b c}`), `subgraph`s (contents
+/// hoisted, grouping ignored), `node`/`edge`/`graph` attribute defaults,
+/// `rankdir`, and `label` / `color` / `fillcolor` / `shape` /
+/// `style=rounded` on nodes with `color` on edges. Unknown attributes are
+/// ignored; HTML labels, node ports and a mismatched edge operator are a
+/// ValueError naming the line and column.
+#[pyfunction]
+#[pyo3(signature = (text, rankdir=None))]
+fn from_dot(text: &str, rankdir: Option<&str>) -> PyResult<Plot> {
+    let dir = match rankdir {
+        Some(name) => Some(plotui_bind::parse_rankdir(name).map_err(to_py)?),
+        None => None,
+    };
+    let (plot, _, _) = plotui_bind::plot_from_dot(text, dir).map_err(to_py)?;
+    Ok(Plot { inner: plot })
+}
+
+/// Which nodes are reachable from node `i` — everything it waits on with
+/// `upstream=True` (the default), everything it leads to with
+/// `upstream=False` — including `i` itself. Returns one bool per node.
+///
+/// This is the primitive behind "hover a task and light everything upstream
+/// of it": pair it with `Plot.set_graph_colors`.
+#[pyfunction]
+#[pyo3(signature = (n_nodes, edges, i, upstream=true))]
+fn reachable(n_nodes: usize, edges: Vec<(u32, u32)>, i: usize, upstream: bool) -> Vec<bool> {
+    plotui_bind::reachable(n_nodes, &edges, i, upstream)
+}
+
 #[pymodule]
 fn _plotui(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Plot>()?;
     m.add_class::<ForceLayout>()?;
+    m.add_class::<LayeredLayout>()?;
+    m.add_function(pyo3::wrap_pyfunction!(from_dot, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(reachable, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(detect_render_mode, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(detect_cell_px, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(cell_px_from_winsize, m)?)?;

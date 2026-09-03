@@ -189,6 +189,25 @@ func TestErrorStringsMatchTheSharedContract(t *testing.T) {
 		!strings.HasPrefix(err.Error(), `unknown node shape "blob"`) {
 		t.Errorf("bad shape error = %v", err)
 	}
+
+	// The 2D graph vocabulary is its own, and so is its message.
+	if _, err := p.AddGraph2D([]float32{0}, []float32{0}, nil,
+		WithNodeShapeNames([]string{"blob"})); err == nil ||
+		err.Error() != `unknown node shape "blob"; expected one of rounded, box, ellipse, diamond` {
+		t.Errorf("bad 2D shape error = %v", err)
+	}
+	if _, _, err := PlotFromDOT("digraph { a -- b }", ""); err == nil ||
+		err.Error() != `1:13: '--' joins nodes in a graph; a digraph uses '->'` {
+		t.Errorf("DOT parse error = %v", err)
+	}
+	if _, _, err := PlotFromDOT("digraph { a -> b }", "sideways"); err == nil ||
+		err.Error() != `unknown rankdir "sideways"; expected one of TB, LR` {
+		t.Errorf("bad rankdir error = %v", err)
+	}
+	if _, err := NewLayeredLayout(2, [][2]uint32{{0, 1}}, "sideways"); err == nil ||
+		err.Error() != `unknown rankdir "sideways"; expected one of TB, LR` {
+		t.Errorf("bad layout rankdir error = %v", err)
+	}
 }
 
 func TestSetVisibleChangeDetection(t *testing.T) {

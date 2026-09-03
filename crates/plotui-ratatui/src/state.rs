@@ -243,7 +243,7 @@ impl PlotState {
         node_colors: &[[u8; 3]],
         edges: &[(u32, u32)],
     ) -> Result<(), TraceError> {
-        self.plot.extend_graph(handle, nodes, node_colors, edges)?;
+        self.plot.extend_graph(handle, nodes, node_colors, edges, None)?;
         self.invalidate();
         Ok(())
     }

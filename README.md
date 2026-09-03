@@ -11,7 +11,8 @@ widget, with the rendering engine written in Rust so it stays fast in 2D and 3D.
 
 > Status: **early scaffold.** Working today: 2D scatter/line/step/bar,
 > histogram, box, heatmap, and band charts with axes, ticks, categorical
-> labels, a colorbar and a legend; a 3D scatter/graph/surface/mesh engine; a
+> labels, a colorbar and a legend; DAG/pipeline graphs with a layered layout
+> and a DOT subset reader; a 3D scatter/graph/surface/mesh engine; a
 > Kitty-image raw demo; and a Textual widget.
 
 ## Architecture
@@ -86,9 +87,12 @@ plotui bar counts.tsv                           # --horizontal, --stack, --group
 plotui step states.txt                          # holds its value between samples
 plotui hist samples.txt                         # binned automatically
 plotui box -H measurements.tsv                  # one box per column
+plotui dag pipeline.dot                         # a DAG from a DOT file; hover a task
+                                                # to light everything it waits on
 plotui example scatter                          # built-in demo scenes, no data needed
 plotui example deps                             # plotui's own dependency graph, laid
                                                 # out live by a force simulation
+plotui example pipeline                         # a nightly forecast DAG, running
 ```
 
 Like every plotui frontend, the CLI needs a terminal with Kitty graphics
@@ -141,6 +145,19 @@ plot.add_bar(xs3, heights)
 # (y2 innermost, y3 outermost). The grid stays with the left axis.
 plot.add_line(xs, tokens, name="tokens", axis="y2")
 plot.add_line(xs, cpu_minutes, name="cpu min", axis="y3")
+
+# DAGs and pipelines: labelled boxes wired by arrows, laid out by rank. Node
+# centres are data coordinates; each box is sized in pixels from its label,
+# so zooming spreads the graph apart while the text stays readable.
+from plotui import LayeredLayout, from_dot, reachable
+
+layout = LayeredLayout(len(tasks), edges)          # rankdir="TB" or "LR"
+plot = Plot()
+h = plot.add_graph2d(*layout.positions(), edges,
+                     labels=tasks, routes=layout.routes())
+plot.set_graph_colors(h, states)                   # repaint as the run advances
+lit = reachable(len(tasks), edges, hovered)        # everything it waits on
+plot = from_dot(open("pipeline.dot").read())       # or straight from DOT
 
 # 3D: any 3D trace switches the plot to the orbit camera.
 plot = Plot()
