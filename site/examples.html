@@ -326,6 +326,29 @@ p.<span class="fn">add_bar</span>(months, totals, color=(<span class="str">69, 2
 p.<span class="fn">add_line</span>(months, trend, color=(<span class="str">240, 161, 60</span>), name=<span class="str">"trend"</span>)</code></pre>
       </figure>
 
+      <figure class="term ex-card" data-example="dag2d" data-dim="2d" hidden>
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>
+          <span class="term-title">dag — a nightly pipeline, running</span>
+        </div>
+        <div class="term-body">
+          <canvas class="ex-canvas" aria-label="Interactive 2D pipeline graph"></canvas>
+          <div class="term-tip" hidden></div>
+        </div>
+        <div class="term-foot">
+          <span class="act"><span class="key">hover</span>light what it waits on</span>
+          <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
+        <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> LayeredLayout, Plot, reachable
+
+layout = <span class="fn">LayeredLayout</span>(<span class="str">len</span>(tasks), edges)  <span class="cm"># ranks, orders, routes</span>
+xs, ys = layout.<span class="fn">positions</span>()
+
+p = Plot()
+h = p.<span class="fn">add_graph2d</span>(xs, ys, edges, labels=tasks, routes=layout.<span class="fn">routes</span>())
+p.<span class="fn">set_graph_colors</span>(h, states)   <span class="cm"># repaint as the run advances</span>
+<span class="cm"># or straight from a .dot file: plotui.from_dot(open("dag.dot").read())</span></code></pre>
+      </figure>
+
       <figure class="term ex-card" data-example="steps2d" data-dim="2d" hidden>
         <div class="term-bar">
           <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><button class="b b-max" type="button" aria-pressed="false" aria-label="Maximize example"></button>

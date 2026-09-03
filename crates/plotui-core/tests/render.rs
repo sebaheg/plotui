@@ -1788,3 +1788,44 @@ fn graph2d_mutators_move_recolor_and_reroute() {
     assert_eq!(p.set_graph_positions(h, vec![[0.0; 3]]), Err(TraceError::LengthMismatch));
     assert_eq!(p.set_graph_colors(h, vec![[0; 3]], None), Err(TraceError::LengthMismatch));
 }
+
+#[test]
+fn a_named_graph_keeps_its_nodes_clear_of_the_legend() {
+    // On a chart the legend merely overlaps some data; on a graph it would
+    // cover a *node*, which is a task missing from the pipeline. The frame
+    // reserves the legend's width, so no box reaches under it.
+    let (w, h) = (420usize, 300usize);
+    let mut p = Plot::new();
+    p.add_graph2d(
+        // Two nodes side by side, so one of them is as far right as the
+        // layout goes — exactly where the legend sits.
+        vec![[0.0, 0.0], [1.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![],
+        true,
+        None,
+        None,
+        None,
+        Some("nightly forecast".into()),
+    );
+    let fb = p.render(w, h);
+    let px = drawn_pixels(&fb);
+    // With the chrome hidden the frame colour appears only in the legend's
+    // border, so its leftmost pixel is the legend's left edge.
+    let legend_left =
+        px.iter().filter(|(_, _, c)| *c == [70, 78, 96]).map(|f| f.0).min().expect("a legend");
+    // The rightmost node's box, measured on the row through its centre —
+    // the legend sits well above that row, so nothing else can be there.
+    let row = p.project_nodes(w, h).iter().map(|n| n[1]).fold(0.0f32, f32::max).round() as usize;
+    let box_right = px
+        .iter()
+        .filter(|(_, y, c)| *y == row && *c == CARD)
+        .map(|f| f.0)
+        .max()
+        .expect("a node box on the node row");
+    assert!(
+        box_right < legend_left,
+        "a node box reaches under the legend: box to {box_right}, legend from {legend_left}"
+    );
+}

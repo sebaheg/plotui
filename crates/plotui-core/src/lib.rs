@@ -2905,6 +2905,23 @@ impl Plot {
         (hw + halo, hh + halo)
     }
 
+    /// How much of the frame's right edge the 2D legend covers, in pixels,
+    /// or 0 when nothing is named.
+    ///
+    /// On a chart the legend merely overlaps some data, which is the house
+    /// style everywhere. On a graph it can cover a *node* — and a node the
+    /// reader cannot see is a task missing from the pipeline, not a few
+    /// obscured samples — so a graph frame reserves this on the right and
+    /// nothing lands under it.
+    fn legend_width(&self, s: i32) -> i32 {
+        // Anchored at the origin: only the width is wanted, and that does
+        // not depend on where the box ends up.
+        match self.legend_box(0, 0, s, false) {
+            Some(lb) => (lb.bx1 - lb.bx0) + lb.ps.inset_x,
+            None => 0,
+        }
+    }
+
     /// Does this 2D frame skip its grid, axis rules and tick labels? See
     /// [`Self::show_axes`] for the rule; a frame with no visible 2D trace at
     /// all keeps its chrome, so an empty plot still looks like a chart.
@@ -5051,6 +5068,7 @@ impl Plot {
         // A graph's boxes reach past their centres by a pixel amount no
         // data-space pad can know; the map below gives them that room.
         let (box_hw, box_hh) = self.graph_box_inset(s);
+        let legend_w = if box_hw > 0 { self.legend_width(s) } else { 0 };
         let bottom = if hidden { 2 * pad } else { ch + tick_len + 2 * pad };
         // The strip reserve is a pure function of `s` and `h`, decided before
         // the margin fixed-point below — a reserve that changed inside the
@@ -5079,16 +5097,18 @@ impl Plot {
             // the *centres* land inside the plot rect with room for their
             // boxes. Solved against the rect rather than folded into bounds
             // because the answer is in pixels and only the frame has those.
-            let room = |lo: f64, hi: f64, span_px: f64, inset: i32| -> (f64, f64) {
-                let usable = span_px - 2.0 * inset as f64;
-                if inset == 0 || usable <= 1.0 || hi <= lo {
+            // The two ends take separate insets: the legend eats into the
+            // high-x end only.
+            let room = |lo: f64, hi: f64, span_px: f64, at_lo: i32, at_hi: i32| -> (f64, f64) {
+                let usable = span_px - (at_lo + at_hi) as f64;
+                if (at_lo | at_hi) == 0 || usable <= 1.0 || hi <= lo {
                     return (lo, hi);
                 }
-                let d = (hi - lo) * inset as f64 / usable;
-                (lo - d, hi + d)
+                let per_px = (hi - lo) / usable;
+                (lo - per_px * at_lo as f64, hi + per_px * at_hi as f64)
             };
-            let (mxlo, mxhi) = room(dxlo, dxhi, (x1 - x0) as f64, box_hw);
-            let (mylo, myhi) = room(dylo, dyhi, (y1 - y0) as f64, box_hh);
+            let (mxlo, mxhi) = room(dxlo, dxhi, (x1 - x0) as f64, box_hw, box_hw + legend_w);
+            let (mylo, myhi) = room(dylo, dyhi, (y1 - y0) as f64, box_hh, box_hh);
             map = Map2d::new((mxlo, mxhi, mylo, myhi), rect, cam);
             // Ticks cover what is actually visible after zoom/pan.
             let (vxlo, vxhi) = (map.inv_x(x0 as f64), map.inv_x(x1 as f64));

@@ -527,8 +527,15 @@ pub fn set_point_styles(
 
 /// The graph node-color rule: one color per node, padding or truncating a
 /// partial `node_colors` with the uniform fallback.
+///
+/// A graph with *no* nodes keeps whatever list it was given rather than
+/// coming back empty. Such a trace exists only for its legend row — a
+/// pipeline's four state colours need a key, and a key is what the legend
+/// is — and the row's swatch is read from the first node colour, so
+/// truncating to zero would drain the one thing about it that matters.
 pub fn graph_node_colors(n: usize, node_colors: Option<Vec<Rgb>>, uniform: Rgb) -> Vec<Rgb> {
     match node_colors {
+        Some(c) if n == 0 => c,
         Some(c) => (0..n).map(|i| c.get(i).copied().unwrap_or(uniform)).collect(),
         None => vec![uniform; n],
     }
@@ -708,6 +715,43 @@ mod tests {
         // "off" is directionless: it names itself and parses back uninverted.
         assert_eq!(camera_control_name(C::Off, true), "off");
         assert_eq!(parse_camera_control("off").unwrap(), (C::Off, false));
+    }
+
+    #[test]
+    fn graph_node_colors_pads_but_never_drains_a_legend_only_trace() {
+        let uniform = [1, 2, 3];
+        assert_eq!(graph_node_colors(3, None, uniform), vec![uniform; 3]);
+        // A short list pads with the uniform colour rather than truncating.
+        assert_eq!(
+            graph_node_colors(3, Some(vec![[9, 9, 9]]), uniform),
+            vec![[9, 9, 9], uniform, uniform]
+        );
+        // A node-less graph is a legend row; its colour is all it has.
+        assert_eq!(graph_node_colors(0, Some(vec![[9, 9, 9]]), uniform), vec![[9, 9, 9]]);
+        assert!(graph_node_colors(0, None, uniform).is_empty());
+    }
+
+    #[test]
+    fn routes_are_validated_as_csr() {
+        assert!(check_routes(2, 3, &[]).is_ok(), "no routes is always fine");
+        assert!(check_routes(2, 3, &[0, 2]).is_ok());
+        assert_eq!(
+            check_routes(2, 3, &[0]).unwrap_err().msg,
+            "routes must have one entry per edge; got 1 for 2 edges"
+        );
+        assert_eq!(
+            check_routes(2, 3, &[2, 0]).unwrap_err().msg,
+            "route starts must not go backwards; edge 1 starts at 0 after 2"
+        );
+        assert_eq!(
+            check_routes(2, 3, &[0, 9]).unwrap_err().msg,
+            "route start 9 for edge 1 is past the 3 waypoints given"
+        );
+        // Flattening is the inverse: nested runs in, CSR out.
+        let (pts, starts) = flatten_routes(vec![vec![], vec![[1.0, 2.0], [3.0, 4.0]], vec![]]);
+        assert_eq!(pts, vec![[1.0, 2.0], [3.0, 4.0]]);
+        assert_eq!(starts, vec![0, 0, 2]);
+        assert!(check_routes(3, pts.len(), &starts).is_ok());
     }
 
     #[test]

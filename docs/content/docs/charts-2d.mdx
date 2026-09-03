@@ -126,6 +126,121 @@ edge to edge; a NaN value leaves a hole rather than a zero.
 The colorbar is on by default and spans the grid's own range. Leave it on:
 without it the colors show structure but no values.
 
+## Graphs and pipelines
+
+A directed graph — a DAG, a task pipeline, a dependency tree — is a 2D chart
+in plotui, drawn as labelled boxes wired by arrows:
+
+```python
+from plotui import LayeredLayout, Plot
+
+layout = LayeredLayout(len(tasks), edges)      # rankdir="TB" (default) or "LR"
+xs, ys = layout.positions()
+
+plot = Plot()
+h = plot.add_graph2d(xs, ys, edges,
+                     labels=tasks,
+                     routes=layout.routes())   # long edges route around ranks
+```
+
+`edges` are `(from, to)` index pairs. Node **centres** are in data
+coordinates, but each box is sized in *pixels* from its label, so zooming
+spreads the graph apart while the text stays the size it has to be to be
+read — the only thing that works at terminal resolution.
+
+`node_colors` takes one colour per node, and it is the channel a live
+pipeline repaints:
+
+```python
+plot.set_graph_colors(h, [state_color[s] for s in states])
+```
+
+`node_shapes` picks a silhouette per node: `"rounded"` (the default),
+`"box"`, `"ellipse"` or `"diamond"`. `directed=False` drops the arrowheads.
+Growing a graph is `extend_graph`, as in 3D; a `Graph2d` cannot be
+`extend`ed, because its edges reference node indices.
+
+### Laying one out
+
+`LayeredLayout` is the Sugiyama layout: it ranks nodes by depth, orders each
+rank to reduce edge crossings, and routes edges that skip a rank around the
+nodes between them. It is solved in the constructor — there is nothing to
+step, because a pipeline has one right shape, and it is deterministic: same
+input, same output, no randomness anywhere.
+
+```python
+layout.positions()   # (xs, ys), in your index order
+layout.ranks()       # 0 for a source, one more than the deepest predecessor
+layout.routes()      # one list of (x, y) waypoints per edge, empty if straight
+```
+
+Cycles do not hang: a back edge is reversed for the layout and drawn in its
+original direction. Self-loops and out-of-range endpoints are inert, so an
+edge list can be passed verbatim.
+
+### From a DOT file
+
+```python
+import plotui
+
+plot = plotui.from_dot(open("pipeline.dot").read())   # rankdir=None|"TB"|"LR"
+```
+
+The grammar is a **subset** of Graphviz's, not a port. Accepted: `[strict]
+(graph|digraph) [name] { … }` with `--` edges in a `graph` and `->` in a
+`digraph`; node statements, edge chains (`a -> b -> c`) and braced fan-outs
+(`a -> {b c}`); `node`/`edge`/`graph` attribute defaults; `rankdir`;
+`subgraph`s, whose contents are hoisted and whose grouping is ignored;
+`label`, `color`, `fillcolor`, `shape` and `style=rounded` on nodes with
+`color` on edges; and `//`, `/* */` and `#` comments.
+
+Unknown *attributes* are ignored — a real DOT file is mostly fonts and
+margins that mean nothing in a terminal. Unknown *structure* is an error
+naming the line and column: HTML labels, node ports, an edge operator that
+disagrees with the graph kind, and any unknown shape, colour or rankdir.
+Not supported yet: edge labels, cluster boxes, ports, orthogonal routing.
+
+### Lighting what a task waits on
+
+`reachable` is the closure behind hover highlighting — the core supplies it
+so every frontend lights the same set:
+
+```python
+from plotui import reachable
+
+lit = reachable(len(tasks), edges, hovered)          # upstream by default
+plot.set_graph_colors(
+    h,
+    [c if on else dim(c) for c, on in zip(colors, lit)],
+    [(170, 175, 185) if lit[a] and lit[b] else (40, 45, 60) for a, b in edges],
+)
+```
+
+Pass `upstream=False` for everything a task leads to instead. Hit-testing
+works as it does for a 3D graph: `pick_element_px` returns `("node", i)` for
+a hit inside a box and `("edge", i)` along the polyline an edge is drawn
+along, waypoints and all.
+
+### Axes
+
+A frame whose visible 2D traces are all graphs draws no grid, axis rules or
+tick labels: a layout's coordinates are not measurements, and a numeric
+ladder beside one says nothing true. `show_axes` overrides that — `True`
+always draws the chrome (useful to see where a layout actually put its
+nodes), `False` never does, and `None` restores the automatic rule.
+
+The legend is unaffected, and a graph frame reserves room for it on the
+right so it never covers a node. That makes it the natural place for a state
+key: give each state an empty graph trace with one colour and a name, and it
+gets a legend row with no geometry.
+
+Try it from the CLI:
+
+```bash
+plotui dag pipeline.dot          # or pipe one in: cat pipeline.dot | plotui dag
+plotui example pipeline          # a nightly forecast DAG, running live
+```
+
 ## Categorical axes
 
 ```python
