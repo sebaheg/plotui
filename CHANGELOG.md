@@ -3,7 +3,7 @@
 Notable changes per release. Versions before 0.5.0 predate this file; their
 history is in the git log and the GitHub releases.
 
-## 0.5.0 — unreleased
+## 0.5.0 — 2026-09-03
 
 The first release with the 2D chart set, DAG rendering, and live feeds. Every
 feature below reaches Python, Rust (Ratatui), Go (Bubble Tea), the C ABI, the
