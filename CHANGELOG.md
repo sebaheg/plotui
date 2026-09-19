@@ -3,7 +3,7 @@
 Notable changes per release. Versions before 0.5.0 predate this file; their
 history is in the git log and the GitHub releases.
 
-## Unreleased
+## 0.6.0 — 2026-09-19
 
 ### Added
 
