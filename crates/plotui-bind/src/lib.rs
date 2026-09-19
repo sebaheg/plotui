@@ -576,6 +576,22 @@ pub fn set_hover2d(plot: &mut Plot, px: Option<f32>) -> bool {
     changed
 }
 
+/// [`set_hover2d`] that reports a change only when the *picture* changes.
+///
+/// The crosshair snaps to the nearest sample, and the guide, markers and
+/// readout are all placed from that sample — so every cursor position in
+/// one sample's basin renders the same frame. Given the frame size the
+/// frontend renders at, this compares where the old and new positions snap
+/// (see [`Plot::hover2d_snap_px`]) and returns `false` when they agree,
+/// which is most mouse moves on a sparse chart: no re-rasterize, no
+/// re-upload, no terminal decode.
+pub fn set_hover2d_snapped(plot: &mut Plot, px_w: usize, px_h: usize, px: Option<f32>) -> bool {
+    let before = plot.hover2d_px.and_then(|p| plot.hover2d_snap_px(px_w, px_h, p));
+    plot.hover2d_px = px;
+    let after = px.and_then(|p| plot.hover2d_snap_px(px_w, px_h, p));
+    before != after
+}
+
 /// Set (or clear) the explicit 2D x window with validation and change
 /// detection; the returned bool tells the frontend whether a repaint is
 /// needed.

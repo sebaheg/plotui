@@ -248,12 +248,22 @@ def test_direct_mode_emits_full_res_kitty_image() -> None:
             assert "i=4242" in line0, "fixed id: frames replace atomically"
             assert "U=1" not in line0, "direct placement, no Unicode placeholders"
             assert "\U0010eeee" not in line0, "no placeholder glyphs"
-            # Each frame must replace the previous placement, never stack:
-            # delete-by-id first, then exactly one placement with a fixed p=.
-            assert "\x1b_Ga=d,d=i,i=4242,q=2\x1b\\" in line0
-            assert line0.index("a=d") < line0.index("a=T"), "delete precedes placement"
-            assert "p=1,a=T" in line0
+            # Frames double-buffer: this one is placed under its own id and
+            # only then is the other buffer's placement deleted, so the
+            # region is never blank between frames (delete-first would
+            # blank it until the next frame decodes — visible flicker).
+            assert "i=4242,p=4242,a=T" in line0 or "i=4243,p=4243,a=T" in line0
             assert line0.count("a=T") == 1
+            assert line0.count("a=d") == 1
+            assert line0.index("a=T") < line0.index("a=d"), "placement precedes the delete"
+            first_id = 4242 if "i=4242,p=4242,a=T" in line0 else 4243
+            assert f"a=d,d=i,i={4242 + 4243 - first_id},q=2" in line0, "the other buffer is retired"
+            # ...and the next frame swaps roles.
+            widget.invalidate()
+            line0_next = "".join(seg.text for seg in widget.render_line(0))
+            other = 4242 + 4243 - first_id
+            assert f"i={other},p={other},a=T" in line0_next
+            assert f"a=d,d=i,i={first_id},q=2" in line0_next
             # Other lines carry no image payload, just blank cells.
             line1 = "".join(seg.text for seg in widget.render_line(1))
             assert "\x1b_G" not in line1
@@ -303,6 +313,50 @@ def test_unmount_deletes_the_image_from_the_terminal() -> None:
     assert any(
         "\x1b_Ga=d,d=i,i=4242" in w for w in writes
     ), "unmount must emit the kitty delete escape"
+    assert any(
+        "\x1b_Ga=d,d=i,i=4243" in w for w in writes
+    ), "both direct-mode buffers are deleted, whichever holds the last frame"
+    assert PlotWidget.kitty_cleanup().count("a=d") == 2
+
+
+def test_crosshair_repaints_only_when_the_snap_changes() -> None:
+    """Every mouse move used to re-rasterize, re-upload and re-decode the
+    whole frame. The crosshair is drawn from the nearest sample, so moves
+    inside one sample's basin change nothing and must cost nothing."""
+
+    async def drive() -> None:
+        class Sparse(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.plot.add_line([1.0, 2.0, 3.0, 4.0], [0.0, 1.0, 1.0, 1.2])
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(self.plot, id="plot", render_mode="direct")
+
+        app = Sparse()
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            w, h = widget.size.width, widget.size.height
+            px_w, px_h, *_ = widget._pixel_geometry(0, 0)
+            # Cells along the middle row, grouped by where they snap.
+            snaps = []
+            for x in range(w):
+                _, _, px, _, _ = widget._pixel_geometry(x, h // 2)
+                snaps.append(app.plot.hover2d_snap_px(px_w, px_h, px))
+            basin = [x for x in range(w) if snaps[x] is not None and snaps[x] == snaps[w // 2]]
+            other = next(x for x in range(w) if snaps[x] is not None and snaps[x] != snaps[w // 2])
+            assert len(basin) >= 3, "a sparse line has wide basins"
+
+            await pilot.hover("#plot", offset=(basin[0], h // 2))
+            after_first = widget._version
+            for x in basin[1:]:
+                await pilot.hover("#plot", offset=(x, h // 2))
+            assert widget._version == after_first, "moves inside the basin never repaint"
+            await pilot.hover("#plot", offset=(other, h // 2))
+            assert widget._version == after_first + 1, "crossing into another basin repaints once"
+
+    asyncio.run(drive())
 
 
 def test_detect_cell_px_uses_terminal_size() -> None:
@@ -701,3 +755,228 @@ def test_input_map_reads_back_what_was_set() -> None:
     assert plot.input_map() == ("yaw", "pitch", "pan_x", "pan_y")
     plot.set_input_map("pan_x", "-pitch", "off")
     assert plot.input_map() == ("pan_x", "-pitch", "off", "pan_y")
+
+
+# --- dragging a graph node ---
+
+
+def test_dragging_a_graph_node_moves_it_and_posts_node_moved() -> None:
+    """A press on a box grabs the box: the node follows the pointer cell for
+    cell, the other node stays put, and the release posts NodeMoved with the
+    node's new layout position. A press elsewhere still pans the plot."""
+    from types import SimpleNamespace
+
+    class Graph(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.plot = Plot()
+            self.plot.add_graph2d([0.0, 0.0], [8.0, 0.0], [(0, 1)], labels=["alpha", "beta"])
+            self.moved: list[tuple[int, float, float]] = []
+
+        def compose(self) -> ComposeResult:
+            yield PlotWidget(self.plot, id="plot", render_mode="placeholder")
+
+        def on_plot_widget_node_moved(self, msg: PlotWidget.NodeMoved) -> None:
+            self.moved.append((msg.index, msg.x, msg.y))
+
+    async def drive() -> None:
+        app = Graph()
+        async with app.run_test(size=(60, 20)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            px_w, px_h, _px, _py, _r = widget._pixel_geometry(0, 0)
+            # The cell over node 0's centre.
+            nx, ny = None, None
+            for y in range(20):
+                for x in range(60):
+                    pw, ph, px, py, radius = widget._pixel_geometry(x, y)
+                    if app.plot.pick_px(pw, ph, px, py, radius) == 0:
+                        nx, ny = x, y
+                        break
+                if nx is not None:
+                    break
+            assert nx is not None, "node 0 must be under some cell"
+            before = app.plot.project_nodes(px_w, px_h)
+
+            await pilot.mouse_down("#plot", offset=(nx, ny))
+            assert widget._node_drag == 0
+            move = SimpleNamespace(screen_x=nx + 5, screen_y=ny + 2, x=nx + 5, y=ny + 2, shift=False)
+            widget.on_mouse_move(move)  # drag 5 cells right, 2 down
+            after = app.plot.project_nodes(px_w, px_h)
+            assert after[0][0] - before[0][0] == pytest.approx(5 * widget._cell_w, abs=1.0)
+            assert after[0][1] - before[0][1] == pytest.approx(2 * widget._cell_h, abs=1.0)
+            assert after[1][0] == pytest.approx(before[1][0], abs=1.0), "node 1 stays put"
+            assert after[1][1] == pytest.approx(before[1][1], abs=1.0)
+
+            await pilot.mouse_up("#plot", offset=(nx + 5, ny + 2))
+            await pilot.pause()
+            assert len(app.moved) == 1 and app.moved[0][0] == 0
+            assert app.moved[0][1] > 0.0, "x grew in layout units"
+            assert widget._node_drag is None
+
+            # A press on empty space pans instead (2D drag = pan).
+            before = app.plot.project_nodes(px_w, px_h)
+            await pilot.mouse_down("#plot", offset=(1, 1))
+            assert widget._node_drag is None
+            move = SimpleNamespace(screen_x=4, screen_y=1, x=4, y=1, shift=False)
+            widget.on_mouse_move(move)
+            after = app.plot.project_nodes(px_w, px_h)
+            assert after[1][0] - before[1][0] == pytest.approx(3 * widget._cell_w, abs=1.0)
+            await pilot.mouse_up("#plot", offset=(4, 1))
+            await pilot.pause()
+            assert len(app.moved) == 1, "a plain pan is not a node move"
+
+    asyncio.run(drive())
+
+
+def test_draggable_false_leaves_nodes_alone() -> None:
+    async def drive() -> None:
+        class Graph(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.plot.add_graph2d([0.0, 0.0], [8.0, 0.0], [(0, 1)], labels=["alpha", "beta"])
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(self.plot, id="plot", render_mode="placeholder", draggable=False)
+
+        app = Graph()
+        async with app.run_test(size=(60, 20)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            await pilot.mouse_down("#plot", offset=(30, 10))
+            assert widget._node_drag is None
+            await pilot.mouse_up("#plot", offset=(30, 10))
+
+    asyncio.run(drive())
+
+
+def test_image_slots_keep_two_widgets_on_their_own_ids() -> None:
+    """Two plots on one screen: each widget's frames must ride its own pair
+    of Kitty image ids — shared ids show one picture in both places
+    (placeholder mode) or delete each other's frames (direct mode) — and
+    unmounting one must leave the other's images alone."""
+    from plotui.textual import image_ids_for
+
+    assert image_ids_for(0) == (4242, 4243)
+    assert image_ids_for(1) == (4244, 4245)
+
+    async def drive() -> list[str]:
+        class Pair(App):
+            def compose(self) -> ComposeResult:
+                left, right = Plot(), Plot()
+                left.add_line([0.0, 1.0], [0.0, 1.0])
+                right.add_line([0.0, 1.0], [1.0, 0.0])
+                yield PlotWidget(left, id="left", render_mode="placeholder")
+                yield PlotWidget(right, id="right", render_mode="placeholder", image_slot=1)
+
+        app = Pair()
+        writes: list[str] = []
+        async with app.run_test(size=(40, 24)):
+            left = app.query_one("#left", PlotWidget)
+            right = app.query_one("#right", PlotWidget)
+            assert left.image_ids == (4242, 4243)
+            assert right.image_ids == (4244, 4245)
+            left._ensure_frame()
+            right._ensure_frame()
+            assert "i=4242," in left._transmit
+            assert "i=4244," in right._transmit
+            # the placeholder colour encodes the id: different ids, different colours
+            assert left._style != right._style
+            assert right.kitty_cleanup_own() == "\x1b_Ga=d,d=i,i=4244\x1b\\\x1b_Ga=d,d=i,i=4245\x1b\\"
+            driver = app._driver
+            original = driver.write
+
+            def spy(data: str) -> None:
+                writes.append(data)
+                original(data)
+
+            driver.write = spy  # type: ignore[method-assign]
+            await right.remove()
+        return writes
+
+    writes = asyncio.run(drive())
+    assert any("i=4244" in w for w in writes)
+    assert not any("i=4242" in w and "a=d" in w for w in writes[:-1]), (
+        "unmounting the right plot must not delete the left one's image"
+    )
+    # the process-wide cleanup names every slot a widget has taken
+    assert "i=4244" in PlotWidget.kitty_cleanup() and "i=4242" in PlotWidget.kitty_cleanup()
+
+
+def test_overlay_spans_become_readout_keep_out_boxes() -> None:
+    """Text the widget draws over the plot is handed to the plot as
+    `keep_out` fractions, so the crosshair readout dodges it like the
+    legend — and a plot the host swaps in gets them on its next frame."""
+
+    async def drive() -> None:
+        class Labelled(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.plot.add_line([0.0, 1.0, 2.0], [0.0, 1.0, 0.5])
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(self.plot, id="plot", render_mode="placeholder")
+
+        app = Labelled()
+        async with app.run_test(size=(40, 20)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            await pilot.pause()
+            version = widget._version
+            widget.set_overlay([(1, 4, "legend", None), (2, 4, "more", None)])
+            boxes = [v for box in widget._plot.keep_out() for v in box]
+            assert boxes == pytest.approx([
+                4 / 40, 1 / 20, 10 / 40, 2 / 20,
+                4 / 40, 2 / 20, 8 / 40, 3 / 20,
+            ])
+            assert widget._version == version + 1  # the readout may move: a new frame
+            # the same spans again change nothing, so no frame is spent
+            widget.set_overlay([(1, 4, "legend", None), (2, 4, "more", None)])
+            assert widget._version == version + 1
+            # a swapped-in plot inherits the boxes at its first frame
+            fresh = Plot()
+            fresh.add_line([0.0, 1.0], [0.0, 1.0])
+            widget._plot = fresh
+            widget.invalidate()
+            widget._ensure_frame()
+            assert fresh.keep_out() == widget._plot.keep_out() and len(fresh.keep_out()) == 2
+            widget.set_overlay([])
+            assert widget._plot.keep_out() == []
+
+    asyncio.run(drive())
+
+
+def test_mouse_over_the_legend_lights_its_row() -> None:
+    """Moving over a legend row lights it (the core's `legend_hover`), a
+    move off the box or leaving the widget clears it; each is one repaint."""
+
+    async def drive() -> None:
+        class Named(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.plot = Plot()
+                self.plot.add_line([0.0, 1.0], [0.0, 1.0], name="alpha")
+                self.plot.add_line([0.0, 1.0], [1.0, 0.0], name="beta")
+
+            def compose(self) -> ComposeResult:
+                yield PlotWidget(self.plot, id="plot", render_mode="placeholder")
+
+        app = Named()
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#plot", PlotWidget)
+            await pilot.pause()
+            px_w, px_h, *_ = widget._pixel_geometry(0, 0)
+            # find a cell on legend row 0 by asking the core
+            cell = next(
+                (x, y) for y in range(widget.size.height) for x in range(widget.size.width)
+                if widget._plot.legend_row_at(px_w, px_h, *widget._pixel_geometry(x, y)[2:4]) == 0
+            )
+            version = widget._version
+            await pilot.hover("#plot", offset=cell)
+            await pilot.pause()
+            assert widget._plot.legend_hover() == 0
+            assert widget._version > version  # repainted (the crosshair may repaint on the same move)
+            await pilot.hover("#plot", offset=(0, widget.size.height - 1))
+            await pilot.pause()
+            assert widget._plot.legend_hover() is None
+
+    asyncio.run(drive())

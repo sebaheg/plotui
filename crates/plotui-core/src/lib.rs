@@ -22,7 +22,7 @@ pub use font::{
     draw_text, draw_text_aa, draw_text_at, draw_text_rot90, text_width, text_width_at, CHAR_H,
     CHAR_W,
 };
-pub use layout::{reachable, Direction, ForceLayout, LayeredLayout, RankDir};
+pub use layout::{reachable, Direction, ForceLayout, LayeredLayout, LayoutSpacing, RankDir};
 pub use marching::marching_cubes;
 pub use ribbon::{catmull_rom, ribbon, tube};
 pub use ticks::{
@@ -49,12 +49,15 @@ pub enum Shape {
     DiamondOpen,
     /// A smaller disc (0.8 r) — for the least important category.
     Dot,
+    /// Five-pointed star, a point up — for the one node that outranks the
+    /// rest (a best, a winner).
+    Star,
 }
 
 impl Shape {
     /// The wire names, in declaration order — what frontends accept.
-    pub const NAMES: [&'static str; 7] =
-        ["disc", "ring", "square", "triangle", "diamond", "diamond-open", "dot"];
+    pub const NAMES: [&'static str; 8] =
+        ["disc", "ring", "square", "triangle", "diamond", "diamond-open", "dot", "star"];
 
     pub fn parse(name: &str) -> Option<Shape> {
         Some(match name {
@@ -65,6 +68,7 @@ impl Shape {
             "diamond" => Shape::Diamond,
             "diamond-open" => Shape::DiamondOpen,
             "dot" => Shape::Dot,
+            "star" => Shape::Star,
             _ => return None,
         })
     }
@@ -641,6 +645,7 @@ impl Framebuffer {
                     let (top, bottom) = (-1.2 * r, 0.9 * r);
                     dy >= top && dy <= bottom && dx.abs() <= 1.1 * r * (dy - top) / (bottom - top)
                 }
+                Shape::Star => Self::in_star(dx, dy, 1.3 * r),
             }
         };
         for y in y0..=y1 {
@@ -652,6 +657,31 @@ impl Framebuffer {
                 }
             }
         }
+    }
+
+    /// Inside test for a five-pointed star of outer radius `outer`, one point
+    /// straight up, inner radius 0.5 of the outer. The boundary between a tip
+    /// and the next valley is a straight segment; in polar form a line through
+    /// `(outer, 0)` and `(inner, α)` is `1/ρ = cos φ / outer + sin φ · k`, so a
+    /// pixel is inside when its distance is within `ρ` at its (folded) angle.
+    fn in_star(dx: f32, dy: f32, outer: f32) -> bool {
+        let inner = 0.5 * outer;
+        let alpha = std::f32::consts::PI / 5.0;
+        let d = (dx * dx + dy * dy).sqrt();
+        if d <= inner {
+            return true;
+        }
+        if d > outer {
+            return false;
+        }
+        // angle from straight up, folded into one half-sector [0, α]
+        let mut phi = dx.atan2(-dy).rem_euclid(2.0 * alpha);
+        if phi > alpha {
+            phi = 2.0 * alpha - phi;
+        }
+        let k = (1.0 / inner - alpha.cos() / outer) / alpha.sin();
+        let rho = 1.0 / (phi.cos() / outer + phi.sin() * k);
+        d <= rho
     }
 
     /// Filled axis-aligned ellipse inscribed in the box centred on
@@ -1374,6 +1404,52 @@ impl PanelStyle {
     }
 
     /// Width of `text` at this panel's cap height.
+    /// A shaped swatch in the chip's cell: a disc (inside a ring of `border`
+    /// when given), an outline ring, a star, or a line — drawn with the same
+    /// mark rasteriser as the plot's nodes, so a legend row is a miniature
+    /// of what it names.
+    #[allow(clippy::too_many_arguments)]
+    fn mark(
+        &self,
+        fb: &mut Framebuffer,
+        bx0: i32,
+        ey: i32,
+        s: i32,
+        z: f32,
+        swatch: Swatch,
+        color: Rgb,
+        border: Option<Rgb>,
+        chrome: &Chrome,
+    ) {
+        let sy = ey + (CHAR_H * s - self.swatch + s) / 2;
+        let sx = bx0 + self.pad_x;
+        let half = self.swatch as f32 / 2.0;
+        let (cx, cy) = (sx as f32 + half - 0.5, sy as f32 + half - 0.5);
+        // the ring is the disc's silhouette a stroke wider, drawn a hair
+        // behind it — exactly how a node's border is drawn
+        let stroke = (BORDER_FRACTION * half).max(1.0);
+        match swatch {
+            Swatch::Square => self.chip(fb, bx0, ey, s, z, color),
+            Swatch::Line => {
+                let t = (self.stroke * 1.5).max(1.0).round() as i32;
+                let ly = cy.round() as i32;
+                fb.rect_fill(sx, ly - t / 2, sx + self.swatch - 1, ly - t / 2 + t - 1, z, color);
+            }
+            Swatch::Disc | Swatch::Star => {
+                let shape = if swatch == Swatch::Star { Shape::Star } else { Shape::Disc };
+                let r = if border.is_some() { half - stroke } else { half };
+                if let Some(bc) = border {
+                    fb.mark(cx, cy, z + DEPTH_NUDGE, r + stroke, shape, bc);
+                }
+                fb.mark(cx, cy, z, r, shape, color);
+            }
+            Swatch::Ring => {
+                fb.mark(cx, cy, z + DEPTH_NUDGE, half, Shape::Disc, color);
+                fb.mark(cx, cy, z, half - stroke, Shape::Disc, chrome.bg);
+            }
+        }
+    }
+
     fn measure(&self, text: &str) -> i32 {
         text_width_at(text, self.cap_height)
     }
@@ -1389,12 +1465,13 @@ impl PanelStyle {
 /// The top-left corner for the crosshair readout panel, in framebuffer
 /// pixels: `px` is the guide's *snapped* x (never the raw hovered pixel, or
 /// two hovers that snap to the same sample would render differently),
-/// `markers` the marker y's currently on the frame, and `legend` the legend's
-/// box when there is one.
+/// `markers` the marker y's currently on the frame, and `obstacles` the boxes
+/// it must keep off: the legend's, when there is one, and whatever the host
+/// draws over the plot ([`Plot::keep_out`]).
 ///
 /// Four slots — beside the guide on either side, in either half of the frame
 /// — scored on how far they fall outside the plot rect, then on how much of
-/// the legend they cover. The preferred half is the one the markers are
+/// the obstacles they cover. The preferred half is the one the markers are
 /// *not* in: the panel is opaque, and a tall multi-series readout sitting on
 /// the values it names hides more than it explains. Chart.js and Plotly do
 /// the opposite — they centre the label on the point and accept the occlusion
@@ -1408,7 +1485,7 @@ fn readout_slot(
     rect: (i32, i32, i32, i32),
     gap: i32,
     markers: &[i32],
-    legend: Option<(i32, i32, i32, i32)>,
+    obstacles: &[(i32, i32, i32, i32)],
 ) -> (i32, i32) {
     let (x0, y0, x1, y1) = rect;
     let (top, bottom) = (y0 + gap, y1 - gap - box_h);
@@ -1434,11 +1511,11 @@ fn readout_slot(
         .iter()
         .min_by_key(|&&(bx, by)| {
             let b = (bx, by, bx + box_w, by + box_h);
-            (full - overlap(b, rect), legend.map_or(0, |l| overlap(b, l)))
+            (full - overlap(b, rect), obstacles.iter().map(|&o| overlap(b, o)).sum::<i64>())
         })
-        // `min_by_key` keeps the first of equal keys, so a tie — no legend, or
-        // a legend none of the slots touch — falls to the preferred slot and
-        // placement stays deterministic.
+        // `min_by_key` keeps the first of equal keys, so a tie — no obstacle,
+        // or none the slots touch — falls to the preferred slot and placement
+        // stays deterministic.
         .copied()
         .unwrap_or((right, near));
 
@@ -1447,12 +1524,70 @@ fn readout_slot(
     ((bx.min(x1 - box_w)).max(x0 + 1), by.clamp(y0, (y1 - box_h).max(y0)))
 }
 
-/// One legend row: the trace it stands for, its label and swatch colour, and
-/// whether that trace is currently drawn.
+/// The mark a legend row carries. Trace rows get the colour chip; rows a
+/// host declares ([`Plot::legend_entries`]) pick one that mirrors what the
+/// entry stands for — a graph's nodes are discs with borders, its lineage a
+/// line, its best a star — so the legend is a miniature of the plot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Swatch {
+    /// The trace legend's rounded colour chip.
+    #[default]
+    Square,
+    /// A horizontal stroke.
+    Line,
+    /// A filled disc; with a `border` colour, the same disc inside a ring of it.
+    Disc,
+    /// An outline circle in the entry's colour.
+    Ring,
+    /// A five-pointed star.
+    Star,
+}
+
+impl Swatch {
+    /// Parse a host's spelling: `square`, `line`, `disc`, `ring`, `star`.
+    pub fn parse(s: &str) -> Option<Swatch> {
+        Some(match s {
+            "square" | "chip" => Swatch::Square,
+            "line" => Swatch::Line,
+            "disc" | "circle" => Swatch::Disc,
+            "ring" => Swatch::Ring,
+            "star" => Swatch::Star,
+            _ => return None,
+        })
+    }
+}
+
+/// A legend row a host declares itself, in place of the per-trace rows: for
+/// plots where the categories worth naming are not traces — one graph trace
+/// whose nodes fall into stages, say. See [`Plot::legend_entries`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct LegendEntry {
+    pub label: String,
+    pub swatch: Swatch,
+    pub color: Rgb,
+    /// A second colour drawn around a `Disc` or `Star` swatch — a node's ring.
+    pub border: Option<Rgb>,
+    /// Off, the row stays with its colour drained: the way back for a toggle.
+    pub visible: bool,
+}
+
+/// Which corner of the plot area the legend box sits in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LegendCorner {
+    #[default]
+    TopRight,
+    TopLeft,
+}
+
+/// One legend row: what it stands for (`id`: the trace index for trace rows,
+/// the entry index for host-declared rows), its label, swatch and colours,
+/// and whether that thing is currently drawn.
 struct LegendRow<'a> {
-    trace: usize,
+    id: usize,
     name: &'a str,
+    swatch: Swatch,
     color: Rgb,
+    border: Option<Rgb>,
     visible: bool,
 }
 
@@ -1479,7 +1614,7 @@ impl LegendBox<'_> {
         }
         let from_first_row = y - (self.by0 + self.ps.pad_y);
         let i = (from_first_row.max(0) / self.ps.row_h) as usize;
-        self.rows.get(i.min(self.rows.len() - 1)).map(|r| r.trace)
+        self.rows.get(i.min(self.rows.len() - 1)).map(|r| r.id)
     }
 }
 
@@ -1750,12 +1885,64 @@ fn lighten(c: Rgb, by: u8) -> Rgb {
     [c[0].saturating_add(by), c[1].saturating_add(by), c[2].saturating_add(by)]
 }
 
-/// One node's pixel box, from its data centre and its label at text scale
-/// `s`. The label sets the width; the height is one text cell plus padding,
-/// so every box in a graph is the same height and the ranks line up.
-fn node_box(m: &Map2d, p: [f32; 2], label: &str, s: i32) -> NodeBox {
+/// The data range a graph frame maps onto `rect` so that one layout unit
+/// is `native` pixels — or fewer, when the graph `g` (whose boxes reach
+/// `box_hw`/`box_hh` pixels past their centres) would not fit otherwise —
+/// with the graph centred in the part of the rect left of the legend.
+/// Solved as a range rather than a scale so [`Map2d`] and everything
+/// downstream of it (ticks, picking, the zoom about the frame's centre)
+/// stay one code path.
+fn graph_range(
+    g: (f64, f64, f64, f64),
+    rect: (f64, f64, f64, f64),
+    legend_w: i32,
+    box_half: (i32, i32),
+    native: f64,
+    floor: f64,
+) -> (f64, f64, f64, f64) {
+    let (xlo, xhi, ylo, yhi) = g;
+    let (x0, y0, x1, y1) = rect;
+    let (box_hw, box_hh) = (box_half.0 as f64, box_half.1 as f64);
+    let usable_w = (x1 - x0 - legend_w as f64 - 2.0 * box_hw).max(1.0);
+    let usable_h = (y1 - y0 - 2.0 * box_hh).max(1.0);
+    let fit = |span: f64, room: f64| if span > 0.0 { room / span } else { f64::INFINITY };
+    // The graph wants its native scale — or more, when the boxes would
+    // overlap at it (a layout that was not told its labels). It gets that
+    // unless the frame is too small, in which case it shrinks to fit, but
+    // never past the point where boxes start to overlap: past that the
+    // frame is better off showing part of a legible graph than all of an
+    // illegible one, and the user pans.
+    let want = native.max(floor);
+    let k = want.min(fit(xhi - xlo, usable_w)).min(fit(yhi - ylo, usable_h)).max(floor).max(1e-6);
+    let (cx, cy) = ((xlo + xhi) * 0.5, (ylo + yhi) * 0.5);
+    let mid_x = x0 + (x1 - x0 - legend_w as f64) * 0.5;
+    let mid_y = (y0 + y1) * 0.5;
+    (cx - (mid_x - x0) / k, cx + (x1 - mid_x) / k, cy - (y1 - mid_y) / k, cy + (mid_y - y0) / k)
+}
+
+/// A node box's `(width, height)` in pixels at text scale `s`. The label
+/// sets the width; the height is one text cell plus padding, so every box
+/// in a graph is the same height and the ranks line up.
+fn node_box_px(label: &str, s: i32) -> (i32, i32) {
     let w = (text_width(label, s) + 2 * NODE_PAD_X_S * s).max(NODE_MIN_W_S * s);
     let h = (CHAR_H * s + 2 * NODE_PAD_Y_S * s).max(NODE_MIN_H_S * s);
+    (w, h)
+}
+
+/// A node box's `(width, height)` in layout units — text columns, the unit
+/// [`LayeredLayout`] places nodes in and a graph frame draws at — for the
+/// box the renderer will draw around `label`. The unlabelled box is the
+/// floor. This is what lets a layout keep boxes apart without knowing the
+/// frame's pixel size.
+pub fn node_size_units(label: &str) -> (f32, f32) {
+    let (w, h) = node_box_px(label, 1);
+    (w as f32 / CHAR_W as f32, h as f32 / CHAR_W as f32)
+}
+
+/// One node's pixel box, from its data centre and its label at text scale
+/// `s`; see [`node_box_px`].
+fn node_box(m: &Map2d, p: [f32; 2], label: &str, s: i32) -> NodeBox {
+    let (w, h) = node_box_px(label, s);
     NodeBox { cx: m.sx(p[0] as f64), cy: m.sy(p[1] as f64), hw: w as f64 * 0.5, hh: h as f64 * 0.5 }
 }
 
@@ -1815,6 +2002,74 @@ fn draw_node_body(fb: &mut Framebuffer, b: &NodeBox, shape: NodeShape, fill: Rgb
     }
 }
 
+/// A 3D node's border stroke as a fraction of its radius.
+const BORDER_FRACTION: f32 = 0.2;
+/// Depth offset that orders a node's border (behind) and label (in front)
+/// against the node itself without moving them past its neighbours.
+const DEPTH_NUDGE: f32 = 1e-4;
+
+/// The mark scale a frame `px_w` pixels wide draws 3D nodes at: radii and
+/// halo widths are multiplied by it, so marks keep their weight on a wide
+/// (high-DPI) framebuffer. A host that sizes marks to a pixel budget — so
+/// nodes never overlap at the current zoom — divides by it.
+pub fn mark_scale(px_w: usize) -> f32 {
+    (px_w as f32 / 500.0).clamp(1.0, 3.0)
+}
+
+/// Text ink that reads on a fill of colour `c`: dark on a bright fill,
+/// light on a dark one.
+fn ink_on(c: Rgb) -> Rgb {
+    let luma = 0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32;
+    if luma > 140.0 {
+        [18, 18, 22]
+    } else {
+        [242, 242, 246]
+    }
+}
+
+/// A 3D node's label, centred in the mark at the largest integer text
+/// scale (the frame's, or smaller) at which `widest` characters — the
+/// trace's longest label, so every node of one size gets the same digits —
+/// fit the mark; a label the node is too small for even at scale 1 is
+/// skipped rather than spilling over its neighbours.
+#[allow(clippy::too_many_arguments)]
+fn draw_node_label(
+    fb: &mut Framebuffer,
+    s: [f32; 3],
+    r_px: f32,
+    ts: f32,
+    label: &str,
+    widest: usize,
+    ink: Rgb,
+) {
+    if label.is_empty() {
+        return;
+    }
+    let chars = label.chars().count().max(widest) as i32;
+    for scale in (1..=ts.round().max(1.0) as i32).rev() {
+        // the bitmap advance leaves a blank column after each glyph; the
+        // ink itself is one column narrower, which is what has to fit —
+        // inside the chord the disc offers at the text's half-height, with
+        // LABEL_MARGIN of clear rim on every side
+        let (fit_w, h) = ((chars * CHAR_W - 1) * scale, CHAR_H * scale);
+        let half_h = h as f32 / 2.0 + LABEL_MARGIN;
+        if half_h >= r_px {
+            continue;
+        }
+        let chord = 2.0 * (r_px * r_px - half_h * half_h).sqrt() - 2.0 * LABEL_MARGIN;
+        if (fit_w as f32) <= chord {
+            let ink_w = (text_width(label, scale) - scale) as f32;
+            let x = (s[0] - ink_w / 2.0).round() as i32;
+            let y = (s[1] - h as f32 / 2.0).round() as i32;
+            draw_text(fb, x, y, label, scale, s[2] - DEPTH_NUDGE, ink);
+            return;
+        }
+    }
+}
+
+/// Clear rim between a node's label and its edge, in pixels.
+const LABEL_MARGIN: f32 = 1.0;
+
 /// Which y scale a 2D series is measured against. `Y2` and `Y3` are
 /// independent right-hand axes: each autoscales from its own traces and gets
 /// its own tick-label column (Y2 innermost, Y3 outermost). The grid always
@@ -1862,6 +2117,17 @@ pub enum Trace {
         edge_colors: Option<Vec<Rgb>>,
         /// Per-node marker silhouette; discs where absent.
         node_shapes: Option<Vec<Shape>>,
+        /// Per-node text drawn inside the mark (a number, an initial) at the
+        /// frame's text scale, in `label_color` or an ink that contrasts
+        /// with the node's own colour. A label the mark cannot hold is not
+        /// drawn — zoom in and it appears. Set through
+        /// [`Plot::set_graph_labels`].
+        node_labels: Option<Vec<String>>,
+        label_color: Option<Rgb>,
+        /// Per-node outline colour: a stroke around the mark, one fifth of
+        /// its radius wide, so a node carries two categories at once (fill
+        /// and border). Set through [`Plot::set_graph_borders`].
+        node_borders: Option<Vec<Rgb>>,
         name: Option<String>,
     },
     Line3d {
@@ -1980,10 +2246,12 @@ pub enum Trace {
         axis: YAxis,
     },
     Graph2d {
-        /// Node centres in data coordinates. The *box* around each centre is
-        /// sized in pixels from its label, so zooming spreads the nodes apart
-        /// while the labels stay legible — the only readable choice at
-        /// terminal resolution.
+        /// Node centres in layout units: one unit is one text column, the
+        /// scale [`LayeredLayout`] places nodes in and a graph frame draws
+        /// at (see [`node_size_units`]). The *box* around each centre is
+        /// sized in pixels from its label, so zooming spreads the nodes
+        /// apart while the labels stay legible — the only readable choice
+        /// at terminal resolution.
         nodes: Vec<[f32; 2]>,
         /// One label per node; an empty string draws an unlabelled box.
         /// Short lists pad rather than truncate, as the per-point style
@@ -2002,7 +2270,7 @@ pub enum Trace {
         /// Per-edge colour override; without it an edge takes a dimmed
         /// average of its endpoint colours, as [`Trace::Graph3d`] does.
         edge_colors: Option<Vec<Rgb>>,
-        /// Optional waypoints per edge, in data coordinates and CSR order:
+        /// Optional waypoints per edge, in the same units and CSR order:
         /// `route_starts[e]..route_starts[e + 1]` indexes `route_pts`.
         /// Waypoints exclude the endpoints, so an empty run is a straight
         /// edge. This is how a layered layout routes an edge that spans
@@ -2159,8 +2427,14 @@ fn format_value(v: f64) -> String {
         format!("{v:.0}")
     } else if a >= 10.0 {
         format!("{v:.1}")
-    } else {
+    } else if a >= 1.0 || a == 0.0 {
         format!("{v:.2}")
+    } else {
+        // Below 1 the fixed two decimals turn 0.0156 into "0.02" and
+        // 0.00046 into "0": keep three significant digits instead, capped
+        // so a denormal does not print a page of zeros.
+        let decimals = (2 - a.log10().floor() as i32).clamp(2, 12) as usize;
+        format!("{v:.decimals$}")
     };
     if s.contains('.') {
         s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -2829,6 +3103,29 @@ pub struct Plot {
     /// with a marker per series sampled there, and a value readout box.
     /// Ignored by 3D plots.
     pub hover2d_px: Option<f32>,
+    /// Whether named traces get the in-canvas legend box. Off, a host draws
+    /// its own legend (a Textual band, say) while trace names still feed
+    /// the crosshair readout — instead of leaving names out and reading
+    /// `series 3` there.
+    pub legend_visible: bool,
+    /// Legend rows the host declares, in place of one row per named trace.
+    /// Empty (the default) means the trace rows. A host whose categories are
+    /// not traces — one graph whose nodes fall into stages — names them here,
+    /// each with the swatch that mirrors it, and toggles them through
+    /// `visible`; [`Self::legend_entry_hit`] says which row a click landed on.
+    pub legend_entries: Vec<LegendEntry>,
+    /// Which corner the legend box sits in (top right by default).
+    pub legend_corner: LegendCorner,
+    /// The legend row under the pointer, lit so the reader sees which row a
+    /// click would toggle — an index into the rows on show (trace rows or
+    /// [`Self::legend_entries`]). Set through [`Self::set_legend_hover`].
+    pub legend_hover: Option<usize>,
+    /// Boxes the crosshair readout must keep off, as fractions of the frame
+    /// `[x0, y0, x1, y1]` in 0..1: text a host draws over the plot in its
+    /// own layer (the Textual widget's overlay spans, say), which the
+    /// renderer cannot otherwise see. The legend's own box is always kept
+    /// off; these are the host's additions.
+    pub keep_out: Vec<[f32; 4]>,
     /// Hovered surface point in data coordinates (a [`Self::pick_surface`]
     /// hit's `data`). When set, `render_3d` draws the hover guides: a ring at
     /// the point, its shadow on the box floor, axis-parallel guide lines from
@@ -2935,6 +3232,11 @@ impl Default for Plot {
             selected: None,
             hovered: None,
             hover2d_px: None,
+            legend_visible: true,
+            legend_entries: Vec::new(),
+            legend_corner: LegendCorner::TopRight,
+            legend_hover: None,
+            keep_out: Vec::new(),
             surface_hover: None,
             surface_selected: None,
             input_map: InputMap::default(),
@@ -3031,6 +3333,9 @@ impl Plot {
             node_sizes,
             edge_colors,
             node_shapes,
+            node_labels: None,
+            label_color: None,
+            node_borders: None,
             name,
         })
     }
@@ -3040,6 +3345,12 @@ impl Plot {
     /// `node_shapes` are per node; `edge_colors` and the CSR `routes` are per
     /// edge. Short per-node lists fall back to the defaults rather than
     /// dropping nodes, so a partial mapping never loses geometry.
+    ///
+    /// `nodes` are in layout units — one unit per text column, the scale
+    /// [`LayeredLayout`](crate::LayeredLayout) works in — and a frame that
+    /// shows only graphs draws them at that scale, so a layout built with
+    /// the same `labels` ([`LayeredLayout::with_labels`]) keeps every box
+    /// clear of its neighbours.
     ///
     /// `routes` gives each edge its waypoints — what
     /// [`LayeredLayout`](crate::LayeredLayout) emits for an edge that spans
@@ -3096,11 +3407,10 @@ impl Plot {
             }
             for j in 0..nodes.len() {
                 let label = labels.get(j).map_or("", String::as_str);
-                let w = (text_width(label, s) + 2 * NODE_PAD_X_S * s).max(NODE_MIN_W_S * s);
+                let (w, h) = node_box_px(label, s);
                 hw = hw.max((w + 1) / 2);
+                hh = hh.max((h + 1) / 2);
             }
-            let h = (CHAR_H * s + 2 * NODE_PAD_Y_S * s).max(NODE_MIN_H_S * s);
-            hh = hh.max((h + 1) / 2);
         }
         // The halo a hovered box grows by, plus the border, so a highlight
         // does not reach past the frame either.
@@ -3119,7 +3429,7 @@ impl Plot {
     fn legend_width(&self, s: i32) -> i32 {
         // Anchored at the origin: only the width is wanted, and that does
         // not depend on where the box ends up.
-        match self.legend_box(0, 0, s, false) {
+        match self.legend_box(0, 0, 0, s, false) {
             Some(lb) => (lb.bx1 - lb.bx0) + lb.ps.inset_x,
             None => 0,
         }
@@ -3132,6 +3442,11 @@ impl Plot {
         if let Some(show) = self.show_axes {
             return !show;
         }
+        self.graph_only()
+    }
+
+    /// Are the visible 2D traces all graphs (and is there at least one)?
+    fn graph_only(&self) -> bool {
         let mut any = false;
         for (i, t) in self.traces.iter().enumerate() {
             if t.is_3d() || !self.is_visible(i) {
@@ -3143,6 +3458,98 @@ impl Plot {
             }
         }
         any
+    }
+
+    /// The extent `(xlo, xhi, ylo, yhi)` of a *graph frame* — one whose
+    /// visible 2D traces are all graphs, with no explicit range and no log
+    /// axis — as the union of its nodes and waypoints, unpadded. `None` for
+    /// any other frame.
+    ///
+    /// A graph's coordinates are a layout, not measurements: one unit is
+    /// one text column (see [`LayoutSpacing`]), so a graph frame draws at
+    /// that scale — `CHAR_W` pixels per unit at the frame's text scale —
+    /// centred, rather than stretching the layout to fill the plot the way
+    /// a chart's data is. Stretching is what turns a compact pipeline into
+    /// a few boxes at the corners of an empty frame, or squeezes a wide
+    /// rank until its boxes overlap; at the text's own scale a layout built
+    /// from the labels ([`LayeredLayout::with_labels`]) fits exactly.
+    fn graph_frame(&self) -> Option<(f64, f64, f64, f64)> {
+        if !self.graph_only()
+            || self.x_range.is_some()
+            || self.y_range.is_some()
+            || self.log_x()
+            || self.log_y()
+        {
+            return None;
+        }
+        let mut ext: Option<(f64, f64, f64, f64)> = None;
+        for (i, t) in self.traces.iter().enumerate() {
+            let Trace::Graph2d { nodes, route_pts, .. } = t else { continue };
+            if !self.is_visible(i) {
+                continue;
+            }
+            let Some((xlo, xhi, ylo, yhi)) = graph_extent(nodes, route_pts) else { continue };
+            ext = Some(match ext {
+                None => (xlo, xhi, ylo, yhi),
+                Some((a, b, c, d)) => (a.min(xlo), b.max(xhi), c.min(ylo), d.max(yhi)),
+            });
+        }
+        ext
+    }
+
+    /// The text scale a graph frame `w × h` pixels draws at: the largest
+    /// scale up to `s` at which the graph `g` fits the frame at its native
+    /// `CHAR_W · scale` pixels per unit. Big frames get big text only when
+    /// the graph has room for it; a deep pipeline in a tall pane keeps its
+    /// text small so the whole pipeline stays on screen.
+    fn graph_text_scale(&self, w: i32, h: i32, s: i32, g: (f64, f64, f64, f64)) -> i32 {
+        let (xlo, xhi, ylo, yhi) = g;
+        for scale in (2..=s).rev() {
+            let (box_hw, box_hh) = self.graph_box_inset(scale);
+            let pad = 3 * scale;
+            let avail_w = (w - 4 * pad - self.legend_width(scale) - 2 * box_hw) as f64;
+            let avail_h = (h - 4 * pad - 2 * box_hh) as f64;
+            let k = ((CHAR_W * scale) as f64).max(self.graph_scale_floor(scale));
+            if (xhi - xlo) * k <= avail_w && (yhi - ylo) * k <= avail_h {
+                return scale;
+            }
+        }
+        1
+    }
+
+    /// The fewest pixels per layout unit at which no two node boxes of the
+    /// visible graphs overlap, given their sizes at text scale `s` — 0 when
+    /// there is nothing to keep apart. Two boxes are clear of each other as
+    /// soon as *either* axis separates them, so each pair needs the smaller
+    /// of its two axis scales and the frame needs the largest of those.
+    fn graph_scale_floor(&self, s: i32) -> f64 {
+        let mut boxes: Vec<(f64, f64, f64, f64)> = Vec::new();
+        for (i, t) in self.traces.iter().enumerate() {
+            let Trace::Graph2d { nodes, labels, .. } = t else { continue };
+            if !self.is_visible(i) {
+                continue;
+            }
+            for (j, p) in nodes.iter().enumerate() {
+                if !p[0].is_finite() || !p[1].is_finite() {
+                    continue;
+                }
+                let (w, h) = node_box_px(labels.get(j).map_or("", String::as_str), s);
+                boxes.push((p[0] as f64, p[1] as f64, w as f64 * 0.5, h as f64 * 0.5));
+            }
+        }
+        let mut floor = 0f64;
+        for (i, a) in boxes.iter().enumerate() {
+            for b in &boxes[i + 1..] {
+                let (dx, dy) = ((a.0 - b.0).abs(), (a.1 - b.1).abs());
+                let need_x = if dx > 0.0 { (a.2 + b.2) / dx } else { f64::INFINITY };
+                let need_y = if dy > 0.0 { (a.3 + b.3) / dy } else { f64::INFINITY };
+                let need = need_x.min(need_y);
+                if need.is_finite() {
+                    floor = floor.max(need);
+                }
+            }
+        }
+        floor
     }
 
     /// Add a 3D polyline through `pts` in order. Vertices are not pickable;
@@ -3270,6 +3677,73 @@ impl Plot {
         }
     }
 
+    /// Drag one node of a 2D graph by a pointer delta of `(dx_px, dy_px)`
+    /// framebuffer pixels, the frame being `px_w × px_h` — the primitive
+    /// behind "grab a box and move it". `flat` is the node's index in the
+    /// flat space [`Self::pick`] returns. Returns the node's new position,
+    /// or `None` for a 3D plot, an index that is not a 2D graph node, or a
+    /// node with no finite position.
+    ///
+    /// The rest of the graph stays put: a graph frame centres on its
+    /// extent, so moving a node past the edge would shift every other box
+    /// the other way under the pointer; the camera pans back by exactly
+    /// that shift. Edge waypoints are left where they are, so a routed
+    /// edge bends to follow the box rather than losing its route.
+    pub fn drag_node(
+        &mut self,
+        px_w: usize,
+        px_h: usize,
+        flat: usize,
+        dx_px: f32,
+        dy_px: f32,
+    ) -> Option<[f32; 2]> {
+        if self.is_3d() {
+            return None;
+        }
+        self.resync_meta();
+        let (ti, i) = self.locate_node(flat)?;
+        let Trace::Graph2d { nodes, .. } = &self.traces[ti] else { return None };
+        let p = *nodes.get(i)?;
+        if !p[0].is_finite() || !p[1].is_finite() {
+            return None;
+        }
+        let before = self.layout_2d(px_w, px_h).map;
+        let (sx, sy) = (before.sx(p[0] as f64), before.sy(p[1] as f64));
+        let np = [before.inv_x(sx + dx_px as f64) as f32, before.inv_y(sy + dy_px as f64) as f32];
+        if !np[0].is_finite() || !np[1].is_finite() {
+            return None;
+        }
+        if let Trace::Graph2d { nodes, .. } = &mut self.traces[ti] {
+            nodes[i] = np;
+        }
+        self.rebuild_meta(ti);
+        let after = self.layout_2d(px_w, px_h).map;
+        let (shift_x, shift_y) = (after.sx(p[0] as f64) - sx, after.sy(p[1] as f64) - sy);
+        if shift_x.is_finite() && shift_y.is_finite() {
+            self.camera.pan(-shift_x, -shift_y);
+        }
+        Some(np)
+    }
+
+    /// The `(trace, node)` a flat node index names, walking the same blocks
+    /// [`Self::flat_base`] counts.
+    fn locate_node(&self, flat: usize) -> Option<(usize, usize)> {
+        let mut base = 0usize;
+        for (ti, t) in self.traces.iter().enumerate() {
+            let n = match t {
+                Trace::Scatter3d { pts, .. } => pts.len(),
+                Trace::Graph3d { nodes, .. } => nodes.len(),
+                Trace::Graph2d { nodes, .. } => nodes.len(),
+                _ => 0,
+            };
+            if flat < base + n {
+                return Some((ti, flat - base));
+            }
+            base += n;
+        }
+        None
+    }
+
     /// Move every node of a graph trace at once — the per-frame call of a
     /// force-directed layout. Structure is untouched, so flat node/edge
     /// indices (and with them `selected`/`hovered` and any host-held
@@ -3387,6 +3861,57 @@ impl Plot {
                 }
                 *node_colors = colors;
                 *edge_colors = new_edge_colors;
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
+    /// Label the nodes of a 3D graph trace in place: one string per node
+    /// (an empty string draws nothing), or `None` to clear. `color` is the
+    /// ink for every label; `None` picks an ink per node that contrasts
+    /// with its fill. Labels are drawn inside the marks and only where they
+    /// fit, so a host sizes its marks (see [`mark_scale`]) to decide when
+    /// they show.
+    pub fn set_graph_labels(
+        &mut self,
+        id: TraceId,
+        labels: Option<Vec<String>>,
+        color: Option<Rgb>,
+    ) -> Result<(), TraceError> {
+        let t = self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        match t {
+            Trace::Graph3d { nodes, node_labels, label_color, .. } => {
+                if let Some(l) = &labels {
+                    if l.len() != nodes.len() {
+                        return Err(TraceError::LengthMismatch);
+                    }
+                }
+                *node_labels = labels;
+                *label_color = color;
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
+    /// Outline the nodes of a 3D graph trace in place: one colour per node,
+    /// or `None` for no borders. The stroke is a fifth of each node's
+    /// radius, drawn outside the mark.
+    pub fn set_graph_borders(
+        &mut self,
+        id: TraceId,
+        borders: Option<Vec<Rgb>>,
+    ) -> Result<(), TraceError> {
+        let t = self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)?;
+        match t {
+            Trace::Graph3d { nodes, node_borders, .. } => {
+                if let Some(b) = &borders {
+                    if b.len() != nodes.len() {
+                        return Err(TraceError::LengthMismatch);
+                    }
+                }
+                *node_borders = borders;
                 Ok(())
             }
             _ => Err(TraceError::WrongKind),
@@ -3526,8 +4051,49 @@ impl Plot {
     /// }
     /// ```
     pub fn legend_hit(&self, px_w: usize, px_h: usize, px: f32, py: f32) -> Option<TraceId> {
-        let (x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
-        self.legend_box(x1, y0, s, three_d)?.row_at(px, py)
+        if !self.legend_entries.is_empty() {
+            return None; // host rows are not traces: see `legend_entry_hit`
+        }
+        let (x0, x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
+        self.legend_box(x0, x1, y0, s, three_d)?.row_at(px, py)
+    }
+
+    /// The legend row — trace row or host row, whichever the legend shows —
+    /// under `(px, py)` in a render of this size, as its index in the rows on
+    /// show, if any.
+    pub fn legend_row_at(&self, px_w: usize, px_h: usize, px: f32, py: f32) -> Option<usize> {
+        let (x0, x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
+        self.legend_box(x0, x1, y0, s, three_d)?.row_at(px, py)
+    }
+
+    /// Light the legend row under `(px, py)` — `None` for either clears it —
+    /// and say whether that changed the picture, so a host repaints only
+    /// when the pointer crosses onto another row or leaves the box.
+    pub fn set_legend_hover(
+        &mut self,
+        px_w: usize,
+        px_h: usize,
+        px: Option<f32>,
+        py: Option<f32>,
+    ) -> bool {
+        let row = match (px, py) {
+            (Some(x), Some(y)) => self.legend_row_at(px_w, px_h, x, y),
+            _ => None,
+        };
+        let changed = self.legend_hover != row;
+        self.legend_hover = row;
+        changed
+    }
+
+    /// The host-declared legend row ([`Self::legend_entries`]) whose box
+    /// covers `(px, py)` in a render of this size, as its index, if any.
+    /// `None` when the legend shows trace rows (see [`Self::legend_hit`]).
+    pub fn legend_entry_hit(&self, px_w: usize, px_h: usize, px: f32, py: f32) -> Option<usize> {
+        if self.legend_entries.is_empty() {
+            return None;
+        }
+        let (x0, x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
+        self.legend_box(x0, x1, y0, s, three_d)?.row_at(px, py)
     }
 
     /// Just the legend, drawn into an otherwise transparent framebuffer of
@@ -3537,8 +4103,8 @@ impl Plot {
     /// changing font and weight the moment a drag starts.
     pub fn render_legend_overlay(&self, px_w: usize, px_h: usize) -> Framebuffer {
         let mut fb = Framebuffer::new(px_w, px_h);
-        let (x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
-        self.draw_legend(&mut fb, 0, y0, x1, s, 0.0, three_d);
+        let (x0, x1, y0, s, three_d) = self.legend_anchor(px_w, px_h);
+        self.draw_legend(&mut fb, x0, y0, x1, s, 0.0, three_d);
         fb
     }
 
@@ -4311,6 +4877,10 @@ impl Plot {
     /// scene (trackball: drag right turns the object right, the camera
     /// orbiting the other way), panning follows the pointer, dragging up or
     /// left zooms in.
+    ///
+    /// A 2D plot has nothing to rotate, so on one a control mapped to yaw
+    /// or pitch pans instead: a plain drag on a chart or a graph moves it,
+    /// which is the only thing a drag on a flat picture can mean.
     pub fn apply_drag(&mut self, dx: f64, dy: f64, shift: bool, scales: DragScales) {
         let m = self.input_map;
         let ((cx, ix), (cy, iy)) = if shift {
@@ -4318,8 +4888,14 @@ impl Plot {
         } else {
             ((m.drag_x, m.invert_drag_x), (m.drag_y, m.invert_drag_y))
         };
+        let flat = !self.traces.is_empty() && !self.is_3d();
         for (control, inv, d) in [(cx, ix, dx), (cy, iy, dy)] {
             let d = if inv { -d } else { d };
+            let control = match control {
+                CameraControl::Yaw if flat => CameraControl::PanX,
+                CameraControl::Pitch if flat => CameraControl::PanY,
+                c => c,
+            };
             match control {
                 CameraControl::Yaw => self.camera.rotate(-d * scales.rotate, 0.0),
                 CameraControl::Pitch => self.camera.rotate(0.0, -d * scales.rotate),
@@ -4444,7 +5020,7 @@ impl Plot {
             }
         }
 
-        let ts = (px_w as f32 / 500.0).clamp(1.0, 3.0);
+        let ts = mark_scale(px_w);
         let mut flat = 0usize;
         let mut eflat = 0usize;
         for (ti, t) in self.traces.iter().enumerate() {
@@ -4486,8 +5062,15 @@ impl Plot {
                     node_sizes,
                     edge_colors,
                     node_shapes,
+                    node_labels,
+                    label_color,
+                    node_borders,
                     ..
                 } => {
+                    let widest = node_labels
+                        .as_ref()
+                        .map(|v| v.iter().map(|l| l.chars().count()).max().unwrap_or(0))
+                        .unwrap_or(0);
                     // Edges first, so nodes sit on top.
                     for (k, &(a, b)) in edges.iter().enumerate() {
                         let el = Element::Edge(eflat);
@@ -4529,7 +5112,34 @@ impl Plot {
                             .and_then(|v| v.get(i))
                             .copied()
                             .unwrap_or_default();
-                        self.draw_node(&mut fb, s, r * ts, shape, fog(c, s[2]), c, flat, ts);
+                        let r_px = r * ts;
+                        if let Some(bc) = node_borders.as_ref().and_then(|v| v.get(i)) {
+                            // the border is the filled silhouette, a stroke
+                            // wider, drawn a hair behind the node so the
+                            // node's own depth wins where they overlap
+                            let stroke = (BORDER_FRACTION * r_px).max(1.0);
+                            fb.mark(
+                                s[0],
+                                s[1],
+                                s[2] + DEPTH_NUDGE,
+                                r_px + stroke,
+                                shape.filled(),
+                                fog(*bc, s[2]),
+                            );
+                        }
+                        let fill = fog(c, s[2]);
+                        self.draw_node(&mut fb, s, r_px, shape, fill, c, flat, ts);
+                        if let Some(label) = node_labels.as_ref().and_then(|v| v.get(i)) {
+                            draw_node_label(
+                                &mut fb,
+                                s,
+                                r_px,
+                                ts,
+                                label,
+                                widest,
+                                label_color.unwrap_or_else(|| ink_on(fill)),
+                            );
+                        }
                         flat += 1;
                     }
                 }
@@ -5243,6 +5853,11 @@ impl Plot {
         // the same geometry the renderer draws into.
         let (w, h) = (px_w.max(1) as i32, px_h.max(1) as i32);
         let s = ((h as f32) / 240.0).round().clamp(1.0, 4.0) as i32;
+        let graph = self.graph_frame();
+        let s = match graph {
+            Some(g) => self.graph_text_scale(w, h, s, g),
+            None => s,
+        };
         let (cw, ch) = (CHAR_W * s, CHAR_H * s);
         let tick_len = 2 * s;
         let pad = 3 * s;
@@ -5356,8 +5971,22 @@ impl Plot {
                     Map2d::from_scale(shi + per_px * at_hi as f64, log),
                 )
             };
-            let (mxlo, mxhi) = room(dxlo, dxhi, (x1 - x0) as f64, box_hw, box_hw + legend_w, logx);
-            let (mylo, myhi) = room(dylo, dyhi, (y1 - y0) as f64, box_hh, box_hh, logy);
+            let (mxlo, mxhi, mylo, myhi) = match graph {
+                Some(g) => graph_range(
+                    g,
+                    rect,
+                    legend_w,
+                    (box_hw, box_hh),
+                    (CHAR_W * s) as f64,
+                    self.graph_scale_floor(s),
+                ),
+                None => {
+                    let (mxlo, mxhi) =
+                        room(dxlo, dxhi, (x1 - x0) as f64, box_hw, box_hw + legend_w, logx);
+                    let (mylo, myhi) = room(dylo, dyhi, (y1 - y0) as f64, box_hh, box_hh, logy);
+                    (mxlo, mxhi, mylo, myhi)
+                }
+            };
             map = Map2d::new((mxlo, mxhi, mylo, myhi), rect, cam, (logx, logy));
             // Ticks cover what is actually visible after zoom/pan.
             let (vxlo, vxhi) = (map.inv_x(x0 as f64), map.inv_x(x1 as f64));
@@ -6250,28 +6879,14 @@ impl Plot {
         }
     }
 
-    /// The 2D hover crosshair: a vertical guide at the sample x nearest the
-    /// hovered pixel, a marker on every series sampled at that x, and a
-    /// readout box naming each value. Drawn after everything else so no
-    /// chrome covers it. Series match by exact sample x, so series on a
-    /// shared grid all get a row while series on their own grids only show
-    /// where they truly have a sample. The readout box is placed by
-    /// [`readout_slot`], which keeps it off the legend and out of the half of
-    /// the frame the sampled markers are in.
-    fn draw_crosshair(
-        &self,
-        fb: &mut Framebuffer,
-        hover_px: f32,
-        rect: (i32, i32, i32, i32),
-        s: i32,
-        map: &Map2d,
-        maps_r: &[Map2d; RIGHT_AXES],
-    ) {
-        let (x0, y0, x1, y1) = rect;
-        let cursor_x = map.inv_x(hover_px as f64);
+    /// The sample x the 2D crosshair snaps to for a cursor at data x
+    /// `cursor_x`: the nearest finite x of any visible trace that offers
+    /// samples (see `draw_crosshair` for which do). `None` when nothing can
+    /// be snapped to.
+    fn hover2d_snap(&self, cursor_x: f64) -> Option<f32> {
         // With an x window the nearest sample overall may sit outside it;
         // snapping there would silently drop the crosshair (the guide bails
-        // off-rect below), so windowed snapping only considers visible xs.
+        // off-rect), so windowed snapping only considers visible xs.
         let vis = self.x_window;
         let mut snap: Option<f32> = None;
         let mut best = f64::INFINITY;
@@ -6320,7 +6935,46 @@ impl Plot {
                 }
             }
         }
-        let Some(snap) = snap else { return };
+        snap
+    }
+
+    /// Where the 2D crosshair would snap for a cursor `px` pixels from the
+    /// left of a `px_w`×`px_h` frame: the sample x, in data units, or
+    /// `None` when no guide would be drawn (3D plots, nothing to snap to).
+    /// Two cursor positions with the same answer render the same frame, so
+    /// a frontend can skip the repaint — the crosshair and its readout are
+    /// placed from the snapped sample, never from the raw cursor.
+    pub fn hover2d_snap_px(&self, px_w: usize, px_h: usize, px: f32) -> Option<f32> {
+        if self.is_3d() || px_w == 0 || px_h == 0 {
+            return None;
+        }
+        let l = self.layout_2d(px_w, px_h);
+        let snap = self.hover2d_snap(l.map.inv_x(px as f64))?;
+        let sx = l.map.sx(snap as f64).round() as i32;
+        // Off the plot rect the guide is not drawn at all: report that as
+        // "nothing", so entering and leaving the margin stays one state.
+        (sx >= l.x0 && sx <= l.x1).then_some(snap)
+    }
+
+    /// The 2D hover crosshair: a vertical guide at the sample x nearest the
+    /// hovered pixel, a marker on every series sampled at that x, and a
+    /// readout box naming each value. Drawn after everything else so no
+    /// chrome covers it. Series match by exact sample x, so series on a
+    /// shared grid all get a row while series on their own grids only show
+    /// where they truly have a sample. The readout box is placed by
+    /// [`readout_slot`], which keeps it off the legend and out of the half of
+    /// the frame the sampled markers are in.
+    fn draw_crosshair(
+        &self,
+        fb: &mut Framebuffer,
+        hover_px: f32,
+        rect: (i32, i32, i32, i32),
+        s: i32,
+        map: &Map2d,
+        maps_r: &[Map2d; RIGHT_AXES],
+    ) {
+        let (x0, y0, x1, y1) = rect;
+        let Some(snap) = self.hover2d_snap(map.inv_x(hover_px as f64)) else { return };
         let px = map.sx(snap as f64).round() as i32;
         if px < x0 || px > x1 {
             return;
@@ -6424,11 +7078,25 @@ impl Plot {
             .max()
             .unwrap_or(cw);
         let (box_w, box_h) = ps.box_size(rows.len() as i32 + 1, text_w);
-        // Beside the guide, away from the data, and off the legend. The
-        // legend rect comes from the same call `draw_legend` made a moment
-        // ago, so the box dodges what is actually on screen.
-        let legend = self.legend_box(x1, y0, s, false).map(|l| (l.bx0, l.by0, l.bx1, l.by1));
-        let (bx0, by0) = readout_slot(px, box_w, box_h, rect, ps.inset, &markers, legend);
+        // Beside the guide, away from the data, and off the legend and the
+        // host's own overlays. The legend rect comes from the same call
+        // `draw_legend` made a moment ago, so the box dodges what is actually
+        // on screen; `keep_out` is scaled from frame fractions to this frame.
+        let mut obstacles: Vec<(i32, i32, i32, i32)> = self
+            .legend_box(x0, x1, y0, s, false)
+            .map(|l| (l.bx0, l.by0, l.bx1, l.by1))
+            .into_iter()
+            .collect();
+        let (fw, fh) = (fb.w as f32, fb.h as f32);
+        obstacles.extend(self.keep_out.iter().map(|k| {
+            (
+                (k[0] * fw).floor() as i32,
+                (k[1] * fh).floor() as i32,
+                (k[2] * fw).ceil() as i32,
+                (k[3] * fh).ceil() as i32,
+            )
+        }));
+        let (bx0, by0) = readout_slot(px, box_w, box_h, rect, ps.inset, &markers, &obstacles);
         let (bx1, by1) = (bx0 + box_w, by0 + box_h);
 
         ps.frame(fb, (bx0, by0, bx1, by1), 0.0, &self.chrome);
@@ -6447,13 +7115,13 @@ impl Plot {
     /// uses: the 2D path anchors it to the plot frame, the 3D path to the
     /// image itself. Shared by drawing and hit-testing, so a click always
     /// lands on the row the eye is pointing at.
-    fn legend_anchor(&self, px_w: usize, px_h: usize) -> (i32, i32, i32, bool) {
+    fn legend_anchor(&self, px_w: usize, px_h: usize) -> (i32, i32, i32, i32, bool) {
         if !self.traces.is_empty() && !self.is_3d() {
             let l = self.layout_2d(px_w, px_h);
-            (l.x1, l.y0, l.s, false)
+            (l.x0, l.x1, l.y0, l.s, false)
         } else {
             let s = ((px_h.max(1) as f32) / 240.0).round().clamp(1.0, 4.0) as i32;
-            (px_w.max(1) as i32 - 1, 0, s, true)
+            (0, px_w.max(1) as i32 - 1, 0, s, true)
         }
     }
 
@@ -6463,29 +7131,58 @@ impl Plot {
     /// never appears as a legend entry for geometry that is not on screen.
     /// Hidden traces *are* listed, greyed out — the row is what you click to
     /// bring one back.
-    fn legend_box(&self, x1: i32, y0: i32, s: i32, three_d: bool) -> Option<LegendBox<'_>> {
-        let rows: Vec<LegendRow> = self
-            .traces
-            .iter()
-            .enumerate()
-            .filter(|(i, t)| self.in_legend(*i) && t.is_3d() == three_d)
-            .filter_map(|(i, t)| {
-                t.name().map(|name| LegendRow {
-                    trace: i,
-                    name,
-                    color: t.color(),
-                    visible: self.is_visible(i),
+    fn legend_box(
+        &self,
+        x0: i32,
+        x1: i32,
+        y0: i32,
+        s: i32,
+        three_d: bool,
+    ) -> Option<LegendBox<'_>> {
+        if !self.legend_visible {
+            return None;
+        }
+        let rows: Vec<LegendRow> = if !self.legend_entries.is_empty() {
+            // host-declared rows: shown on either render path
+            self.legend_entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| LegendRow {
+                    id: i,
+                    name: e.label.as_str(),
+                    swatch: e.swatch,
+                    color: e.color,
+                    border: e.border,
+                    visible: e.visible,
                 })
-            })
-            .collect();
+                .collect()
+        } else {
+            self.traces
+                .iter()
+                .enumerate()
+                .filter(|(i, t)| self.in_legend(*i) && t.is_3d() == three_d)
+                .filter_map(|(i, t)| {
+                    t.name().map(|name| LegendRow {
+                        id: i,
+                        name,
+                        swatch: Swatch::Square,
+                        color: t.color(),
+                        border: None,
+                        visible: self.is_visible(i),
+                    })
+                })
+                .collect()
+        };
         if rows.is_empty() {
             return None;
         }
         let ps = PanelStyle::new(s);
         let text_w = rows.iter().map(|r| ps.measure(r.name)).max().unwrap_or(CHAR_W * s);
         let (box_w, box_h) = ps.box_size(rows.len() as i32, text_w);
-        let bx1 = x1 - ps.inset_x;
-        let bx0 = bx1 - box_w;
+        let (bx0, bx1) = match self.legend_corner {
+            LegendCorner::TopRight => (x1 - ps.inset_x - box_w, x1 - ps.inset_x),
+            LegendCorner::TopLeft => (x0 + ps.inset_x, x0 + ps.inset_x + box_w),
+        };
         let by0 = y0 + ps.inset;
         Some(LegendBox { ps, bx0, by0, bx1, by1: by0 + box_h, rows })
     }
@@ -6499,27 +7196,58 @@ impl Plot {
     fn draw_legend(
         &self,
         fb: &mut Framebuffer,
-        _x0: i32,
+        x0: i32,
         y0: i32,
         x1: i32,
         s: i32,
         z: f32,
         three_d: bool,
     ) {
-        let Some(lb) = self.legend_box(x1, y0, s, three_d) else { return };
+        let Some(lb) = self.legend_box(x0, x1, y0, s, three_d) else { return };
         let (ps, bx0, by0) = (lb.ps, lb.bx0, lb.by0);
 
         ps.frame(fb, (bx0, by0, lb.bx1, lb.by1), z, &self.chrome);
         for (i, row) in lb.rows.iter().enumerate() {
             let ey = by0 + ps.pad_y + i as i32 * ps.row_h;
+            if self.legend_hover == Some(i) {
+                // the row under the pointer: a faint band across the box,
+                // drawn before the swatch and text at the frame's own depth
+                // (a later draw at equal depth wins, as the chips do over
+                // the frame fill), so the reader sees what a click toggles
+                let tint = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * 0.18).round() as u8;
+                let bg = self.chrome.bg;
+                let band = [
+                    tint(bg[0], self.chrome.ink_bright[0]),
+                    tint(bg[1], self.chrome.ink_bright[1]),
+                    tint(bg[2], self.chrome.ink_bright[2]),
+                ];
+                let inset = ps.stroke.ceil() as i32 + 1;
+                let (top, bottom) = (ey - ps.leading / 2, ey + CHAR_H * s + ps.leading / 2 - 1);
+                rounded_panel(
+                    fb,
+                    bx0 + inset,
+                    top,
+                    lb.bx1 - inset,
+                    bottom,
+                    ps.radius * 0.5,
+                    0.0,
+                    z,
+                    band,
+                    band,
+                );
+            }
             // A toggled-off series greys out rather than vanishing — the way
             // the website legend does it, and the only way back on.
-            let (chip, ink) = if row.visible {
-                (row.color, self.chrome.ink_bright)
+            let drain = |c: Rgb| fade(desaturate(c), self.chrome.bg);
+            let (chip, border, ink) = if row.visible {
+                (row.color, row.border, self.chrome.ink_bright)
             } else {
-                (fade(desaturate(row.color), self.chrome.bg), fade(self.chrome.ink, self.chrome.bg))
+                (drain(row.color), row.border.map(drain), fade(self.chrome.ink, self.chrome.bg))
             };
-            ps.chip(fb, bx0, ey, s, z, chip);
+            match row.swatch {
+                Swatch::Square => ps.chip(fb, bx0, ey, s, z, chip),
+                other => ps.mark(fb, bx0, ey, s, z, other, chip, border, &self.chrome),
+            }
             ps.label(fb, bx0 + ps.text_dx(), ey, row.name, z, ink, self.chrome.bg);
         }
     }
@@ -6650,8 +7378,31 @@ impl Plot {
         // it is sized against the text scale rather than the edge width.
         let (head_len, head_half) = (4.0 * ts as f64, 2.5 * ts as f64);
         let trim = if *directed { head_len * 0.9 } else { 0.0 };
+        let edge_color = |k: usize, a: usize, b: usize| -> Rgb {
+            match edge_colors.as_ref().and_then(|v| v.get(k)) {
+                Some(c) => *c,
+                None => {
+                    let (ca, cb) = (color_of(a), color_of(b));
+                    [
+                        ((ca[0] as u16 + cb[0] as u16) / 2) as u8 / 2 + 20,
+                        ((ca[1] as u16 + cb[1] as u16) / 2) as u8 / 2 + 20,
+                        ((ca[2] as u16 + cb[2] as u16) / 2) as u8 / 2 + 20,
+                    ]
+                }
+            }
+        };
+        // Bundled edges share pixels along their trunk, and the last one
+        // drawn owns them — so the bright ones go last, and a lit
+        // dependency path stays lit where a dimmed edge runs along it.
+        let mut order: Vec<usize> = (0..edges.len()).collect();
+        order.sort_by_key(|&k| {
+            let (a, b) = (edges[k].0 as usize, edges[k].1 as usize);
+            let c = edge_color(k, a, b);
+            (c[0] as u32 + c[1] as u32 + c[2] as u32, k)
+        });
 
-        for (k, &(a, b)) in edges.iter().enumerate() {
+        for k in order {
+            let (a, b) = edges[k];
             let el = Element::Edge(edge0 + k);
             let Some(poly) = self.graph2d_edge_path(ti, &boxes, m, k, trim) else { continue };
             let hot = (self.selected == Some(el))
@@ -6665,18 +7416,7 @@ impl Plot {
                 }
                 continue;
             }
-            let (a, b) = (a as usize, b as usize);
-            let ec = match edge_colors.as_ref().and_then(|v| v.get(k)) {
-                Some(c) => *c,
-                None => {
-                    let (ca, cb) = (color_of(a), color_of(b));
-                    [
-                        ((ca[0] as u16 + cb[0] as u16) / 2) as u8 / 2 + 20,
-                        ((ca[1] as u16 + cb[1] as u16) / 2) as u8 / 2 + 20,
-                        ((ca[2] as u16 + cb[2] as u16) / 2) as u8 / 2 + 20,
-                    ]
-                }
-            };
+            let ec = edge_color(k, a as usize, b as usize);
             for w in poly.windows(2) {
                 stroke(fb, w[0], w[1], 0.5 * ts, ec);
             }
@@ -7824,6 +8564,102 @@ mod tests {
         });
     }
 
+    /// A star is a solid mark between its inner and outer discs.
+    #[test]
+    fn star_is_between_its_inner_and_outer_discs() {
+        let r = 8.0;
+        let star = lit_with(Shape::Star, r);
+        assert!(star > lit_with(Shape::Dot, r), "a star is bigger than its 0.8 r core");
+        assert!(star < lit_with(Shape::Diamond, r), "a star has notches a diamond has not");
+        assert_eq!(Shape::parse("star"), Some(Shape::Star));
+        assert_eq!(Shape::NAMES.len(), 8);
+        // a point straight up: the tip is inside, the valley beside it is not
+        assert!(Framebuffer::in_star(0.0, -1.29 * r, 1.3 * r));
+        assert!(!Framebuffer::in_star(0.9 * r, -0.9 * r, 1.3 * r));
+    }
+
+    fn one_node(r: f32) -> (Plot, TraceId) {
+        let mut plot = Plot::new();
+        plot.show_box = false;
+        let h = plot.add_graph3d(
+            vec![[0.0, 0.0, 0.0]],
+            vec![[40, 40, 60]],
+            vec![],
+            r,
+            None,
+            None,
+            None,
+            None,
+        );
+        (plot, h)
+    }
+
+    /// A border paints its own colour around the node; a label paints ink
+    /// inside it, only when the node is big enough to hold it.
+    #[test]
+    fn borders_and_labels_draw_on_3d_nodes() {
+        let (mut plot, h) = one_node(9.0);
+        let plain = plot.render(200, 200);
+        plot.set_graph_borders(h, Some(vec![[250, 30, 30]])).unwrap();
+        let bordered = plot.render(200, 200);
+        let red = |fb: &Framebuffer| {
+            fb.color.iter().zip(&fb.drawn).filter(|(c, d)| **d && **c == [250, 30, 30]).count()
+        };
+        assert!(red(&bordered) > 0 && red(&plain) == 0);
+        let lit = |fb: &Framebuffer| fb.drawn.iter().filter(|d| **d).count();
+        assert!(lit(&bordered) > lit(&plain), "the border is drawn outside the mark");
+
+        plot.set_graph_labels(h, Some(vec!["42".into()]), None).unwrap();
+        let labelled = plot.render(200, 200);
+        let ink = |fb: &Framebuffer| {
+            fb.color.iter().zip(&fb.drawn).filter(|(c, d)| **d && **c == [242, 242, 246]).count()
+        };
+        assert!(ink(&labelled) > 0, "light ink on a dark fill");
+        assert_eq!(lit(&labelled), lit(&bordered), "the label stays inside the mark");
+
+        // a wide frame draws marks at scale 3, where "42" would not fit a
+        // 9 px mark: the label steps down to the scale that does
+        let wide = plot.render(1600, 1600);
+        assert!(ink(&wide) > 0, "the label falls back to a smaller text scale");
+        // labels share one scale per trace: "8" beside "67" is drawn at the
+        // scale "67" fits, so a graph's digits read as one size
+        let mut pair = Plot::new();
+        pair.show_box = false;
+        let hp = pair.add_graph3d(
+            vec![[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+            vec![[40, 40, 60]; 2],
+            vec![],
+            9.0,
+            None,
+            None,
+            None,
+            None,
+        );
+        pair.set_graph_labels(hp, Some(vec!["8".into(), "67".into()]), None).unwrap();
+        let both = ink(&pair.render(1600, 1600));
+        pair.set_graph_labels(hp, Some(vec!["8".into(), "".into()]), None).unwrap();
+        let alone = ink(&pair.render(1600, 1600));
+        pair.set_graph_labels(hp, Some(vec!["".into(), "67".into()]), None).unwrap();
+        let two = ink(&pair.render(1600, 1600));
+        assert_eq!(both, alone + two, "the lone digit did not grow to a scale of its own");
+        // too small to hold two digits: the label is skipped, not spilled
+        let (mut small, h2) = one_node(3.0);
+        small.set_graph_labels(h2, Some(vec!["42".into()]), None).unwrap();
+        assert_eq!(ink(&small.render(200, 200)), 0);
+        // an explicit ink wins over the contrast pick
+        plot.set_graph_labels(h, Some(vec!["42".into()]), Some([9, 200, 9])).unwrap();
+        let green = plot.render(200, 200);
+        assert!(green.color.iter().zip(&green.drawn).any(|(c, d)| *d && *c == [9, 200, 9]));
+
+        assert_eq!(plot.set_graph_labels(h, Some(vec![]), None), Err(TraceError::LengthMismatch));
+        assert_eq!(plot.set_graph_borders(h, Some(vec![])), Err(TraceError::LengthMismatch));
+        let l = plot.add_line3d(vec![[0.0; 3], [1.0; 3]], [1, 1, 1], 1.0, None);
+        assert_eq!(plot.set_graph_labels(l, None, None), Err(TraceError::WrongKind));
+        assert_eq!(mark_scale(250), 1.0);
+        assert_eq!(mark_scale(1000), 2.0);
+        assert_eq!(mark_scale(5000), 3.0);
+    }
+
     /// Hover and selection halos are drawn as the filled silhouette, so an
     /// open shape lights up as one solid blob rather than a thin outline.
     #[test]
@@ -8328,6 +9164,82 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// The snap query agrees with the renderer: cursor positions that
+    /// share a snapped sample share a frame, and a position that snaps
+    /// elsewhere does not.
+    #[test]
+    fn hover2d_snap_px_predicts_identical_frames() {
+        let mut plot = crosshair_plot();
+        let a = plot.hover2d_snap_px(300, 200, 150.0);
+        let b = plot.hover2d_snap_px(300, 200, 151.5);
+        assert!(a.is_some());
+        assert_eq!(a, b, "neighbouring cursor pixels snap to the same sample");
+        let far = (0..300)
+            .map(|px| plot.hover2d_snap_px(300, 200, px as f32))
+            .find(|s| s.is_some() && *s != a)
+            .expect("some other sample to snap to");
+        plot.hover2d_px = Some(150.0);
+        let frame_a = plot.render(300, 200).rgba();
+        plot.hover2d_px = Some(151.5);
+        assert_eq!(plot.render(300, 200).rgba(), frame_a);
+        let px_far = (0..300).find(|&px| plot.hover2d_snap_px(300, 200, px as f32) == far).unwrap();
+        plot.hover2d_px = Some(px_far as f32);
+        assert_ne!(plot.render(300, 200).rgba(), frame_a);
+        assert_eq!(plot.hover2d_snap_px(0, 0, 10.0), None, "degenerate frame snaps nowhere");
+    }
+
+    #[test]
+    fn hover2d_snap_px_is_none_in_3d() {
+        let mut plot = Plot::new();
+        plot.add_scatter3d(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], [230, 60, 120], 3.0, None);
+        assert_eq!(plot.hover2d_snap_px(300, 200, 150.0), None);
+    }
+
+    /// `legend_visible = false` drops the legend box but keeps the names
+    /// for the crosshair readout.
+    #[test]
+    fn legend_visible_off_hides_the_box_but_keeps_names() {
+        let mut named = Plot::new();
+        named.add_line2d(
+            vec![0.0, 1.0],
+            vec![0.0, 1.0],
+            [230, 60, 120],
+            1.0,
+            Some("alpha".into()),
+            YAxis::Primary,
+        );
+        let with_legend = named.render(300, 200).rgba();
+        named.legend_visible = false;
+        let without = named.render(300, 200).rgba();
+        assert_ne!(with_legend, without, "the legend box is gone");
+        assert!(named.legend_hit(300, 200, 280.0, 20.0).is_none());
+        let mut anonymous = Plot::new();
+        anonymous.add_line2d(
+            vec![0.0, 1.0],
+            vec![0.0, 1.0],
+            [230, 60, 120],
+            1.0,
+            None,
+            YAxis::Primary,
+        );
+        assert_eq!(anonymous.render(300, 200).rgba(), without, "same picture as an unnamed trace");
+        // ...but hovering still reads the name, so the two differ there
+        named.hover2d_px = Some(150.0);
+        anonymous.hover2d_px = Some(150.0);
+        assert_ne!(named.render(300, 200).rgba(), anonymous.render(300, 200).rgba());
+    }
+
+    #[test]
+    fn format_value_keeps_three_significant_digits_below_one() {
+        assert_eq!(format_value(0.0156), "0.0156");
+        assert_eq!(format_value(0.00045511), "0.000455");
+        assert_eq!(format_value(0.5), "0.5");
+        assert_eq!(format_value(0.0), "0");
+        assert_eq!(format_value(1.5), "1.5");
+        assert_eq!(format_value(12.34), "12.3");
+        assert_eq!(format_value(-0.02), "-0.02");
+    }
+
     /// A 3D plot ignores the 2D hover state entirely.
     #[test]
     fn hover2d_is_ignored_in_3d() {
@@ -8346,7 +9258,26 @@ mod tests {
     const SLOT_H: i32 = 50;
 
     fn slot(px: i32, markers: &[i32], legend: Option<(i32, i32, i32, i32)>) -> (i32, i32) {
-        readout_slot(px, SLOT_W, SLOT_H, SLOT_RECT, SLOT_GAP, markers, legend)
+        let obstacles: Vec<_> = legend.into_iter().collect();
+        readout_slot(px, SLOT_W, SLOT_H, SLOT_RECT, SLOT_GAP, markers, &obstacles)
+    }
+
+    /// Text the host draws over the plot (`Plot::keep_out`) is an obstacle
+    /// like the legend: with a text legend across the top left and the
+    /// legend box at the top right, neither top slot is free, so the panel
+    /// takes the far half instead of painting over either.
+    #[test]
+    fn readout_dodges_host_overlays_too() {
+        let legend = (200, 16, 270, 56);
+        let overlay = (26, 16, 190, 56);
+        let (x, y) =
+            readout_slot(180, SLOT_W, SLOT_H, SLOT_RECT, SLOT_GAP, &[160, 170], &[legend, overlay]);
+        let b = (x, y, x + SLOT_W, y + SLOT_H);
+        for o in [legend, overlay] {
+            let overlaps = b.0 <= o.2 && b.2 >= o.0 && b.1 <= o.3 && b.3 >= o.1;
+            assert!(!overlaps, "readout {b:?} covers the obstacle {o:?}");
+        }
+        assert!(y > (SLOT_RECT.1 + SLOT_RECT.3) / 2, "pushed to the far half");
     }
 
     /// The readout takes the half of the frame the markers are not in, so it
@@ -8403,7 +9334,7 @@ mod tests {
     #[test]
     fn readout_survives_an_oversized_box() {
         let (x0, y0, ..) = SLOT_RECT;
-        let (bx, by) = readout_slot(150, 400, 400, SLOT_RECT, SLOT_GAP, &[30], None);
+        let (bx, by) = readout_slot(150, 400, 400, SLOT_RECT, SLOT_GAP, &[30], &[]);
         assert!(bx >= x0 && by >= y0, "oversized panel placed off-frame at ({bx}, {by})");
     }
 
@@ -8413,8 +9344,8 @@ mod tests {
     #[test]
     fn hover2d_leaves_the_legend_swatch_alone() {
         let mut plot = crosshair_plot();
-        let (lx1, ly0, s, three_d) = plot.legend_anchor(300, 200);
-        let lb = plot.legend_box(lx1, ly0, s, three_d).expect("the named trace has a row");
+        let (lx0, lx1, ly0, s, three_d) = plot.legend_anchor(300, 200);
+        let lb = plot.legend_box(lx0, lx1, ly0, s, three_d).expect("the named trace has a row");
         let (ps, bx0, by0) = (lb.ps, lb.bx0, lb.by0);
         let color = lb.rows[0].color;
         // The centre of the first row's chip, mirroring `PanelStyle::chip`.

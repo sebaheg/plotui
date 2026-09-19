@@ -183,12 +183,12 @@ plot.set_x_range((0, 100))                         # None restores autoscale
 plot.set_y_range((0.1, 1e4))
 plot.set_y_log(True)                               # set_x_log for x
 
-# DAGs and pipelines: labelled boxes wired by arrows, laid out by rank. Node
-# centres are data coordinates; each box is sized in pixels from its label,
-# so zooming spreads the graph apart while the text stays readable.
+# DAGs and pipelines: labelled boxes wired by arrows, laid out by rank in
+# text columns, so the layout knows how wide each box is. Long edges into
+# one task share a trunk; a box can be dragged to a new spot.
 from plotui import LayeredLayout, from_dot, reachable
 
-layout = LayeredLayout(len(tasks), edges)          # rankdir="TB" or "LR"
+layout = LayeredLayout(len(tasks), edges, labels=tasks)   # rankdir="TB" | "LR"
 plot = Plot()
 h = plot.add_graph2d(*layout.positions(), edges,
                      labels=tasks, routes=layout.routes())
@@ -234,7 +234,13 @@ plot.add_graph3d(xs, ys, zs, edges=[(0, 1), (1, 2)],
                  node_sizes=[...],           # per-node radius (else `size`)
                  edge_colors=[...],          # per-edge (r, g, b) (else derived)
                  node_shapes=[...])          # per-node "disc" | "ring" | "square" |
-                                             #   "triangle" | "diamond" | "diamond-open" | "dot"
+                                             #   "triangle" | "diamond" | "diamond-open" |
+                                             #   "dot" | "star"
+plot.set_graph_labels(h, ["0", "1", ...])    # text INSIDE each mark (auto-contrast ink,
+                                             #   or color=...); drawn only where it fits
+plot.set_graph_borders(h, [(r, g, b), ...])  # an outline ring per node, 1/5 of its radius
+Plot.mark_scale(px_w)                        # the factor 3D radii are drawn at for a
+                                             #   frame this wide — divide a pixel budget by it
 plot.set_show_box(False)                     # hide the 3D orientation cube
 plot.set_bounds((x0, y0, z0), (x1, y1, z1))  # pin the data frame (else the nodes'
                                              #   bounding box); None, None restores

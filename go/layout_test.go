@@ -94,17 +94,54 @@ func TestLayeredLayout(t *testing.T) {
 		}
 	}
 
-	// LR is TB turned a quarter turn.
+	// LR flows left to right: a source sits left of what it feeds.
 	lr, err := NewLayeredLayout(3, pipelineEdges, "LR")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer lr.Close()
-	lxs, lys, _ := lr.Positions()
-	for i := range xs {
-		if lxs[i] != -ys[i] || lys[i] != -xs[i] {
-			t.Fatalf("LR is not the transpose of TB at node %d", i)
+	lxs, _, _ := lr.Positions()
+	for _, e := range pipelineEdges {
+		if lxs[e[0]] >= lxs[e[1]] {
+			t.Fatalf("edge %v points leftwards in LR: %v", e, lxs)
 		}
+	}
+
+	// Labels widen the boxes, and the layout keeps siblings apart by that
+	// width: two long-named sources in one rank sit further apart than two
+	// unlabelled ones.
+	fan := [][2]uint32{{0, 2}, {1, 2}}
+	bare, err := NewLayeredLayout(3, fan, "TB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bare.Close()
+	wide, err := NewLayeredLayout(3, fan, "TB", LayoutLabels([]string{"fetch_prices", "fetch_weather", "join"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wide.Close()
+	bxs, _, _ := bare.Positions()
+	wxs, _, _ := wide.Positions()
+	gap := func(xs []float32) float32 {
+		d := xs[0] - xs[1]
+		if d < 0 {
+			d = -d
+		}
+		return d
+	}
+	if gap(wxs) <= gap(bxs) {
+		t.Fatalf("labelled siblings %v must sit further apart than unlabelled ones %v", wxs, bxs)
+	}
+	// Spacing is in the same units: more air, wider gap.
+	roomy, err := NewLayeredLayout(3, fan, "TB", LayoutLabels([]string{"a", "b", "c"}), LayoutSpacing(10, -1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roomy.Close()
+	rxs, _, _ := roomy.Positions()
+	if gap(rxs) <= gap(bxs) {
+		t.Fatalf("a wider nodeSep %v must spread siblings past the default %v", rxs, bxs)
 	}
 }
 
@@ -144,6 +181,15 @@ func TestAddGraph2D(t *testing.T) {
 		if el == nil || el.Kind != ElementNode || el.Index != i {
 			t.Fatalf("node %d picks %v", i, el)
 		}
+	}
+
+	// A drag moves one node by a pixel delta and reports where it landed;
+	// an index that is not a 2D graph node reports nothing.
+	if x, y, ok := p.DragNode(400, 300, 1, 30, 0); !ok || x <= xs[1] || y != ys[1] {
+		t.Fatalf("DragNode right = (%v, %v, %v), want x > %v at y %v", x, y, ok, xs[1], ys[1])
+	}
+	if _, _, ok := p.DragNode(400, 300, 99, 1, 1); ok {
+		t.Fatal("an out-of-range node must not drag")
 	}
 
 	// Relayout: move the nodes, then rewrite the routes.

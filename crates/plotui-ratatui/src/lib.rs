@@ -6,6 +6,11 @@
 //! [`PlotWidget`]. The Rust core rasterizes pixels; the Kitty graphics
 //! protocol puts them on screen.
 //!
+//! Gestures: on a 3D plot a drag rotates and shift-drag pans; on a 2D plot
+//! a drag pans (a set x window slides instead), and on a 2D graph a press
+//! on a node box drags that node, reported as [`PlotEvent::NodeMoved`] when
+//! released. The wheel zooms and a click picks.
+//!
 //! ```no_run
 //! use plotui_ratatui::{PlotOptions, PlotState, PlotWidget};
 //!
@@ -69,6 +74,11 @@ pub enum PlotEvent {
     /// drag, a track jump, a scroll zoom, or an `[`/`]` key), carrying the
     /// new window (`None` = full extent).
     RangeChanged(Option<(f64, f64)>),
+    /// A 2D graph node was dragged and released (`draggable: true`): its
+    /// flat index and where it now sits, in the graph's layout units. The
+    /// widget has already moved it; a host that keeps its own positions
+    /// records this.
+    NodeMoved(usize, [f32; 2]),
 }
 
 fn to_kind(el: plotui_core::Element) -> (ElementKind, usize) {

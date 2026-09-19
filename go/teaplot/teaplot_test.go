@@ -173,6 +173,93 @@ func TestWheelZoomAndKeys(t *testing.T) {
 	}
 }
 
+// graph2D is a two-node pipeline, laid out from its labels so the boxes
+// sit apart the way a real graph does.
+func graph2D(t *testing.T) *plotui.Plot {
+	t.Helper()
+	p := plotui.New()
+	t.Cleanup(p.Close)
+	edges := [][2]uint32{{0, 1}}
+	labels := []string{"fetch", "publish"}
+	l, err := plotui.NewLayeredLayout(2, edges, "TB", plotui.LayoutLabels(labels))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	xs, ys, _ := l.Positions()
+	if _, err := p.AddGraph2D(xs, ys, edges, plotui.WithLabels(labels)); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// nodeCell is the component cell a node's centre falls in.
+func nodeCell(m Model, index int) (int, int) {
+	pt := m.Plot().ProjectNodes(m.width*m.cellW, m.height*m.cellH)[index]
+	return int(pt[0]) / m.cellW, int(pt[1]) / m.cellH
+}
+
+func TestNodeDragMovesTheBoxAndReportsIt(t *testing.T) {
+	m := sized(t, graph2D(t))
+	pw, ph := m.width*m.cellW, m.height*m.cellH
+	before := m.Plot().ProjectNodes(pw, ph)
+	cx, cy := nodeCell(m, 0)
+
+	m, _ = m.Update(click(cx, cy))
+	m, _ = m.Update(motion(cx+3, cy, 0))
+	after := m.Plot().ProjectNodes(pw, ph)
+	// The grabbed box follows the pointer, three cells to the right; the
+	// other box stays where it was.
+	if d := after[0][0] - before[0][0]; d < 3*8-1 || d > 3*8+1 {
+		t.Fatalf("dragged node moved %v px, want %v", d, 3*8)
+	}
+	if after[1] != before[1] {
+		t.Fatalf("the other node moved: %v -> %v", before[1], after[1])
+	}
+	_, cmd := m.Update(release(cx+3, cy))
+	var moved *NodeMovedMsg
+	for _, msg := range drain(cmd) {
+		if nm, ok := msg.(NodeMovedMsg); ok {
+			moved = &nm
+		}
+		if _, ok := msg.(NodePickedMsg); ok {
+			t.Fatal("a finished node drag must not also pick")
+		}
+	}
+	if moved == nil || moved.Index != 0 {
+		t.Fatalf("a finished node drag must emit NodeMovedMsg for node 0, got %v", moved)
+	}
+
+	// A press on a box without movement is still a click that picks it.
+	m, _ = m.Update(click(cx, cy))
+	_, cmd = m.Update(release(cx, cy))
+	picked := false
+	for _, msg := range drain(cmd) {
+		if np, ok := msg.(NodePickedMsg); ok && np.OK && np.Index == 0 {
+			picked = true
+		}
+	}
+	if !picked {
+		t.Fatal("a click on a box must pick it")
+	}
+
+	// Switched off, the same gesture pans the picture instead.
+	m = sized(t, graph2D(t), WithDraggable(false))
+	before = m.Plot().ProjectNodes(pw, ph)
+	m, _ = m.Update(click(cx, cy))
+	m, _ = m.Update(motion(cx+3, cy, 0))
+	after = m.Plot().ProjectNodes(pw, ph)
+	if after[0][0]-before[0][0] != after[1][0]-before[1][0] {
+		t.Fatalf("with dragging off both boxes must pan together: %v -> %v", before, after)
+	}
+	_, cmd = m.Update(release(cx+3, cy))
+	for _, msg := range drain(cmd) {
+		if _, ok := msg.(NodeMovedMsg); ok {
+			t.Fatal("with dragging off no NodeMovedMsg may be sent")
+		}
+	}
+}
+
 func TestClickPicksAndDragDoesNot(t *testing.T) {
 	m := sized(t, plot3D(t, 30))
 

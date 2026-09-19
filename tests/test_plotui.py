@@ -696,6 +696,44 @@ def test_hover2d_crosshair_draws_and_clears():
     assert plot.render_rgba(300, 200) == plain
 
 
+def test_hover2d_with_frame_size_reports_picture_changes_only():
+    plot = demo_2d()
+    assert plot.set_hover2d(150.0, 300, 200) is True
+    snap = plot.hover2d_snap_px(300, 200, 150.0)
+    assert snap is not None
+    assert plot.set_hover2d(151.5, 300, 200) is False, "same snapped sample, same frame"
+    assert plot.hover2d_snap_px(300, 200, 151.5) == snap
+    other = next(px for px in range(300) if plot.hover2d_snap_px(300, 200, float(px)) not in (None, snap))
+    assert plot.set_hover2d(float(other), 300, 200) is True
+    assert plot.set_hover2d(None, 300, 200) is True
+    assert plot.set_hover2d(None, 300, 200) is False
+
+
+def test_legend_visible_keeps_names_for_the_readout():
+    plot = Plot()
+    plot.add_line([0.0, 1.0], [0.0, 1.0], name="alpha")
+    assert plot.legend_visible is True
+    with_legend = plot.render_rgba(300, 200)
+    plot.legend_visible = False
+    without = plot.render_rgba(300, 200)
+    assert with_legend != without
+    anonymous = Plot()
+    anonymous.add_line([0.0, 1.0], [0.0, 1.0])
+    assert anonymous.render_rgba(300, 200) == without
+    plot.set_hover2d(150.0)
+    anonymous.set_hover2d(150.0)
+    assert plot.render_rgba(300, 200) != anonymous.render_rgba(300, 200), "the readout still names it"
+
+
+def test_kitty_cleanup_with_id_and_double_buffered_render():
+    assert Plot.DEFAULT_IMAGE_ID == 4242
+    assert Plot.kitty_cleanup_with_id(4243) == "\x1b_Ga=d,d=i,i=4243\x1b\\"
+    plot = demo_2d()
+    s = plot.render_kitty(20, 10, 8, 16, compat_chunks=True, image_id=4243, retire_id=4242)
+    assert "i=4243,p=4243,a=T" in s and s.index("a=T") < s.index("a=d")
+    assert "a=d,d=i,i=4242,q=2" in s
+
+
 def test_hover2d_ignored_by_3d_plots():
     plot = demo_3d()
     plain = plot.render_rgba(300, 200)
@@ -885,6 +923,37 @@ def test_set_graph_colors_recolors_and_restores():
     assert plot.render_rgba(W, H) == before
 
 
+def test_graph_labels_and_borders_draw_inside_and_around_nodes():
+    plot = Plot()
+    plot.set_show_box(False)
+    h = plot.add_graph3d([0.0], [0.0], [0.0], edges=[], node_colors=[(40, 40, 60)], size=9.0)
+    plain = plot.render_rgba(200, 200)
+    plot.set_graph_borders(h, [(250, 30, 30)])
+    assert has_color(plot, (250, 30, 30), 200, 200)
+    plot.set_graph_labels(h, ["42"])
+    assert has_color(plot, (242, 242, 246), 200, 200)  # light ink on a dark fill
+    plot.set_graph_labels(h, ["42"], color=(9, 200, 9))
+    assert has_color(plot, (9, 200, 9), 200, 200)
+    plot.set_graph_labels(h, None)
+    plot.set_graph_borders(h, None)
+    assert plot.render_rgba(200, 200) == plain
+    # a mark too small for two digits draws no label
+    small = Plot()
+    small.set_show_box(False)
+    hs = small.add_graph3d([0.0], [0.0], [0.0], edges=[], node_colors=[(40, 40, 60)], size=3.0)
+    small.set_graph_labels(hs, ["42"])
+    assert not has_color(small, (242, 242, 246), 200, 200)
+    with pytest.raises(ValueError, match="length must match"):
+        plot.set_graph_labels(h, ["a", "b"])
+    with pytest.raises(ValueError, match="length must match"):
+        plot.set_graph_borders(h, [(1, 2, 3), (4, 5, 6)])
+    assert Plot.mark_scale(250) == 1.0 and Plot.mark_scale(5000) == 3.0
+    star = Plot()
+    star.set_show_box(False)
+    star.add_graph3d([0.0], [0.0], [0.0], edges=[], node_colors=[(255, 255, 255)], size=8.0, node_shapes=["star"])
+    assert 0 < drawn_count(star, 200, 200)
+
+
 def test_extend_graph_matches_one_shot_build():
     oneshot, _ = _graph_plot(
         [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [(0, 1), (1, 2)]
@@ -1023,6 +1092,66 @@ def test_add_graph2d_labels_edges_and_pick():
     assert plot.pick_element_px(400, 300, mid[0], mid[1], 0.0, 3.0) == ("edge", 0)
 
 
+def test_layered_layout_with_labels_keeps_wide_siblings_apart():
+    # Two wide siblings under one source: their centres must be at least
+    # the sum of their half-widths (plus the gap) apart, in layout units
+    # where one unit is one text column.
+    labels = ["source", "a very long task name", "another very long task name"]
+    edges = [(0, 1), (0, 2)]
+    layout = LayeredLayout(3, edges, labels=labels, node_sep=2.0)
+    xs, ys = layout.positions()
+    assert ys[1] == ys[2], "siblings share a rank"
+    assert abs(xs[1] - xs[2]) >= (len(labels[1]) + len(labels[2])) / 2 + 2.0
+    # Unlabelled boxes are narrow, so the same graph packs much tighter.
+    bare_xs, _ = LayeredLayout(3, edges).positions()
+    assert abs(bare_xs[1] - bare_xs[2]) < abs(xs[1] - xs[2])
+    # A short label list pads, and spacing is validated.
+    LayeredLayout(3, edges, labels=["only one"])
+    with pytest.raises(ValueError, match="node_sep"):
+        LayeredLayout(3, edges, node_sep=-1.0)
+    with pytest.raises(ValueError, match="rank_sep"):
+        LayeredLayout(3, edges, rank_sep=float("nan"))
+
+
+def test_layered_layout_bundles_long_edges_into_one_trunk():
+    # A chain where every step also feeds the last one: the long edges share
+    # their waypoints (one trunk), instead of one lane each.
+    n = 6
+    edges = [(i, i + 1) for i in range(n - 2)] + [(i, n - 1) for i in range(n - 1)]
+    layout = LayeredLayout(n, edges, labels=[f"step {i}" for i in range(n)])
+    routes = layout.routes()
+    # Edge 0 -> 5 spans every rank; the trunk it runs down is one straight
+    # wire, and the edge 1 -> 5 walks the same waypoints below rank 1.
+    first = routes[n - 2 + 0]
+    second = routes[n - 2 + 1]
+    assert len(first) == n - 2 and len(second) == n - 3
+    assert first[1:] == second
+    assert len({round(x, 3) for x, _ in first}) == 1, "the trunk is straight"
+
+
+def test_drag_node_moves_a_2d_node_by_pixels_and_keeps_the_rest_still():
+    plot = Plot()
+    plot.add_graph2d([0.0, 0.0], [8.0, 0.0], [(0, 1)], labels=["alpha", "beta"])
+    w, h = 300, 220
+    before = plot.project_nodes(w, h)
+    # Drag the top node 30px right and 10px down: it lands there, its layout
+    # coordinate grows in x and shrinks in y (data y is up).
+    pos = plot.drag_node(w, h, 0, 30.0, 10.0)
+    assert pos is not None
+    x, y = pos
+    assert x > 0.0 and y < 8.0
+    after = plot.project_nodes(w, h)
+    assert after[0][0] - before[0][0] == pytest.approx(30.0, abs=0.5)
+    assert after[0][1] - before[0][1] == pytest.approx(10.0, abs=0.5)
+    assert after[1][0] == pytest.approx(before[1][0], abs=0.5), "the other node stays put"
+    assert after[1][1] == pytest.approx(before[1][1], abs=0.5)
+    # Not a 2D graph node: nothing happens.
+    assert plot.drag_node(w, h, 7, 1.0, 1.0) is None
+    three_d = Plot()
+    three_d.add_scatter3d([0.0], [0.0], [0.0])
+    assert three_d.drag_node(w, h, 0, 1.0, 1.0) is None
+
+
 def test_graph2d_hides_axes_and_show_axes_is_a_tri_state():
     frame = (70, 78, 96)
     plot = Plot()
@@ -1066,12 +1195,17 @@ def test_layered_layout_is_deterministic():
     # The edge that skips a rank gets one waypoint; the others are straight.
     assert [len(r) for r in a.routes()] == [0, 0, 1]
 
-    # LR is TB turned a quarter turn.
+    # LR is TB turned a quarter turn: rank runs along x instead of down y,
+    # column along y instead of x. (Boxes are wider than tall, so the two
+    # directions space differently and only the order carries over.)
     lr = LayeredLayout(3, PIPELINE_EDGES, rankdir="LR")
     tb_xs, tb_ys = a.positions()
     lr_xs, lr_ys = lr.positions()
-    assert lr_xs == [-y for y in tb_ys]
-    assert lr_ys == [-x for x in tb_xs]
+    sign = lambda v: (v > 0) - (v < 0)  # noqa: E731
+    for i in range(3):
+        for j in range(3):
+            assert sign(lr_xs[i] - lr_xs[j]) == sign(tb_ys[j] - tb_ys[i])
+            assert sign(lr_ys[i] - lr_ys[j]) == sign(tb_xs[j] - tb_xs[i])
 
     with pytest.raises(ValueError, match="unknown rankdir"):
         LayeredLayout(2, [(0, 1)], rankdir="sideways")
@@ -1168,3 +1302,34 @@ def test_log_defers_to_a_categorical_axis():
     plain.add_bar([0.0, 1.0, 2.0], [3.0, 9.0, 27.0])
     plain.set_categories("x", ["alpha", "beta", "gamma"])
     assert plot.render_rgba(400, 300) == plain.render_rgba(400, 300)
+
+
+def test_host_legend_entries_round_trip_and_hit_by_row():
+    """A host names its own legend rows — categories, not traces — each with
+    a swatch that mirrors what it names; clicks resolve to the row index."""
+    plot = Plot()
+    plot.add_graph3d([0.0, 1.0], [0.0, 0.0], [0.0, 1.0], edges=[(0, 1)], name="candidates")
+    plot.set_legend_entries([
+        ("1 expanded", "disc", (33, 145, 140), (250, 250, 250), True),
+        ("2 scored", "disc", (33, 145, 140), None, True),
+        ("3 lineage", "line", (235, 238, 240), None, False),
+    ])
+    plot.set_legend_corner("top-left")
+    assert plot.legend_entries() == [
+        ("1 expanded", "disc", (33, 145, 140), (250, 250, 250), True),
+        ("2 scored", "disc", (33, 145, 140), None, True),
+        ("3 lineage", "line", (235, 238, 240), None, False),
+    ]
+    data = plot.render_rgba(400, 300)
+    top_left = {
+        tuple(data[(y * 400 + x) * 4:(y * 400 + x) * 4 + 3]) for y in range(150) for x in range(200)
+    }
+    assert (33, 145, 140) in top_left and (250, 250, 250) in top_left
+    assert plot.legend_entry_hit(400, 300, 40.0, 12.0) == 0
+    assert plot.legend_entry_hit(400, 300, 395.0, 295.0) is None
+    with pytest.raises(ValueError):
+        plot.set_legend_entries([("x", "blob", (1, 2, 3), None, True)])
+    with pytest.raises(ValueError):
+        plot.set_legend_corner("bottom-left")
+    plot.set_legend_entries([])
+    assert plot.legend_entries() == [] and plot.legend_entry_hit(400, 300, 40.0, 12.0) is None

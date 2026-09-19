@@ -63,10 +63,11 @@ directed edges, with per-node colour a running pipeline can repaint live:
 // Straight from a DOT file, laid out and ready to render:
 p, h, err := plotui.PlotFromDOT(dot, "")   // "" honours the file's rankdir
 
-// Or lay one out yourself:
-l, _ := plotui.NewLayeredLayout(len(tasks), edges, "TB")
+// Or lay one out yourself. Tell the layout the labels: boxes are sized
+// from them, so the layout keeps them apart (LayoutSpacing adds air):
+l, _ := plotui.NewLayeredLayout(len(tasks), edges, "TB", plotui.LayoutLabels(tasks))
 defer l.Close()
-xs, ys, _ := l.Positions()
+xs, ys, _ := l.Positions()                  // layout units: one text column
 h, _ := p.AddGraph2D(xs, ys, edges,
     plotui.WithLabels(tasks),
     plotui.WithRoutes(l.Routes()),          // long edges route around ranks
@@ -75,6 +76,10 @@ _ = p.SetGraphColors(h, states, nil)        // repaint as the run advances
 
 // Hover a task and light everything it waits on:
 lit := plotui.Reachable(len(tasks), edges, hovered, true)
+
+// Move a box by a pointer delta in framebuffer pixels (teaplot does this
+// for you on a drag and sends NodeMovedMsg with where it landed):
+x, y, ok := p.DragNode(pxW, pxH, index, dxPx, dyPx)
 ```
 
 A graph-only frame draws no axes; `SetShowAxes(true)` forces them back on
@@ -128,8 +133,10 @@ Image bytes travel through `tea.Raw` commands returned by
 commands to the runtime.
 
 Options: `WithAutoRotate`, `WithPickable` (hover glow + `ElementPickedMsg`
-/ `ElementHoveredMsg`), `WithoutCrosshair`, `WithRenderMode`,
-`WithCellPx`, `WithInteractiveScale`.
+/ `ElementHoveredMsg`), `WithoutCrosshair`, `WithDraggable(false)` (on by
+default: a press on a 2D graph box drags it and the release sends
+`NodeMovedMsg`; a press elsewhere pans), `WithRenderMode`, `WithCellPx`,
+`WithInteractiveScale`.
 
 ## Terminal matrix
 

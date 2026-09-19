@@ -28,6 +28,14 @@ func (m Model) motion(mouse tea.Mouse) (Model, tea.Cmd) {
 		if dx != 0 || dy != 0 {
 			m.moved = true
 		}
+		if m.nodeDrag >= 0 {
+			// The grabbed box moves by the pointer's travel in full-resolution
+			// pixels, so it stays under the pointer cell for cell.
+			pw, ph, _, _, _ := m.geometry(0, 0)
+			m.plot.DragNode(pw, ph, m.nodeDrag, float32(dx)*float32(m.cellW), float32(dy)*float32(m.cellH))
+			m.dirty = true
+			return m, m.refresh()
+		}
 		// Routed through the plot's input map: drag rotates (trackball —
 		// drag right turns the object right), shift-drag pans, unless the
 		// host remapped it via SetInputMap. Pan is in full-resolution image
@@ -92,10 +100,19 @@ func (m Model) release(mouse tea.Mouse) (Model, tea.Cmd) {
 	}
 	wasClick := !m.moved
 	m.dragging = false
+	node := m.nodeDrag
+	m.nodeDrag = -1
 	if !wasClick {
 		// Gesture over: replace a half-res interaction frame with a crisp
 		// full-res one.
 		m.dirty = true
+		if node >= 0 {
+			// A finished node drag: one message with where the box landed
+			// (a zero-length delta is how the position is read back).
+			pw, ph, _, _, _ := m.geometry(0, 0)
+			x, y, _ := m.plot.DragNode(pw, ph, node, 0, 0)
+			return m, tea.Batch(m.refresh(), func() tea.Msg { return NodeMovedMsg{Index: node, X: x, Y: y} })
+		}
 		return m, m.refresh()
 	}
 	cellX, cellY := mouse.X-m.posX, mouse.Y-m.posY

@@ -50,6 +50,24 @@ from ._plotui import tmux_wrap as _tmux_wrap
 # gets upscaled — soft edges. Detection avoids that.
 _CELL_W, _CELL_H = 12, 24
 
+# The two image ids direct mode alternates between (plotui's default and the
+# next one up). Kept here, not in the core, so the cleanup escape can name
+# both without a frame ever having been rendered. A widget with
+# ``image_slot=n`` uses the pair ``n`` steps up, so several widgets on one
+# screen never place frames under each other's ids; ``_SLOTS_USED`` is the
+# highest slot any widget has taken, so ``kitty_cleanup`` can name them all.
+_IMAGE_IDS = (Plot.DEFAULT_IMAGE_ID, Plot.DEFAULT_IMAGE_ID + 1)
+_SLOTS_USED = 0
+
+
+def image_ids_for(slot: int) -> tuple[int, int]:
+    """The (frame, other buffer) Kitty image ids of widget slot ``slot``:
+    slot 0 is plotui's default pair, each further slot the next two up."""
+    if slot < 0:
+        raise ValueError("image_slot must be 0 or more")
+    base = Plot.DEFAULT_IMAGE_ID + 2 * slot
+    return (base, base + 1)
+
 # Above this node count, 3D plots drop to half resolution *while interacting*
 # (dragging or auto-rotating) and snap back to full resolution when still.
 _LARGE_NODE_COUNT = 400
@@ -175,6 +193,22 @@ class PlotWidget(Widget, can_focus=True):
             self.plot_widget = plot_widget
             self.window = window
 
+    class NodeMoved(Message):
+        """Posted when a node of a 2D graph is released after being dragged
+        (``draggable=True``, the default).
+
+        `index` is the flat node index; `x`, `y` is where it now sits, in
+        the graph's layout units — what to store if the layout should
+        survive a rebuild.
+        """
+
+        def __init__(self, plot_widget: "PlotWidget", index: int, x: float, y: float) -> None:
+            super().__init__()
+            self.plot_widget = plot_widget
+            self.index = index
+            self.x = x
+            self.y = y
+
     def __init__(
         self,
         plot: Plot,
@@ -186,12 +220,19 @@ class PlotWidget(Widget, can_focus=True):
         range_slider: bool = False,
         render_mode: str = "auto",
         interactive_scale: float = 0.5,
+        draggable: bool = True,
+        image_slot: int = 0,
         **kwargs,
     ):
         """``pickable=True`` turns on interactive picking: moving the mouse
         over a node or a graph edge lights it up white (it can be clicked),
         and clicking posts :class:`ElementPicked` with what was hit. Off by
         default so plots without click semantics pay no per-mouse-move cost.
+
+        ``draggable`` (default on) lets the user grab a node of a 2D graph
+        and move it: a press on a box drags that box instead of the plot,
+        and the release posts :class:`NodeMoved`. A press elsewhere pans.
+        It costs one hit test per press, so it does not need ``pickable``.
 
         ``crosshair`` (default on) gives 2D plots a hover crosshair: a
         vertical guide snapped to the nearest sample x, a marker per series,
@@ -215,9 +256,19 @@ class PlotWidget(Widget, can_focus=True):
         ``interactive_scale`` is the resolution multiplier used for large 3D
         plots *while interacting* (dragging or auto-rotating); ``1.0`` disables
         it. Full resolution is restored the moment interaction stops.
+
+        ``image_slot`` picks which pair of Kitty image ids this widget's
+        frames are placed under (see :func:`image_ids_for`). Every widget
+        that is on screen at the same time needs its own slot: the terminal
+        keeps one image per id, so two widgets on slot 0 would show one
+        picture in both places (placeholder mode) or delete each other's
+        frames (direct mode). One widget per screen can leave the default.
         """
+        global _SLOTS_USED
         super().__init__(**kwargs)
         self._plot = plot
+        self._image_ids = image_ids_for(image_slot)
+        _SLOTS_USED = max(_SLOTS_USED, image_slot)
         if range_slider:
             plot.set_range_slider(True)
         self._dragging = False
@@ -226,6 +277,11 @@ class PlotWidget(Widget, can_focus=True):
         # The strip part grabbed by the active drag ("left"/"right"/"window"),
         # if the drag started on the range slider.
         self._range_drag: str | None = None
+        # The 2D graph node grabbed by the active drag, and where the last
+        # drag_node left it (what NodeMoved reports on release).
+        self._draggable = draggable
+        self._node_drag: int | None = None
+        self._node_pos: tuple[float, float] | None = None
         self._auto = auto_rotate
         self._cell_w, self._cell_h = cell_px if cell_px is not None else detect_cell_px()
         self._pickable = pickable
@@ -239,6 +295,10 @@ class PlotWidget(Widget, can_focus=True):
         # image (xterm.js addon-image) flicker from that delete; PLOTUI_KITTY_
         # REPLACE=1 skips it. See render_kitty(replace=...).
         self._kitty_replace = os.environ.get("PLOTUI_KITTY_REPLACE", "").strip() in ("1", "true")
+        # Direct mode double-buffers: frames alternate between two image ids,
+        # each placed before the other is deleted, so the region is never
+        # blank between frames (see `_ensure_frame`).
+        self._buffer = 0
         self._hovered: tuple[str, int] | None = None
         if render_mode != "auto":
             if render_mode not in (*RENDER_MODES, "unsupported"):
@@ -254,8 +314,16 @@ class PlotWidget(Widget, can_focus=True):
         self._cells: list[list[str]] | None = None
         self._style: Style | None = None
         # Text overlay, row -> non-overlapping spans sorted by column. Kept
-        # outside the frame cache: changing it never re-rasterizes the image.
+        # outside the frame cache: changing it never re-rasterizes the image —
+        # except through `_keep_out`, the spans as frame fractions the plot's
+        # crosshair readout keeps off (see `set_overlay`).
         self._overlay: dict[int, list[tuple[int, str, Style | None]]] = {}
+        self._keep_out: list[tuple[float, float, float, float]] = []
+
+    @property
+    def image_ids(self) -> tuple[int, int]:
+        """The two Kitty image ids this widget's frames use (its slot's pair)."""
+        return self._image_ids
 
     @property
     def plot(self) -> Plot:
@@ -291,9 +359,28 @@ class PlotWidget(Widget, can_focus=True):
             driver = getattr(self.app, "_driver", None)
             if driver is not None:
                 try:
-                    driver.write(tmux_wrap(Plot.kitty_cleanup()))
+                    driver.write(tmux_wrap(self.kitty_cleanup_own()))
                 except Exception:
                     pass
+
+    def kitty_cleanup_own(self) -> str:
+        """The escape that deletes this widget's two image buffers and no
+        other widget's — what unmounting one plot beside another emits."""
+        return "".join(Plot.kitty_cleanup_with_id(image_id) for image_id in self._image_ids)
+
+    @staticmethod
+    def kitty_cleanup() -> str:
+        """The escape that deletes every image a PlotWidget can have placed:
+        plotui's default id, the second direct-mode buffer, and the pair of
+        every further ``image_slot`` a widget has taken in this process.
+        Emit it (via `tmux_wrap`) when hiding or covering a plot;
+        `Plot.kitty_cleanup()` alone leaves the other buffer's frame on
+        screen."""
+        return "".join(
+            Plot.kitty_cleanup_with_id(image_id)
+            for slot in range(_SLOTS_USED + 1)
+            for image_id in image_ids_for(slot)
+        )
 
     def _tick(self) -> None:
         # Not routed through apply_rotate: that hook is for input paths
@@ -336,9 +423,14 @@ class PlotWidget(Widget, can_focus=True):
         controls = self._plot.input_map()
         d_yaw = d_pitch = pan_dx = pan_dy = 0.0
         factor = 1.0
+        # A 2D plot has nothing to rotate, so a control mapped to yaw or
+        # pitch pans instead — the same rule `Plot::apply_drag` applies.
+        flat = not self._plot.is_3d() and self._plot.vertex_count() > 0
         for control, d in zip(controls[2:] if shift else controls[:2], (dx, dy)):
             if control.startswith("-"):
                 control, d = control[1:], -d
+            if flat and control in ("yaw", "pitch"):
+                control = "pan_x" if control == "yaw" else "pan_y"
             if control == "yaw":
                 d_yaw -= d * rotate
             elif control == "pitch":
@@ -466,7 +558,10 @@ class PlotWidget(Widget, can_focus=True):
         """Draw text over the plot: each span is `(row, col, text, style)` in
         widget cells. Spans replace the image at the cells they cover (labels
         sit on the terminal background). Overlapping or off-widget spans are
-        clipped/dropped. Repaints without re-rasterizing the image."""
+        clipped/dropped. Repaints without re-rasterizing the image — unless
+        the crosshair readout has to move: the spans are also handed to the
+        plot as `keep_out` boxes, so a hover readout never lands under a
+        legend or label the host drew."""
         w, h = self.size.width, self.size.height
         overlay: dict[int, list[tuple[int, str, Style | None]]] = {}
         for row, col, text, style in sorted(spans, key=lambda s: (s[0], s[1])):
@@ -482,7 +577,22 @@ class PlotWidget(Widget, can_focus=True):
                     continue  # overlaps the previous span — first one wins
             row_spans.append((col, text, style))
         self._overlay = overlay
+        self._keep_out = [
+            (col / w, row / h, (col + cell_len(text)) / w, (row + 1) / h)
+            for row, row_spans in overlay.items()
+            for col, text, _style in row_spans
+        ] if w > 0 and h > 0 else []
+        if self._apply_keep_out():
+            self._version += 1  # the readout may sit elsewhere now
         self.refresh()
+
+    def _apply_keep_out(self) -> bool:
+        """Hand the overlay's boxes to the plot the widget holds *now* (a host
+        may have swapped it since); True when that changed the plot."""
+        setter = getattr(self._plot, "set_keep_out", None)
+        if setter is None:
+            return False  # a plotui core that predates keep-out
+        return bool(setter(self._keep_out))
 
     # ---- rendering ----
     def _ensure_frame(self) -> None:
@@ -496,9 +606,10 @@ class PlotWidget(Widget, can_focus=True):
         if key == self._key:
             return
         self._key = key
+        self._apply_keep_out()  # the plot may be a new one since set_overlay ran
         if self._mode == "placeholder":
             transmit, id_rgb, cells = self._plot.render_kitty_placeholder_cells(
-                w, h, self._cell_w, self._cell_h, scale=scale
+                w, h, self._cell_w, self._cell_h, scale=scale, image_id=self._image_ids[0]
             )
             self._transmit = transmit
             self._cells = cells
@@ -511,12 +622,28 @@ class PlotWidget(Widget, can_focus=True):
             # id repeated on every data chunk to assemble the transmission.
             # tmux_wrap passes the APC through tmux (a no-op outside tmux),
             # so the image reaches a browser terminal like xterm.js.
-            self._transmit = tmux_wrap(
-                self._plot.render_kitty(
-                    w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale,
-                    replace=self._kitty_replace
+            if self._kitty_replace:
+                # single id, no delete: the decoder swaps same-id images
+                self._transmit = tmux_wrap(
+                    self._plot.render_kitty(
+                        w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale,
+                        replace=True,
+                    )
                 )
-            )
+            else:
+                # Double-buffered: this frame lands under one id and only then
+                # deletes the other's placement (last frame's), so the region
+                # is never blank — delete-first blanks it until the terminal
+                # has decoded the next frame, which flickers on every
+                # interactive repaint (iTerm2 needs the delete: a=T stacks).
+                self._buffer ^= 1
+                self._transmit = tmux_wrap(
+                    self._plot.render_kitty(
+                        w, h, self._cell_w, self._cell_h, compat_chunks=True, scale=scale,
+                        image_id=self._image_ids[self._buffer],
+                        retire_id=self._image_ids[self._buffer ^ 1],
+                    )
+                )
 
     def _kitty_row_segments(self, y: int, w: int) -> list[Segment]:
         """One row of placeholder cells with overlay spans spliced in. Every
@@ -641,6 +768,12 @@ class PlotWidget(Widget, can_focus=True):
                         self.invalidate()
                     hit = "window"
                 self._range_drag = hit
+        # A press on a graph node grabs the node, not the plot. One hit test
+        # per press, so this needs no `pickable`.
+        if self._draggable and self._range_drag is None and not self._plot.is_3d():
+            px_w, px_h, px, py, radius = self._pixel_geometry(event.x, event.y)
+            self._node_drag = self._plot.pick_px(px_w, px_h, px, py, radius)
+            self._node_pos = None
         self.capture_mouse()
         self.focus()
 
@@ -660,6 +793,17 @@ class PlotWidget(Widget, can_focus=True):
                 if self._plot.drag_x_window(
                     px_w, px_h, self._range_drag, dx * self._cell_w
                 ):
+                    self.invalidate()
+            elif self._node_drag is not None:
+                # The box follows the pointer: one dragged cell is one
+                # cell's worth of pixels, and the core keeps the rest of the
+                # graph still.
+                px_w, px_h, *_ = self._pixel_geometry(event.x, event.y)
+                pos = self._plot.drag_node(
+                    px_w, px_h, self._node_drag, dx * self._cell_w, dy * self._cell_h
+                )
+                if pos is not None:
+                    self._node_pos = pos
                     self.invalidate()
             elif (
                 not event.shift
@@ -681,31 +825,61 @@ class PlotWidget(Widget, can_focus=True):
                 self._apply_mapped_drag(
                     dx, dy, event.shift, 0.03, self._cell_w, self._cell_h, 0.15
                 )
-        elif not self._plot.is_3d():
-            if self._crosshair:
-                px_w, px_h, px, py, _ = self._pixel_geometry(event.x, event.y)
-                if self._plot.set_hover2d(px):
-                    self.invalidate()
-        elif self._pickable:
-            self._set_hover(self._pick_at(event.x, event.y))
+        else:
+            self._legend_hover_at(event.x, event.y)
+            if not self._plot.is_3d():
+                if self._crosshair:
+                    # Snap-aware: the crosshair is drawn from the nearest
+                    # sample, so a move that snaps where the last one did
+                    # changes no pixel — no re-rasterize, no upload, no
+                    # decode. Most moves on a sparse chart are that.
+                    px_w, px_h, px, py, _ = self._pixel_geometry(event.x, event.y)
+                    if self._plot.set_hover2d(px, px_w, px_h):
+                        self.invalidate()
+            elif self._pickable:
+                self._set_hover(self._pick_at(event.x, event.y))
+
+    def _legend_hover_at(self, x: int | None, y: int | None) -> None:
+        """Light the legend row under cell `(x, y)` — `None` clears — so the
+        reader sees which row a click would toggle. Repaints only when the
+        lit row changes; a no-op on a core without legend hover."""
+        setter = getattr(self._plot, "set_legend_hover", None)
+        if setter is None:
+            return
+        px_w, px_h, px, py, _ = self._pixel_geometry(x or 0, y or 0)
+        changed = setter(px_w, px_h, None, None) if x is None or y is None else setter(px_w, px_h, px, py)
+        if changed:
+            self.invalidate()
 
     def on_leave(self, event: events.Leave) -> None:
+        self._legend_hover_at(None, None)
         if self._pickable:
             self._set_hover(None)
-        if self._crosshair and self._plot.set_hover2d(None):
-            self.invalidate()
+        if self._crosshair:
+            px_w, px_h, *_ = self._pixel_geometry(0, 0)
+            if self._plot.set_hover2d(None, px_w, px_h):
+                self.invalidate()
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         was_click = self._dragging and not self._moved
         was_drag = self._dragging and self._moved
         was_range = self._dragging and self._range_drag is not None
+        moved_node = self._node_drag if was_drag and self._node_pos is not None else None
+        node_pos = self._node_pos
         self._dragging = False
         self._range_drag = None
+        self._node_drag = None
+        self._node_pos = None
         self.release_mouse()
         if was_range:
             # The strip gesture ended: one message with the result.
             self.invalidate()
             self.post_message(self.RangeChanged(self, self._plot.x_window()))
+        elif moved_node is not None and node_pos is not None:
+            # The node gesture ended: repaint at full res and say where it
+            # landed. A press on a node that never moved is a click below.
+            self.invalidate()
+            self.post_message(self.NodeMoved(self, moved_node, node_pos[0], node_pos[1]))
         elif was_click:
             self.on_click_at(event)
         elif was_drag:

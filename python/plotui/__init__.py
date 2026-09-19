@@ -22,14 +22,15 @@ Pipelines and DAGs::
     from plotui import LayeredLayout, Plot, from_dot, reachable
     plot = from_dot("digraph { fetch -> clean -> publish }")  # a DOT subset
     # or lay one out yourself and colour it live:
-    layout = LayeredLayout(n_nodes, edges)     # rankdir="TB" or "LR"
-    xs, ys = layout.positions()
+    layout = LayeredLayout(n_nodes, edges, labels=names)  # rankdir="TB"/"LR"
+    xs, ys = layout.positions()                # layout units: text columns
     h = plot.add_graph2d(xs, ys, edges, labels=names,
                          routes=layout.routes())
     plot.set_graph_colors(h, states)           # repaint as the run advances
     lit = reachable(n_nodes, edges, hovered)   # everything it waits on
     # In a raw loop: escape = plot.render_kitty(cols, rows, cell_w, cell_h)
-    # In Textual:   use plotui.textual.PlotWidget(plot)
+    # In Textual:   use plotui.textual.PlotWidget(plot) — boxes can be
+    #               dragged around; the widget posts NodeMoved on release
 """
 
 from ._plotui import (

@@ -134,7 +134,7 @@ in plotui, drawn as labelled boxes wired by arrows:
 ```python
 from plotui import LayeredLayout, Plot
 
-layout = LayeredLayout(len(tasks), edges)      # rankdir="TB" (default) or "LR"
+layout = LayeredLayout(len(tasks), edges, labels=tasks)   # rankdir="TB" | "LR"
 xs, ys = layout.positions()
 
 plot = Plot()
@@ -143,10 +143,14 @@ h = plot.add_graph2d(xs, ys, edges,
                      routes=layout.routes())   # long edges route around ranks
 ```
 
-`edges` are `(from, to)` index pairs. Node **centres** are in data
-coordinates, but each box is sized in *pixels* from its label, so zooming
-spreads the graph apart while the text stays the size it has to be to be
-read — the only thing that works at terminal resolution.
+`edges` are `(from, to)` index pairs. Node **centres** are in *layout
+units*: one unit is one text column, the width of a character in a label,
+so a box's width is its label's length plus a little padding in the same
+units. A graph frame draws at exactly that scale — a unit is a character —
+rather than stretching the layout to fill the pane, so a compact pipeline
+stays compact and a wide rank never has its boxes squeezed into each other.
+Zooming spreads the graph apart while the text stays the size it has to be
+to be read.
 
 `node_colors` takes one colour per node, and it is the channel a live
 pipeline repaints:
@@ -169,14 +173,58 @@ step, because a pipeline has one right shape, and it is deterministic: same
 input, same output, no randomness anywhere.
 
 ```python
+LayeredLayout(n_nodes, edges, rankdir="TB", labels=None,
+              node_sep=2.0, rank_sep=3.0)
+
 layout.positions()   # (xs, ys), in your index order
 layout.ranks()       # 0 for a source, one more than the deepest predecessor
 layout.routes()      # one list of (x, y) waypoints per edge, empty if straight
 ```
 
+Pass the `labels` you will draw: the layout sizes each box the way the
+renderer will, so neighbours in a rank sit `node_sep` columns apart edge to
+edge whatever their labels say, and ranks sit `rank_sep` apart. Without
+labels every box is laid out as the small unlabelled box, and the frame has
+to spread the whole graph until the real boxes clear each other.
+
+Long edges that share an endpoint are bundled: a task every later step
+reports to, or a setup step everything waits on, gets one trunk running
+past the ranks between with the other ends joining it, not one wire per
+edge stacked side by side into a comb.
+
 Cycles do not hang: a back edge is reversed for the layout and drawn in its
 original direction. Self-loops and out-of-range endpoints are inert, so an
 edge list can be passed verbatim.
+
+### Fitting the frame
+
+A graph frame picks the largest text scale at which the whole graph fits,
+so a deep pipeline in a tall pane keeps its text small and stays on screen
+while a small graph in a big pane gets big text. A graph that does not fit
+even at the smallest text shrinks — but only until its boxes would touch.
+Past that the frame shows part of a legible graph rather than all of an
+illegible one: drag to pan, scroll to zoom.
+
+### Moving nodes
+
+On a 2D plot a plain drag pans. A drag that *starts on a node's box* moves
+that node instead, its edges following; a press without movement is still
+a click, and still selects. Every frontend has it on by default — Textual's
+`PlotWidget(draggable=True)` posts `NodeMoved(index, x, y)` on release,
+Ratatui returns `PlotEvent::NodeMoved(index, [x, y])`, Bubble Tea sends a
+`NodeMovedMsg`, and the browser build exposes the primitive. A host driving
+its own loop calls it directly:
+
+```python
+plot.drag_node(px_w, px_h, index, dx_px, dy_px)   # -> (x, y) | None
+```
+
+`index` is the flat node index `pick_px` returns and the deltas are
+framebuffer pixels; the result is the node's new position in layout units.
+The rest of the graph stays put — the frame re-centres on the new extent
+and the camera pans back by exactly that shift — and waypoints stay where
+they are, so a routed edge bends to follow the box rather than losing its
+route.
 
 ### From a DOT file
 

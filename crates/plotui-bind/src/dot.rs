@@ -14,7 +14,9 @@
 //! fonts and margins that have no meaning in a terminal and refusing to draw
 //! it over `fontsize=10` would be useless.
 
-use plotui_core::{LayeredLayout, NodeShape, Plot, RankDir, Rgb, TraceId, COLORWAY_PLOTUI};
+use plotui_core::{
+    LayeredLayout, LayoutSpacing, NodeShape, Plot, RankDir, Rgb, TraceId, COLORWAY_PLOTUI,
+};
 
 use crate::{parse_color, BindError};
 
@@ -678,7 +680,11 @@ pub fn plot_from_dot(
     let g = parse_dot(text)?;
     let dir = rankdir.unwrap_or(g.rankdir);
     let edges: Vec<(u32, u32)> = g.edges.iter().map(|e| (e.from, e.to)).collect();
-    let layout = LayeredLayout::new(g.nodes.len(), &edges, dir);
+    // Laid out with the labels it will be drawn with, so the boxes are part
+    // of the layout and never land on one another.
+    let labels: Vec<&str> = g.nodes.iter().map(|n| n.label.as_str()).collect();
+    let layout =
+        LayeredLayout::with_labels(g.nodes.len(), &edges, dir, &labels, LayoutSpacing::default());
     let (pts, starts) = layout.routes();
 
     let accent = COLORWAY_PLOTUI[0];

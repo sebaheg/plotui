@@ -147,10 +147,12 @@ impl Plot {
     /// `route_starts` one index per edge into them (the CSR pair
     /// `LayeredLayout.routes()` returns).
     ///
-    /// Node *centres* are in data coordinates but their boxes are sized in
-    /// pixels from the label, so zooming spreads the graph apart while the
-    /// text stays legible. A plot whose visible 2D traces are all graphs
-    /// draws no axes; see `set_show_axes`.
+    /// Node *centres* are in layout units — one unit is one text column of
+    /// the label font — and their boxes are sized in pixels from the label,
+    /// so a graph draws at its own scale and zooming spreads it apart while
+    /// the text stays legible. A plot whose visible 2D traces are all graphs
+    /// draws no axes (see `set_show_axes`), pans on a plain drag, and lets
+    /// a box be moved with `drag_node`.
     #[allow(clippy::too_many_arguments)]
     pub fn add_graph2d(
         &mut self,
@@ -791,10 +793,28 @@ impl Plot {
         self.inner.legend_hit(w, h, px, py)
     }
 
-    /// The 3D node under `(px, py)` framebuffer pixels, within `radius`.
-    /// Picks always use full-resolution geometry regardless of `render_at`.
+    /// The node under `(px, py)` framebuffer pixels, within `radius` — a 3D
+    /// node by distance, a 2D graph node by its box. Picks always use
+    /// full-resolution geometry regardless of `render_at`.
     pub fn pick(&self, w: usize, h: usize, px: f32, py: f32, radius: f32) -> Option<usize> {
         self.inner.pick(w, h, px, py, radius)
+    }
+
+    /// Drag one node of a 2D graph by `(dx_px, dy_px)` framebuffer pixels,
+    /// the frame being `w × h` — the primitive behind "grab a box and move
+    /// it". `flat` is the index `pick` returns. Returns the node's new
+    /// `[x, y]`, or `undefined` for a 3D plot or an index that is not a 2D
+    /// graph node. The rest of the graph stays where it is on screen, and
+    /// a routed edge bends to follow the box.
+    pub fn drag_node(
+        &mut self,
+        w: usize,
+        h: usize,
+        flat: usize,
+        dx_px: f32,
+        dy_px: f32,
+    ) -> Option<Vec<f32>> {
+        self.inner.drag_node(w, h, flat, dx_px, dy_px).map(|p| p.to_vec())
     }
 
     /// The node or edge under `(px, py)`, nodes first; edge radius defaults
@@ -1072,11 +1092,22 @@ impl LayeredLayout {
     /// default) or "LR" (sources on the left). Self-loops and out-of-range
     /// endpoints are inert, and cycles do not hang: a back edge is reversed
     /// for the layout only.
+    ///
+    /// Positions are in layout units: one unit is one text column of the
+    /// label font, the scale a graph frame draws at. Pass the `labels` the
+    /// boxes will be drawn with so each box's width is part of the layout
+    /// and neighbours in a rank never overlap; `node_sep` is the air
+    /// between boxes in a rank and `rank_sep` between ranks, in the same
+    /// units (2 and 3 by default). Long edges that share an endpoint are
+    /// bundled into one trunk rather than drawn side by side.
     #[wasm_bindgen(constructor)]
     pub fn new(
         n_nodes: usize,
         edges: &[u32],
         rankdir: Option<String>,
+        labels: Option<Vec<String>>,
+        node_sep: Option<f32>,
+        rank_sep: Option<f32>,
     ) -> Result<LayeredLayout, JsError> {
         if !edges.len().is_multiple_of(2) {
             return Err(JsError::new("edges must be flat [a, b] index pairs; got an odd length"));
@@ -1085,9 +1116,27 @@ impl LayeredLayout {
             None => plotui_core::RankDir::TB,
             Some(s) => plotui_bind::parse_rankdir(s).map_err(to_js)?,
         };
+        let defaults = plotui_core::LayoutSpacing::default();
+        let sep = |v: Option<f32>, d: f32, what: &str| -> Result<f32, JsError> {
+            match v {
+                None => Ok(d),
+                Some(x) if x.is_finite() && x >= 0.0 => Ok(x),
+                Some(x) => {
+                    Err(JsError::new(&format!("{what} must be a non-negative number; got {x}")))
+                }
+            }
+        };
+        let spacing = plotui_core::LayoutSpacing {
+            node_sep: sep(node_sep, defaults.node_sep, "node_sep")?,
+            rank_sep: sep(rank_sep, defaults.rank_sep, "rank_sep")?,
+        };
         let pairs: Vec<(u32, u32)> =
             edges.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
-        Ok(LayeredLayout { inner: plotui_core::LayeredLayout::new(n_nodes, &pairs, dir) })
+        let inner = match labels {
+            Some(l) => plotui_core::LayeredLayout::with_labels(n_nodes, &pairs, dir, &l, spacing),
+            None => plotui_core::LayeredLayout::with_sizes(n_nodes, &pairs, dir, &[], spacing),
+        };
+        Ok(LayeredLayout { inner })
     }
 
     /// Node centres as a flat `[x0, y0, x1, …]` array, in index order.

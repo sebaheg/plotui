@@ -1019,7 +1019,7 @@ const EXAMPLES = {
   },
 
   dag2d: {
-    is3d: false, pick: 'element',
+    is3d: false, pick: 'element', graph: true,
     setup(plot, ui) {
       // The nine-task nightly forecast the CLI's `example pipeline` runs.
       const TASKS = [
@@ -1038,7 +1038,9 @@ const EXAMPLES = {
       const DONE = '#199e70', RUNNING = T2, FAILED = '#e66767', PENDING = '#3a4054';
       const STEP_MS = 1200, RESTART_MS = 2600;
 
-      const layout = new LayeredLayout(9, new Uint32Array(EDGES.flat()), 'TB');
+      // The labels go in too, so each box's width is part of the layout and
+      // no two boxes in a rank can land on each other.
+      const layout = new LayeredLayout(9, new Uint32Array(EDGES.flat()), 'TB', TASKS);
       const pos = layout.positions();
       const xs = new Float32Array(9), ys = new Float32Array(9);
       for (let i = 0; i < 9; i++) { xs[i] = pos[i * 2]; ys[i] = pos[i * 2 + 1]; }
@@ -1183,6 +1185,7 @@ function mountExample(card) {
 
   let w = 1, h = 1, dpr = 1;
   let dragging = false, lastX = 0, lastY = 0;
+  let nodeDrag = null; // flat node index being moved on a 2D graph card
   let hover = null; // {isEdge, index} for 3D picks
 
   const ro = new ResizeObserver(() => {
@@ -1266,7 +1269,13 @@ function mountExample(card) {
       dirty = true;
       return;
     }
-    if (!def.is3d) return;
+    if (!def.is3d && !def.graph) return;
+    // On a graph, a press on a box grabs the box: the drag moves it and
+    // the rest of the picture stays put. A press on empty space pans.
+    if (def.graph) {
+      const i = plot.pick(w, h, lx, ly, 8 * dpr);
+      nodeDrag = i === undefined ? null : i;
+    }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) [panCX, panCY, pinchD] = centroidDist();
     dragging = true;
@@ -1288,8 +1297,13 @@ function mountExample(card) {
     }
     if (dragging) {
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
-      // Through the input map, so the drag feel is stated once, in the core.
-      plot.apply_drag(dx, dy, e.shiftKey, 0.006, dpr, 0.004);
+      if (nodeDrag !== null) {
+        plot.drag_node(w, h, nodeDrag, dx * dpr, dy * dpr);
+      } else {
+        // Through the input map, so the drag feel is stated once, in the
+        // core — which also makes a plain drag pan on a 2D graph.
+        plot.apply_drag(dx, dy, e.shiftKey, 0.006, dpr, 0.004);
+      }
       lastX = e.clientX;
       lastY = e.clientY;
       dirty = true;
@@ -1331,6 +1345,7 @@ function mountExample(card) {
     }
     if (!dragging || pointers.size > 0) return;
     dragging = false;
+    nodeDrag = null;
     dirty = true; // repaint full-res after a half-res drag
   }
   canvas.addEventListener('pointerup', endPointer);
@@ -1339,7 +1354,7 @@ function mountExample(card) {
     setHover(null, e);
     if (def.hover2d && plot.set_hover2d(undefined)) dirty = true;
   });
-  if (def.is3d) {
+  if (def.is3d || def.graph) {
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
       plot.zoom_by(Math.exp(-e.deltaY * 0.002));

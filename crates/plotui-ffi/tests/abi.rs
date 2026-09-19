@@ -599,7 +599,16 @@ fn graph2d_round_trips_through_the_abi() {
     let edges = [0u32, 1, 1, 2, 0, 2];
     unsafe {
         let tb = CString::new("TB").unwrap();
-        let l = plotui_layered_layout_new(3, edges.as_ptr(), 3, tb.as_ptr());
+        let l = plotui_layered_layout_new(
+            3,
+            edges.as_ptr(),
+            3,
+            tb.as_ptr(),
+            ptr::null(),
+            0,
+            -1.0,
+            f32::NAN,
+        );
         assert!(!l.is_null());
         let mut xy = [0f32; 6];
         let mut ranks = [0u32; 3];
@@ -671,6 +680,15 @@ fn graph2d_round_trips_through_the_abi() {
             PLOTUI_OK
         );
         assert_eq!((kind, index), (1, 1), "the middle node's own centre picks it");
+
+        // A drag moves one node by a pixel delta and hands back where it
+        // landed; everything that is not a 2D graph node reports false.
+        let mut moved = [f32::NAN; 2];
+        assert!(plotui_drag_node(p, 400, 300, 1, 30.0, 0.0, moved.as_mut_ptr()));
+        assert!(moved[0] > xs[1], "dragging right moves the node to a larger x: {moved:?}");
+        assert_eq!(moved[1], ys[1], "a horizontal drag leaves y alone");
+        assert!(!plotui_drag_node(p, 400, 300, 99, 1.0, 1.0, ptr::null_mut()));
+        assert!(!plotui_drag_node(ptr::null_mut(), 400, 300, 0, 1.0, 1.0, ptr::null_mut()));
 
         // A relayout moves the nodes and rewrites the routes.
         let (mx, my, mz) = ([0f32, 1.0, 2.0], [2f32, 1.0, 0.0], [0f32; 3]);

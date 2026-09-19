@@ -19,6 +19,22 @@ func (p *Plot) SetGraphPositions(h TraceHandle, xs, ys, zs []float32) error {
 	return statusErr(C.plotui_set_graph_positions(p.h, C.size_t(h), xp, xn, yp, yn, zp, zn))
 }
 
+// DragNode moves one node of a 2D graph by (dxPx, dyPx) framebuffer pixels
+// in a pxW×pxH frame — the primitive behind "grab a box and move it". flat
+// is the node's index in the flat space PickPx returns. It reports the
+// node's new position and true, or false when flat is not a 2D graph node
+// or the plot is 3D. The rest of the graph stays put: the frame re-centres
+// on the new extent and the camera pans back by exactly that shift.
+func (p *Plot) DragNode(pxW, pxH int, flat int, dxPx, dyPx float32) (x, y float32, ok bool) {
+	var xy [2]C.float
+	moved := C.plotui_drag_node(p.h, C.size_t(pxW), C.size_t(pxH), C.size_t(flat),
+		C.float(dxPx), C.float(dyPx), &xy[0])
+	if !bool(moved) {
+		return 0, 0, false
+	}
+	return float32(xy[0]), float32(xy[1]), true
+}
+
 // SetGraphRoutes replaces a 2D graph's edge waypoints — the second half of
 // a relayout, after SetGraphPositions has moved the nodes. routes is one
 // list of (x, y) points per edge (what LayeredLayout.Routes returns); pass

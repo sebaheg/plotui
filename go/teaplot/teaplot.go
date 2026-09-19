@@ -58,6 +58,13 @@ type (
 	ElementPickedMsg struct{ Element *plotui.Element }
 	// ElementHoveredMsg reports a hover change (pickable components).
 	ElementHoveredMsg struct{ Element *plotui.Element }
+	// NodeMovedMsg reports a finished node drag on a 2D graph: the node's
+	// flat index and where it now sits, in the graph's own coordinates —
+	// what a host persists to keep a hand-arranged layout.
+	NodeMovedMsg struct {
+		Index int
+		X, Y  float32
+	}
 
 	tickMsg struct{}
 )
@@ -83,6 +90,11 @@ func WithPickable() Option { return func(m *Model) { m.pickable = true } }
 
 // WithoutCrosshair disables the 2D hover crosshair (on by default).
 func WithoutCrosshair() Option { return func(m *Model) { m.crosshair = false } }
+
+// WithDraggable turns node dragging on 2D graphs on or off (on by
+// default): a press on a box grabs it and moves it with the pointer, and
+// the release sends NodeMovedMsg. A press anywhere else pans, as before.
+func WithDraggable(on bool) Option { return func(m *Model) { m.draggable = on } }
 
 // WithRenderMode forces a render path instead of detecting one.
 func WithRenderMode(mode plotui.RenderMode) Option {
@@ -115,14 +127,18 @@ type Model struct {
 	autoRotate       bool
 	pickable         bool
 	crosshair        bool
+	draggable        bool
 	interactiveScale float64
 	replace          bool
 
 	dragging     bool
 	moved        bool
 	lastX, lastY int
-	hovered      *plotui.Element
-	hover2d      bool
+	// The 2D graph node grabbed by the active drag, or -1 when the drag
+	// holds the camera.
+	nodeDrag int
+	hovered  *plotui.Element
+	hover2d  bool
 
 	dirty   bool
 	rows    []string // styled View rows (placeholder cells or blanks)
@@ -137,6 +153,8 @@ func New(p *plotui.Plot, opts ...Option) Model {
 		plot:             p,
 		mode:             plotui.RenderMode(-1),
 		crosshair:        true,
+		draggable:        true,
+		nodeDrag:         -1,
 		interactiveScale: 0.5,
 		replace:          plotui.KittyReplaceEnv(),
 	}
@@ -263,6 +281,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.dragging = true
 			m.moved = false
 			m.lastX, m.lastY = msg.X, msg.Y
+			m.nodeDrag = -1
+			// A press on a 2D graph node grabs the node, not the camera:
+			// the box follows the pointer and the picture stays still.
+			if m.draggable && !m.plot.Is3D() {
+				pw, ph, px, py, radius := m.geometry(msg.X-m.posX, msg.Y-m.posY)
+				if index, ok := m.plot.PickPx(pw, ph, px, py, radius); ok {
+					m.nodeDrag = index
+				}
+			}
 		}
 		return m, nil
 	case tea.MouseMotionMsg:

@@ -266,11 +266,43 @@ pub fn reachable(n: usize, edges: &[(u32, u32)], from: usize, dir: Direction) ->
 /// the loop also stops early once a sweep fails to beat the best ordering.
 const SWEEPS: usize = 4;
 
+/// Spacing between the boxes of a [`LayeredLayout`], in layout units.
+///
+/// One unit is one text column — the width of a character in a node label
+/// at the frame's base text scale — so a label of `n` characters is about
+/// `n` units wide, and every gap here reads as "that many characters of
+/// air". The plot draws a graph at that scale, shrinking only when the
+/// whole graph would not fit the frame otherwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutSpacing {
+    /// Air between neighbouring boxes in the same rank, and between a box
+    /// and a wire running past it.
+    pub node_sep: f32,
+    /// Air between one rank's boxes and the next rank's.
+    pub rank_sep: f32,
+}
+
+impl Default for LayoutSpacing {
+    fn default() -> Self {
+        Self { node_sep: 2.0, rank_sep: 3.0 }
+    }
+}
+
+/// The lane a wire holds open where it runs past a rank, in layout units:
+/// the "width" of a dummy node, so two wires stay apart and neither runs
+/// through a box.
+const LANE: f32 = 1.0;
+
 /// A hierarchical ("Sugiyama") layout for a directed graph: rank the nodes by
 /// depth, order each rank to reduce edge crossings, then place them so edges
 /// run as straight as they can. Feeds
 /// [`Trace::Graph2d`](crate::Trace::Graph2d) directly — [`Self::positions`]
 /// are node centres and [`Self::routes`] is the CSR waypoint pair.
+///
+/// Positions are in layout units: one unit is one text column (see
+/// [`LayoutSpacing`]), which is the scale a graph frame draws at, so a
+/// layout built from the labels it will be drawn with
+/// ([`Self::with_labels`]) never puts two boxes on top of each other.
 ///
 /// Solved in `new`; there is nothing to step. Determinism is a hard
 /// requirement — same input, same output, no RNG — so every tie breaks by
@@ -295,7 +327,10 @@ struct LayoutEdge {
 }
 
 impl LayeredLayout {
-    /// Lay out `n_nodes` connected by `edges`, flowing in `dir`.
+    /// Lay out `n_nodes` connected by `edges`, flowing in `dir`, as
+    /// *unlabelled* boxes with the default [`LayoutSpacing`]. Boxes that
+    /// will carry labels want [`Self::with_labels`] instead, so their width
+    /// is part of the layout.
     ///
     /// Self-loops and edges with an out-of-range endpoint are kept inert —
     /// they take no part in the layout but keep their index, so
@@ -303,28 +338,96 @@ impl LayeredLayout {
     /// edge list can be passed straight through. Cycles do not hang: a back
     /// edge is reversed for the layout and drawn in its original direction.
     pub fn new(n_nodes: usize, edges: &[(u32, u32)], dir: RankDir) -> Self {
+        Self::with_sizes(n_nodes, edges, dir, &[], LayoutSpacing::default())
+    }
+
+    /// [`Self::new`] for boxes that will be drawn with `labels` — the same
+    /// strings handed to [`Plot::add_graph2d`](crate::Plot::add_graph2d).
+    /// Each box is sized the way the renderer will size it, so neighbours
+    /// in a rank sit `spacing.node_sep` apart edge to edge whatever their
+    /// labels say. A short list pads with unlabelled boxes.
+    pub fn with_labels<S: AsRef<str>>(
+        n_nodes: usize,
+        edges: &[(u32, u32)],
+        dir: RankDir,
+        labels: &[S],
+        spacing: LayoutSpacing,
+    ) -> Self {
+        let sizes: Vec<(f32, f32)> = (0..n_nodes)
+            .map(|i| crate::node_size_units(labels.get(i).map_or("", |s| s.as_ref())))
+            .collect();
+        Self::with_sizes(n_nodes, edges, dir, &sizes, spacing)
+    }
+
+    /// [`Self::new`] with an explicit `(width, height)` per node, in layout
+    /// units — for a host that draws its own boxes. A short list pads with
+    /// the unlabelled box size.
+    pub fn with_sizes(
+        n_nodes: usize,
+        edges: &[(u32, u32)],
+        dir: RankDir,
+        sizes: &[(f32, f32)],
+        spacing: LayoutSpacing,
+    ) -> Self {
+        let unlabelled = crate::node_size_units("");
+        let size_of = |v: usize| -> (f32, f32) {
+            let (w, h) = sizes.get(v).copied().unwrap_or(unlabelled);
+            (w.max(0.0), h.max(0.0))
+        };
+        let node_sep = spacing.node_sep.max(0.0);
+        let rank_sep = spacing.rank_sep.max(0.0);
+
         let live = remove_cycles(n_nodes, edges);
         let ranks = rank_nodes(n_nodes, &live);
-        let (layers, segs, chains, rank_of) = insert_dummies(n_nodes, &live, &ranks);
-        let layers = reduce_crossings(layers, &segs);
-        let x = assign_x(&layers, &segs, n_nodes);
+        let Layered { layers, segs, chains, rank_of, n_virtual } =
+            insert_dummies(n_nodes, &live, &ranks);
+        let layers = reduce_crossings(layers, &segs, n_virtual);
+
+        // Each virtual node's extent *along* its rank (the axis siblings are
+        // spread on) and *across* it (the axis ranks are stacked on). A
+        // dummy holds a lane open along the rank and nothing across it.
+        let (along, across): (Vec<f32>, Vec<f32>) = (0..n_virtual)
+            .map(|v| {
+                if v >= n_nodes {
+                    return (LANE, 0.0);
+                }
+                let (w, h) = size_of(v);
+                match dir {
+                    RankDir::TB => (w, h),
+                    RankDir::LR => (h, w),
+                }
+            })
+            .unzip();
+        let col = assign_x(&layers, &segs, n_nodes, &along, node_sep);
+
+        // Ranks stack by their tallest box: the gap between two ranks is
+        // `rank_sep` edge to edge, whatever is in them.
+        let thickest = |layer: &[usize]| layer.iter().map(|&v| across[v]).fold(0.0f32, f32::max);
+        let mut rank_pos = vec![0f32; layers.len()];
+        for r in 1..layers.len() {
+            rank_pos[r] = rank_pos[r - 1]
+                + thickest(&layers[r - 1]) * 0.5
+                + rank_sep
+                + thickest(&layers[r]) * 0.5;
+        }
 
         // `[col, -rank]` puts rank 0 highest on screen (data y is up), which
         // is what "sources on top" means once the frame flips it.
-        let place = |col: f32, rank: f32| -> [f32; 2] {
+        let place = |v: usize| -> [f32; 2] {
+            let (c, r) = (col[v], rank_pos[rank_of[v]]);
             match dir {
-                RankDir::TB => [col, -rank],
-                RankDir::LR => [rank, -col],
+                RankDir::TB => [c, -r],
+                RankDir::LR => [r, -c],
             }
         };
-        let positions = (0..n_nodes).map(|v| place(x[v], ranks[v] as f32)).collect::<Vec<_>>();
+        let positions = (0..n_nodes).map(place).collect::<Vec<_>>();
 
         // Waypoints per *caller* edge, in the caller's direction.
         let mut route_pts = Vec::new();
         let mut route_starts = vec![0u32; edges.len()];
         let mut per_edge: Vec<Vec<[f32; 2]>> = vec![Vec::new(); edges.len()];
         for (e, chain) in chains {
-            per_edge[e] = chain.iter().map(|&d| place(x[d], rank_of[d] as f32)).collect();
+            per_edge[e] = chain.iter().map(|&d| place(d)).collect();
         }
         for (e, chain) in per_edge.iter_mut().enumerate() {
             route_starts[e] = route_pts.len() as u32;
@@ -484,39 +587,79 @@ fn rank_nodes(n: usize, edges: &[LayoutEdge]) -> Vec<u32> {
     rank
 }
 
+/// What [`insert_dummies`] hands on: the layers (virtual node ids, reals
+/// first then dummies), the unit segments between them, each original
+/// edge's dummy chain in the *caller's* direction, every virtual node's
+/// rank, and how many virtual nodes there are.
+struct Layered {
+    layers: Vec<Vec<usize>>,
+    segs: Vec<(usize, usize)>,
+    chains: Vec<(usize, Vec<usize>)>,
+    rank_of: Vec<usize>,
+    n_virtual: usize,
+}
+
 /// Phase 3 — dummy nodes. Every edge spanning more than one rank is split
 /// into unit-length segments with one dummy per rank it skips, so the
 /// ordering and placement phases below only ever see neighbouring ranks.
 ///
-/// Returns the layers (virtual node ids, reals first then dummies), the unit
-/// segments between them, each original edge's dummy chain in the *caller's*
-/// direction, and every virtual node's rank.
-type Layered = (Vec<Vec<usize>>, Vec<(usize, usize)>, Vec<(usize, Vec<usize>)>, Vec<usize>);
+/// Long edges that share an endpoint share their dummies too: a task that
+/// every later step reports to, or a setup step everything waits on, gets
+/// one wire running past the ranks between with the other ends joining it,
+/// rather than one wire per edge stacked side by side into a comb. Each
+/// edge is bundled at whichever of its ends has more long edges — its hub —
+/// and dummies are keyed by `(hub, rank)`, so two edges into the same hub
+/// walk the same chain from the rank they meet at down to the hub.
 fn insert_dummies(n: usize, edges: &[LayoutEdge], ranks: &[u32]) -> Layered {
     let depth = ranks.iter().copied().max().unwrap_or(0) as usize + 1;
+    let mut long_out = vec![0usize; n];
+    let mut long_in = vec![0usize; n];
+    for e in edges {
+        if ranks[e.to] > ranks[e.from] + 1 {
+            long_out[e.from] += 1;
+            long_in[e.to] += 1;
+        }
+    }
     let mut layers: Vec<Vec<usize>> = vec![Vec::new(); depth];
     let mut rank_of: Vec<usize> = ranks.iter().map(|&r| r as usize).collect();
-    let mut segs = Vec::new();
+    let mut segs: Vec<(usize, usize)> = Vec::new();
+    // Shared dummies mean shared segments; each is kept once so the
+    // crossing count and the barycenters weigh a wire, not the edges in it.
+    let mut seen = std::collections::HashSet::new();
+    let mut seg = |a: usize, b: usize| {
+        if seen.insert((a, b)) {
+            segs.push((a, b));
+        }
+    };
+    // Looked up, never iterated, so hash order cannot leak into the result.
+    let mut shared: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
     let mut chains = Vec::new();
     let mut next = n;
     for e in edges {
         let (r0, r1) = (ranks[e.from] as usize, ranks[e.to] as usize);
         if r1 <= r0 + 1 {
-            segs.push((e.from, e.to));
+            seg(e.from, e.to);
             continue;
         }
+        // Ties go to the source: a fan-out reads as one trunk leaving a
+        // node, the way a fan-in reads as one trunk arriving.
+        let hub = if long_out[e.from] >= long_in[e.to] { e.from } else { e.to };
         let mut chain = Vec::with_capacity(r1 - r0 - 1);
         let mut prev = e.from;
         for (r, layer) in layers.iter_mut().enumerate().take(r1).skip(r0 + 1) {
-            let d = next;
-            next += 1;
-            layer.push(d);
-            rank_of.push(r);
+            let d = *shared.entry((hub, r)).or_insert_with(|| {
+                let d = next;
+                next += 1;
+                layer.push(d);
+                rank_of.push(r);
+                d
+            });
             chain.push(d);
-            segs.push((prev, d));
+            seg(prev, d);
             prev = d;
         }
-        segs.push((prev, e.to));
+        seg(prev, e.to);
         // The chain runs source→target in *layout* order; a reversed edge
         // is drawn the other way round, so its waypoints are too.
         if e.reversed {
@@ -531,19 +674,22 @@ fn insert_dummies(n: usize, edges: &[LayoutEdge], ranks: &[u32]) -> Layered {
         layer.extend((0..n).filter(|&v| ranks[v] as usize == r));
         layer.extend(layers[r].iter().copied());
     }
-    (ordered, segs, chains, rank_of)
+    Layered { layers: ordered, segs, chains, rank_of, n_virtual: next }
 }
 
 /// Phase 4 — crossing reduction. Start from depth-first discovery order,
 /// then sweep barycenters down and up, keeping the best ordering seen. Ties
 /// break by current position and then by index, so the result is a pure
 /// function of the input.
-fn reduce_crossings(layers: Vec<Vec<usize>>, segs: &[(usize, usize)]) -> Vec<Vec<usize>> {
+fn reduce_crossings(
+    layers: Vec<Vec<usize>>,
+    segs: &[(usize, usize)],
+    n_virtual: usize,
+) -> Vec<Vec<usize>> {
     let total: usize = layers.iter().map(Vec::len).sum();
     if total == 0 {
         return layers;
     }
-    let n_virtual = layers.iter().flatten().copied().max().unwrap_or(0) + 1;
     let mut up: Vec<Vec<usize>> = vec![Vec::new(); n_virtual];
     let mut down: Vec<Vec<usize>> = vec![Vec::new(); n_virtual];
     for &(a, b) in segs {
@@ -679,19 +825,38 @@ fn count_crossings(layers: &[Vec<usize>], segs: &[(usize, usize)], n_virtual: us
     total
 }
 
-/// Phase 5 — coordinate assignment. Start each rank at unit spacing centred
-/// on zero, then run priority passes that pull every node toward the median
-/// of its neighbours in the rank just placed. A node may push its
-/// lower-priority siblings aside but never crosses one of equal or higher
-/// priority, which is what keeps ranks non-overlapping without a separate
-/// constraint solve.
-fn assign_x(layers: &[Vec<usize>], segs: &[(usize, usize)], n_real: usize) -> Vec<f32> {
-    let n_virtual = layers.iter().flatten().copied().max().map_or(0, |m| m + 1);
+/// Phase 5 — coordinate assignment. Start each rank packed edge to edge
+/// with `sep` between neighbours and centred on zero, then run priority
+/// passes that pull every node toward the median of its neighbours in the
+/// rank just placed. A node may push its lower-priority siblings aside but
+/// never crosses one of equal or higher priority, which is what keeps ranks
+/// non-overlapping without a separate constraint solve.
+///
+/// `along[v]` is each virtual node's extent on this axis; ids at or above
+/// `n_real` are dummies (see [`insert_dummies`]).
+fn assign_x(
+    layers: &[Vec<usize>],
+    segs: &[(usize, usize)],
+    n_real: usize,
+    along: &[f32],
+    sep: f32,
+) -> Vec<f32> {
+    let n_virtual = along.len();
+    // The least distance two neighbouring centres may be apart.
+    let gap = |a: usize, b: usize| (along[a] + along[b]) * 0.5 + sep;
     let mut x = vec![0f32; n_virtual];
     for layer in layers {
-        let mid = (layer.len() as f32 - 1.0) * 0.5;
+        let mut acc = 0f32;
+        let mut xs = Vec::with_capacity(layer.len());
         for (i, &v) in layer.iter().enumerate() {
-            x[v] = i as f32 - mid;
+            if i > 0 {
+                acc += gap(layer[i - 1], v);
+            }
+            xs.push(acc);
+        }
+        let mid = acc * 0.5;
+        for (&v, cx) in layer.iter().zip(xs) {
+            x[v] = cx - mid;
         }
     }
     let mut up: Vec<Vec<usize>> = vec![Vec::new(); n_virtual];
@@ -700,17 +865,18 @@ fn assign_x(layers: &[Vec<usize>], segs: &[(usize, usize)], n_real: usize) -> Ve
         down[a].push(b);
         up[b].push(a);
     }
-    // A dummy is a piece of one long edge, so keeping it in line is worth
-    // more than any real node's preference — a bent wire reads as two edges.
-    // Ids at or above `n_real` are dummies (see `insert_dummies`). Below
-    // that, the busiest node wins, because it is the one with most edges to
-    // straighten.
-    let prio = |v: usize| -> u32 {
-        let deg = (up[v].len() + down[v].len()) as u32;
-        if v >= n_real {
-            u32::MAX / 2 + deg
+    let is_dummy = |v: usize| v >= n_real;
+    let deg = |v: usize| (up[v].len() + down[v].len()) as u32;
+    // A node aims at its own kind first: a box lines up under the boxes it
+    // is wired to, and a wire continues the wire it is part of, rather than
+    // each being dragged toward the other. Only a node with no neighbour of
+    // its kind falls back to all of them.
+    let aim = |v: usize, ns: &[usize], x: &[f32]| -> (Option<f32>, bool) {
+        let kin: Vec<usize> = ns.iter().copied().filter(|&u| is_dummy(u) == is_dummy(v)).collect();
+        if kin.is_empty() {
+            (median_of(ns, x), false)
         } else {
-            deg
+            (median_of(&kin, x), is_dummy(v))
         }
     };
     for _ in 0..2 {
@@ -722,13 +888,60 @@ fn assign_x(layers: &[Vec<usize>], segs: &[(usize, usize)], n_real: usize) -> Ve
             };
             for &r in &idx {
                 let nbrs = if descending { &up } else { &down };
-                let targets: Vec<Option<f32>> =
-                    layers[r].iter().map(|&v| median_of(&nbrs[v], &x)).collect();
-                priority_pass(&layers[r], &mut x, &prio, &targets);
+                let mut targets = Vec::with_capacity(layers[r].len());
+                let mut prios = Vec::with_capacity(layers[r].len());
+                for &v in &layers[r] {
+                    let (target, continuing) = aim(v, &nbrs[v], &x);
+                    targets.push(target);
+                    // A wire that is continuing outranks every box, because
+                    // a bent wire reads as two edges; where a wire *starts*
+                    // it yields to the boxes and lands beside them. Among
+                    // boxes the busiest wins — it has most edges to
+                    // straighten.
+                    prios.push(if continuing {
+                        u32::MAX / 2 + deg(v)
+                    } else if is_dummy(v) {
+                        0
+                    } else {
+                        deg(v)
+                    });
+                }
+                settle(&layers[r], &mut x, &prios, &targets, &gap);
             }
         }
     }
+    // The sweeps end going up, so every rank is placed against the one
+    // below it and the sinks — placed against nothing — are wherever the
+    // down sweep left them. A sink's position affects only its own edges,
+    // so centring each on the nodes above it can only shorten wires.
+    for layer in layers.iter().skip(1) {
+        let mut targets = Vec::with_capacity(layer.len());
+        let mut prios = Vec::with_capacity(layer.len());
+        for &v in layer {
+            let sink = !is_dummy(v) && down[v].is_empty();
+            targets.push(if sink { aim(v, &up[v], &x).0 } else { None });
+            prios.push(if sink { deg(v) } else { u32::MAX });
+        }
+        settle(layer, &mut x, &prios, &targets, &gap);
+    }
     x
+}
+
+/// [`priority_pass`] until the rank stops moving (a few passes at most): a
+/// node blocked by an equal-priority neighbour that then moves away itself
+/// gets to take the room it left.
+fn settle(
+    layer: &[usize],
+    x: &mut [f32],
+    prios: &[u32],
+    targets: &[Option<f32>],
+    gap: &impl Fn(usize, usize) -> f32,
+) {
+    for _ in 0..3 {
+        if !priority_pass(layer, x, prios, targets, gap) {
+            break;
+        }
+    }
 }
 
 /// The median x of a node's neighbours — the position that leaves its edges
@@ -746,69 +959,76 @@ fn median_of(nbrs: &[usize], x: &[f32]) -> Option<f32> {
 
 /// Move each node of one rank toward its target, highest priority first,
 /// shifting only strictly lower-priority neighbours out of the way and
-/// stopping at the first one that outranks it. Nodes keep a gap of at least
-/// one unit, so the rank stays ordered and non-overlapping.
+/// stopping at the first one that outranks it. Neighbours keep at least
+/// `gap` between their centres, so the rank stays ordered and
+/// non-overlapping.
 fn priority_pass(
     layer: &[usize],
     x: &mut [f32],
-    prio: &impl Fn(usize) -> u32,
+    prios: &[u32],
     targets: &[Option<f32>],
-) {
+    gap: &impl Fn(usize, usize) -> f32,
+) -> bool {
+    let mut moved = false;
     let mut order: Vec<usize> = (0..layer.len()).collect();
-    order.sort_by_key(|&i| (std::cmp::Reverse(prio(layer[i])), layer[i]));
+    order.sort_by_key(|&i| (std::cmp::Reverse(prios[i]), layer[i]));
     for &i in &order {
         let Some(target) = targets[i] else { continue };
         let v = layer[i];
-        let p = prio(v);
+        let p = prios[i];
         if target > x[v] {
             // How far right can `v` go before it would crowd someone who
-            // outranks it? Each lower-priority node in between needs a unit.
+            // outranks it? Each lower-priority node in between needs its
+            // own room.
             let mut limit = f32::INFINITY;
+            let mut need = 0f32;
             let mut k = i + 1;
-            let mut gap = 1.0f32;
             while k < layer.len() {
-                if prio(layer[k]) >= p {
-                    limit = x[layer[k]] - gap;
+                need += gap(layer[k - 1], layer[k]);
+                if prios[k] >= p {
+                    limit = x[layer[k]] - need;
                     break;
                 }
                 k += 1;
-                gap += 1.0;
             }
             let nx = target.min(limit);
             if nx <= x[v] {
                 continue;
             }
             x[v] = nx;
-            let mut prev = nx;
+            moved = true;
+            let mut prev = v;
             for &u in &layer[i + 1..k.min(layer.len())] {
-                x[u] = x[u].max(prev + 1.0);
-                prev = x[u];
+                x[u] = x[u].max(x[prev] + gap(prev, u));
+                prev = u;
             }
         } else if target < x[v] {
             let mut limit = f32::NEG_INFINITY;
+            let mut need = 0f32;
             let mut k = i;
-            let mut gap = 1.0f32;
             while k > 0 {
-                if prio(layer[k - 1]) >= p {
-                    limit = x[layer[k - 1]] + gap;
+                need += gap(layer[k - 1], layer[k]);
+                if prios[k - 1] >= p {
+                    limit = x[layer[k - 1]] + need;
                     break;
                 }
                 k -= 1;
-                gap += 1.0;
             }
             let nx = target.max(limit);
             if nx >= x[v] {
                 continue;
             }
             x[v] = nx;
-            let mut prev = nx;
+            moved = true;
+            let mut prev = v;
             for j in (k..i).rev() {
                 let u = layer[j];
-                x[u] = x[u].min(prev - 1.0);
-                prev = x[u];
+                x[u] = x[u].min(x[prev] - gap(prev, u));
+                prev = u;
             }
         }
     }
+    moved
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -859,9 +1079,15 @@ mod tests {
             assert!(rp[a as usize][1] > rp[b as usize][1], "edge {a}->{b} points upwards in TB");
             assert!(rl[a as usize][0] < rl[b as usize][0], "edge {a}->{b} points leftwards in LR");
         }
-        // LR is TB turned a quarter turn: rank moves from y to x, column
-        // from x to y, and the ranks themselves are identical.
         assert_eq!(tb.ranks(), lr.ranks());
+        // With square boxes LR is TB turned a quarter turn: rank moves from
+        // y to x, column from x to y. (Real boxes are wider than they are
+        // tall, so the two directions space differently.)
+        let square = vec![(3.0f32, 3.0f32); n];
+        let sp = LayoutSpacing::default();
+        let tb = LayeredLayout::with_sizes(n, &edges, RankDir::TB, &square, sp);
+        let lr = LayeredLayout::with_sizes(n, &edges, RankDir::LR, &square, sp);
+        let (rp, rl) = (tb.positions(), lr.positions());
         for i in 0..n {
             assert_eq!(rl[i][0], -rp[i][1], "rank axis");
             assert_eq!(rl[i][1], -rp[i][0], "column axis");
@@ -973,6 +1199,111 @@ mod tests {
         let l = LayeredLayout::new(5, &edges, RankDir::TB);
         assert_eq!(l.ranks()[4], 2, "the lone source sits just above what it feeds");
         assert_eq!(l.ranks()[3], 3);
+    }
+
+    /// A waypoint run per edge, in the caller's order.
+    fn runs(l: &LayeredLayout, n_edges: usize) -> Vec<Vec<[f32; 2]>> {
+        let (pts, starts) = l.routes();
+        (0..n_edges)
+            .map(|e| {
+                let a = starts[e] as usize;
+                let b = starts.get(e + 1).map_or(pts.len(), |v| *v as usize);
+                pts[a..b].to_vec()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn long_edges_into_one_node_share_a_straight_trunk() {
+        // A six-step chain whose last step reports to every earlier one:
+        // the shape that draws as a comb of parallel wires when each long
+        // edge gets a lane of its own.
+        let n = 6u32;
+        let mut edges: Vec<(u32, u32)> = (0..n - 2).map(|i| (i, i + 1)).collect();
+        edges.extend((0..n - 1).map(|i| (i, n - 1)));
+        let l = LayeredLayout::new(n as usize, &edges, RankDir::TB);
+        let runs = runs(&l, edges.len());
+        // Every long edge into the sink passes the same rank at the same
+        // point: one wire, joined by the others.
+        let trunk = &runs[edges.len() - 5]; // 0 -> 5, the longest
+        assert_eq!(trunk.len(), 4, "0->5 skips four ranks");
+        for e in (edges.len() - 5)..(edges.len() - 1) {
+            for w in &runs[e] {
+                assert!(trunk.contains(w), "edge {:?} leaves the trunk at {w:?}", edges[e]);
+            }
+        }
+        // And the trunk is straight: a bent wire reads as two edges.
+        let xs: Vec<f32> = trunk.iter().map(|p| p[0]).collect();
+        assert!(xs.iter().all(|&x| (x - xs[0]).abs() < 1e-4), "trunk bends: {xs:?}");
+        // Beside the chain, not through it.
+        let chain_x = l.positions()[1][0];
+        let (w, _) = crate::node_size_units("");
+        assert!((xs[0] - chain_x).abs() >= w * 0.5, "the trunk runs through the boxes");
+    }
+
+    #[test]
+    fn long_edges_out_of_one_node_bundle_at_the_source() {
+        // setup -> a -> b -> c, plus setup -> b and setup -> c: the two skip
+        // edges leave setup as one wire and fork where they must.
+        let edges = vec![(0u32, 1), (1, 2), (2, 3), (0, 2), (0, 3)];
+        let l = LayeredLayout::new(4, &edges, RankDir::TB);
+        let runs = runs(&l, edges.len());
+        assert_eq!(runs[3].len(), 1);
+        assert_eq!(runs[4].len(), 2);
+        assert_eq!(runs[3][0], runs[4][0], "both skip edges share setup's first waypoint");
+    }
+
+    #[test]
+    fn labelled_boxes_keep_their_distance() {
+        // Two wide sources feeding one sink: at unit spacing their boxes
+        // would sit on top of each other.
+        let labels = ["a very long task name", "another long task name", "sink"];
+        let edges = vec![(0u32, 2), (1, 2)];
+        let sp = LayoutSpacing { node_sep: 2.0, rank_sep: 3.0 };
+        let l = LayeredLayout::with_labels(3, &edges, RankDir::TB, &labels, sp);
+        let p = l.positions();
+        let (w0, h0) = crate::node_size_units(labels[0]);
+        let (w1, _) = crate::node_size_units(labels[1]);
+        assert!(
+            (p[0][0] - p[1][0]).abs() >= (w0 + w1) * 0.5 + sp.node_sep - 1e-4,
+            "siblings overlap: {p:?}"
+        );
+        // Ranks stack `rank_sep` apart edge to edge, and the sink sits
+        // centred under its two feeders.
+        assert!((p[0][1] - p[2][1] - (h0 + sp.rank_sep)).abs() < 1e-4, "rank pitch: {p:?}");
+        assert!((p[2][0] - (p[0][0] + p[1][0]) * 0.5).abs() < 1e-3, "sink not centred: {p:?}");
+        // LR spreads siblings by their *height* and ranks by their width.
+        let lr = LayeredLayout::with_labels(3, &edges, RankDir::LR, &labels, sp);
+        let q = lr.positions();
+        assert!((q[0][1] - q[1][1]).abs() >= h0 + sp.node_sep - 1e-4);
+        assert!(
+            q[2][0] - q[0][0] >= (w0 + crate::node_size_units("sink").0) * 0.5 + sp.rank_sep - 1e-4
+        );
+    }
+
+    #[test]
+    fn a_source_lines_up_over_its_only_child() {
+        // fetch_prices feeds only clean_prices, which sits under join; the
+        // room is there, so the source must not be left hanging to one side
+        // by a sibling that moves out of the way a moment later.
+        let tasks = [
+            "fetch_prices",
+            "fetch_weather",
+            "clean_prices",
+            "clean_weather",
+            "join_frames",
+            "build_features",
+            "train_model",
+            "backtest",
+            "publish",
+        ];
+        let edges =
+            [(0, 2), (1, 3), (2, 4), (3, 4), (4, 5), (5, 6), (5, 7), (6, 8), (7, 8), (2, 7)];
+        let l =
+            LayeredLayout::with_labels(9, &edges, RankDir::TB, &tasks, LayoutSpacing::default());
+        let p = l.positions();
+        assert!((p[0][0] - p[2][0]).abs() < 1e-3, "fetch_prices is off its child: {p:?}");
+        assert!((p[8][0] - (p[6][0] + p[7][0]) * 0.5).abs() < 1e-3, "publish is off centre: {p:?}");
     }
 
     #[test]

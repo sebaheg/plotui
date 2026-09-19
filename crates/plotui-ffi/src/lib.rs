@@ -2317,6 +2317,47 @@ pub unsafe extern "C" fn plotui_pick_px(
     }
 }
 
+/// Drag one node of a 2D graph by `(dx_px, dy_px)` framebuffer pixels in a
+/// `px_w × px_h` frame — the primitive behind "grab a box and move it".
+/// `flat` is the node's index in the flat space `plotui_pick_px` returns.
+/// Returns true and writes the node's new `(x, y)` to `out_xy` (two floats,
+/// or NULL to skip) when the node moved; false when `flat` is not a 2D
+/// graph node, the plot is 3D, or the handle is NULL (with the reason in
+/// `plotui_last_error`) — the `plotui_pick_px` shape, since a drag is a
+/// pick that moved.
+///
+/// The rest of the graph stays where it is: the frame re-centres on the new
+/// extent and the camera pans back by exactly that shift, so only the box
+/// under the pointer moves.
+///
+/// # Safety
+/// `p` must be a live plot handle; `out_xy` must point at two floats or be
+/// NULL.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_drag_node(
+    p: *mut PlotuiPlot,
+    px_w: usize,
+    px_h: usize,
+    flat: usize,
+    dx_px: f32,
+    dy_px: f32,
+    out_xy: *mut f32,
+) -> bool {
+    let Ok(p) = plot_mut(p) else {
+        return false;
+    };
+    match p.plot.drag_node(px_w, px_h, flat, dx_px, dy_px) {
+        Some(np) => {
+            if !out_xy.is_null() {
+                *out_xy = np[0];
+                *out_xy.add(1) = np[1];
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 // ---- camera ----
 
 /// # Safety
@@ -2967,8 +3008,17 @@ pub struct PlotuiLayeredLayout {
 /// Lay out `n_nodes` connected by `edges` (`2 * n_edges` u32s as (i, j)
 /// pairs) flowing in `rankdir` (`"TB"` or `"LR"`, case-insensitive; NULL
 /// means `"TB"`). Free with `plotui_layered_layout_free`. Returns NULL on a
-/// malformed edge slice or an unknown `rankdir`, with the reason in
-/// `plotui_last_error`.
+/// malformed edge slice, an unknown `rankdir` or a bad label, with the
+/// reason in `plotui_last_error`.
+///
+/// `labels` is the array of `n_labels` NUL-terminated strings the nodes
+/// will be drawn with (the same ones handed to `plotui_add_graph2d`), or
+/// NULL for unlabelled boxes. Positions come back in layout units — one
+/// unit is one text column — and a box is sized from its label in those
+/// units, so a layout that knows the labels never puts two boxes on top of
+/// each other; a short list pads with unlabelled boxes. `node_sep` and
+/// `rank_sep` are the air between neighbouring boxes and between ranks, in
+/// the same units; a negative or NaN value takes the default (2 and 3).
 ///
 /// # Safety
 /// Pointer arguments follow the crate conventions.
@@ -2978,6 +3028,10 @@ pub unsafe extern "C" fn plotui_layered_layout_new(
     edges: *const u32,
     n_edges: usize,
     rankdir: *const c_char,
+    labels: *const *const c_char,
+    n_labels: usize,
+    node_sep: f32,
+    rank_sep: f32,
 ) -> *mut PlotuiLayeredLayout {
     let Ok(e) = slice(edges, n_edges * 2) else {
         return ptr::null_mut();
@@ -2994,11 +3048,21 @@ pub unsafe extern "C" fn plotui_layered_layout_new(
         Err(_) => return ptr::null_mut(),
     };
     let pairs: Vec<(u32, u32)> = e.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).collect();
-    Box::into_raw(Box::new(PlotuiLayeredLayout {
-        layout: plotui_core::LayeredLayout::new(n_nodes, &pairs, dir),
-        n_nodes,
-        n_edges: pairs.len(),
-    }))
+    let default = plotui_core::LayoutSpacing::default();
+    let pick = |v: f32, d: f32| if v.is_nan() || v < 0.0 { d } else { v };
+    let spacing = plotui_core::LayoutSpacing {
+        node_sep: pick(node_sep, default.node_sep),
+        rank_sep: pick(rank_sep, default.rank_sep),
+    };
+    let layout = if labels.is_null() {
+        plotui_core::LayeredLayout::with_sizes(n_nodes, &pairs, dir, &[], spacing)
+    } else {
+        let Ok(labels) = str_array(labels, n_labels, "node label") else {
+            return ptr::null_mut();
+        };
+        plotui_core::LayeredLayout::with_labels(n_nodes, &pairs, dir, &labels, spacing)
+    };
+    Box::into_raw(Box::new(PlotuiLayeredLayout { layout, n_nodes, n_edges: pairs.len() }))
 }
 
 /// Free a layered layout. NULL is a no-op.

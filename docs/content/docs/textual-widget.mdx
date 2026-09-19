@@ -13,6 +13,7 @@ PlotWidget(
     pickable=False,           # 3D hover/click picking (posts messages)
     crosshair=True,           # 2D hover crosshair with values
     range_slider=False,       # 2D range slider strip (posts RangeChanged)
+    draggable=True,           # grab a 2D graph node to move it (posts NodeMoved)
     render_mode="auto",       # "placeholder" | "direct" to force a path
     interactive_scale=0.5,    # resolution while interacting, for large plots
 )
@@ -20,8 +21,11 @@ PlotWidget(
 
 ## Input
 
-Drag rotates as a trackball (the drag grabs the object), **shift-drag**
-pans, scroll zooms, **double-click** resets. Arrow keys rotate, `+`/`-`
+On a 3D plot drag rotates as a trackball (the drag grabs the object) and
+**shift-drag** pans; on a 2D plot drag pans, and a drag that starts on a
+graph node's box moves that node (a `NodeMoved(index, x, y)` message on
+release; `draggable=False` turns it off). Scroll zooms, **double-click**
+resets. Arrow keys rotate, `+`/`-`
 zoom, `r` resets. All of it routes through the plot's camera — subclass and
 override to change the bindings, or invert an axis with
 `plot.set_input_map("-yaw", "-pitch")` for the camera-grab feel. With

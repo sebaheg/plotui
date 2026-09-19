@@ -97,13 +97,45 @@ type LayeredLayout struct {
 	nEdges int
 }
 
+// LayoutOption configures NewLayeredLayout.
+type LayoutOption func(*layoutOpts)
+
+type layoutOpts struct {
+	labels           []string
+	nodeSep, rankSep float32
+}
+
+// LayoutLabels tells the layout the labels its nodes will be drawn with —
+// the same strings handed to AddGraph2D via WithLabels. Positions come back
+// in layout units (one unit is one text column) and each box is sized from
+// its label in those units, so a layout that knows the labels never puts
+// two boxes on top of each other. A short list pads with unlabelled boxes.
+func LayoutLabels(labels []string) LayoutOption {
+	return func(o *layoutOpts) { o.labels = labels }
+}
+
+// LayoutSpacing sets the air between neighbouring boxes in a rank
+// (nodeSep) and between ranks (rankSep), in layout units — "that many
+// characters of air". The defaults are 2 and 3; a negative value keeps the
+// default for that one.
+func LayoutSpacing(nodeSep, rankSep float32) LayoutOption {
+	return func(o *layoutOpts) { o.nodeSep, o.rankSep = nodeSep, rankSep }
+}
+
 // NewLayeredLayout lays out n nodes connected by edges as (from, to) index
 // pairs, flowing in rankdir — "TB" (sources on top; also the empty-string
 // default) or "LR" (sources on the left). Self-loops and out-of-range
 // endpoints are kept inert, so an edge list can be passed verbatim from the
 // plot; cycles do not hang, since a back edge is reversed for the layout
 // only. An unknown rankdir returns the shared parse error.
-func NewLayeredLayout(n int, edges [][2]uint32, rankdir string) (*LayeredLayout, error) {
+//
+// Pass LayoutLabels so the boxes are spaced by what they will say; without
+// it every node is laid out as an unlabelled box.
+func NewLayeredLayout(n int, edges [][2]uint32, rankdir string, opts ...LayoutOption) (*LayeredLayout, error) {
+	o := layoutOpts{nodeSep: -1, rankSep: -1}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	var ep *C.uint32_t
 	if len(edges) > 0 {
 		ep = (*C.uint32_t)(unsafe.Pointer(&edges[0][0]))
@@ -113,7 +145,10 @@ func NewLayeredLayout(n int, edges [][2]uint32, rankdir string) (*LayeredLayout,
 		cdir = C.CString(rankdir)
 		defer C.free(unsafe.Pointer(cdir))
 	}
-	h := C.plotui_layered_layout_new(C.size_t(n), ep, C.size_t(len(edges)), cdir)
+	labels, lp := cStrings(o.labels)
+	defer freeCStrings(labels)
+	h := C.plotui_layered_layout_new(C.size_t(n), ep, C.size_t(len(edges)), cdir,
+		lp, C.size_t(len(o.labels)), C.float(o.nodeSep), C.float(o.rankSep))
 	if h == nil {
 		return nil, &Error{Code: -1, Message: C.GoString(C.plotui_last_error())}
 	}

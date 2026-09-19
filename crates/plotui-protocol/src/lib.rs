@@ -195,7 +195,7 @@ pub fn kitty(fb: &Framebuffer, cols: u16, rows: u16) -> String {
 
 /// [`kitty`] with a caller-chosen image id.
 pub fn kitty_with_id(fb: &Framebuffer, cols: u16, rows: u16, image_id: u32) -> String {
-    kitty_with_framing(fb, cols, rows, false, true, image_id)
+    kitty_with_framing(fb, cols, rows, false, true, image_id, None)
 }
 
 /// Like [`kitty`], but repeats `q=2,i=<id>` on every continuation chunk.
@@ -224,7 +224,27 @@ pub fn kitty_compat_with_id(
     delete_first: bool,
     image_id: u32,
 ) -> String {
-    kitty_with_framing(fb, cols, rows, true, delete_first, image_id)
+    kitty_with_framing(fb, cols, rows, true, delete_first, image_id, None)
+}
+
+/// The flicker-free direct frame: place the new image as `image_id` first,
+/// then delete `retire_id` — the id the previous frame was placed under.
+///
+/// A frontend alternates two ids frame by frame, so at no point is the
+/// region blank: the terminal draws the new placement while the old one is
+/// still there, and the delete afterwards only removes what is now
+/// underneath. `kitty_compat`'s delete-*first* leaves a blank gap between
+/// the delete and the (asynchronous) decode of the next frame, which reads
+/// as flicker on every interactive repaint. Both placements are removed on
+/// exit by deleting both ids (see [`kitty_cleanup_with_id`]).
+pub fn kitty_compat_swap(
+    fb: &Framebuffer,
+    cols: u16,
+    rows: u16,
+    image_id: u32,
+    retire_id: u32,
+) -> String {
+    kitty_with_framing(fb, cols, rows, true, false, image_id, Some(retire_id))
 }
 
 fn kitty_with_framing(
@@ -234,6 +254,7 @@ fn kitty_with_framing(
     id_every_chunk: bool,
     delete_first: bool,
     image_id: u32,
+    delete_after: Option<u32>,
 ) -> String {
     let rgba = fb.rgba();
 
@@ -269,8 +290,12 @@ fn kitty_with_framing(
             // a=T transmit+display, f=32 RGBA, o=z zlib, s/v source px size,
             // c/r target cell span (scales the image to fill the region).
             // q=2 suppresses responses. The fixed image id (freshly deleted
-            // above) plus fixed placement id p=1 keep placements from ever
-            // accumulating, whichever mechanism the terminal honors.
+            // above) plus a fixed placement id keep placements from ever
+            // accumulating, whichever mechanism the terminal honors. The
+            // placement id is the image id: the spec scopes placement ids
+            // per image, but iTerm2 keys them globally (a new placement
+            // drops every existing one with the same p=), so two images
+            // placed as p=1 would erase each other.
             // z=-1 draws the image below text glyphs (but above colored
             // backgrounds, per the Kitty spec), so hosts can print labels
             // over the plot — the direct-tier stand-in for the placeholder
@@ -279,7 +304,7 @@ fn kitty_with_framing(
             // DOM renderer, not WebGL, which paints over it.)
             let _ = write!(
                 out,
-                "q=2,i={image_id},p=1,a=T,f=32,o=z,z=-1,s={w},v={h},c={cols},r={rows},"
+                "q=2,i={image_id},p={image_id},a=T,f=32,o=z,z=-1,s={w},v={h},c={cols},r={rows},"
             );
         } else if id_every_chunk {
             let _ = write!(out, "q=2,i={image_id},");
@@ -288,6 +313,11 @@ fn kitty_with_framing(
         let _ = write!(out, "m={more};");
         out.push_str(std::str::from_utf8(chunk).unwrap());
         out.push_str("\x1b\\");
+    }
+    // The previous frame's placement, now covered, goes last (see
+    // `kitty_compat_swap`).
+    if let Some(retire) = delete_after {
+        let _ = write!(out, "\x1b_Ga=d,d=i,i={retire},q=2\x1b\\");
     }
     // Restore cursor.
     out.push_str("\x1b[u");

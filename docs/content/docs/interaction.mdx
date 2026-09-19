@@ -115,6 +115,10 @@ plot.zoom_x_window(px_w, px_h, px, factor)    # scroll about the cursor x
 plot.shift_x_window(frac)                     # keyboard step, no pixels needed
 ```
 
+The same shape moves a 2D graph node under the pointer —
+`plot.drag_node(px_w, px_h, index, dx_px, dy_px)`, `index` from `pick_px`
+— returning its new position; see [Graphs and pipelines](/docs/charts-2d).
+
 Every mutator clamps to the data extent, keeps the window at least 2% of the
 full span, and returns `True` when the window changed. Appending data through
 `extend` never moves a set window. The rules — and their error messages —

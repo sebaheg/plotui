@@ -16,7 +16,8 @@ use crate::state::PlotState;
 use crate::{to_kind, PlotEvent};
 
 impl PlotState {
-    /// Feed a terminal event to the plot: drags rotate (shift-drags pan),
+    /// Feed a terminal event to the plot: drags rotate (shift-drags pan) in
+    /// 3D and pan in 2D, a drag that starts on a graph node moves the node,
     /// the scroll wheel zooms, clicks pick, hovering drives the crosshair or
     /// element highlight, and the arrow/`+`/`-`/`r` keys mirror the mouse.
     /// Returns an event when an interaction produced one for the host.
@@ -79,6 +80,17 @@ impl PlotState {
                             });
                         }
                     }
+                    // A press on a graph node's box grabs the node: the drag
+                    // moves it rather than the camera. Only the box counts —
+                    // the same hit test a click uses — so a press beside a
+                    // node still pans.
+                    if self.range_drag.is_none() && self.draggable && !self.plot.is_3d() {
+                        let (x, y) = self.rel(m);
+                        let (pw, ph, px, py, radius) = self.geometry(x, y);
+                        if let Some(i) = self.plot.pick(pw, ph, px, py, radius) {
+                            self.node_drag = Some((i, [f32::NAN, f32::NAN]));
+                        }
+                    }
                 }
                 None
             }
@@ -94,7 +106,16 @@ impl PlotState {
                 }
                 let dx_px = (dx * self.cell_px.0 as f64) as f32;
                 let shift = m.modifiers.contains(KeyModifiers::SHIFT);
-                if let Some(part) = self.range_drag {
+                if let Some((i, _)) = self.node_drag {
+                    // The grabbed node follows the pointer, in full-res
+                    // pixels; the core keeps the rest of the graph still.
+                    let (pw, ph, ..) = self.geometry(0, 0);
+                    let dy_px = (dy * self.cell_px.1 as f64) as f32;
+                    if let Some(at) = self.plot.drag_node(pw, ph, i, dx_px, dy_px) {
+                        self.node_drag = Some((i, at));
+                        self.invalidate();
+                    }
+                } else if let Some(part) = self.range_drag {
                     let (pw, ph, ..) = self.geometry(0, 0);
                     if self.plot.drag_x_window(pw, ph, part, dx_px) {
                         self.invalidate();
@@ -135,6 +156,14 @@ impl PlotState {
                     // The strip gesture ended: one event with the result.
                     self.invalidate();
                     return Some(PlotEvent::RangeChanged(self.plot.x_window));
+                }
+                // A grabbed node that moved is reported where it landed; one
+                // that did not is a click on it, which selects as usual.
+                if let Some((i, at)) = self.node_drag.take() {
+                    if !was_click && at[0].is_finite() {
+                        self.invalidate();
+                        return Some(PlotEvent::NodeMoved(i, at));
+                    }
                 }
                 if was_click {
                     self.click_at(m)

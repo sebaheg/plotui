@@ -30,7 +30,10 @@ fn kitty_frame_replaces_rather_than_stacks() {
         s.starts_with("\x1b[s\x1b_Ga=d,d=i,i=4242,q=2\x1b\\"),
         "previous placements are deleted before the new frame is placed"
     );
-    assert!(s.contains("p=1,a=T"), "fixed placement id, for terminals that replace by p=");
+    assert!(
+        s.contains("i=4242,p=4242,a=T"),
+        "fixed placement id (the image id), for terminals that replace by p="
+    );
     assert_eq!(s.matches("a=T").count(), 1, "exactly one placement per frame");
     assert_eq!(s.matches("a=d").count(), 1, "exactly one delete per frame");
 }
@@ -106,7 +109,7 @@ fn with_id_variants_thread_a_custom_image_id() {
     assert!(s.starts_with("\x1b[s\x1b_Ga=d,d=i,i=7,q=2\x1b\\"), "delete uses the same id");
 
     let s = kitty_compat_with_id(&frame(80, 40), 20, 10, true, 4243);
-    assert!(s.contains("a=d,d=i,i=4243") && s.contains("i=4243,p=1,a=T"));
+    assert!(s.contains("a=d,d=i,i=4243") && s.contains("i=4243,p=4243,a=T"));
 
     let p = kitty_placeholder_cells_with_id(&frame(80, 40), 20, 10, 0x00A1B2C3);
     assert!(p.transmit.contains("i=10597059,"), "id in decimal in the transmit escape");
@@ -154,6 +157,25 @@ fn kitty_compat_repeats_the_id_on_every_chunk() {
 }
 
 #[test]
+fn kitty_compat_swap_places_before_it_deletes() {
+    use plotui_protocol::kitty_compat_swap;
+    // Double-buffered direct frames: the new image lands under one id, and
+    // only then is the other id's placement deleted, so the region is never
+    // blank between frames — no delete-first, no gap.
+    let s = kitty_compat_swap(&frame(80, 40), 20, 10, 4242, 4243);
+    assert!(s.starts_with("\x1b[s\x1b_G"), "goes straight to the transmit APC");
+    assert!(s.contains("i=4242,p=4242,a=T"), "placed under the frame's own id");
+    assert_eq!(s.matches("a=T").count(), 1, "exactly one placement");
+    assert_eq!(s.matches("a=d").count(), 1, "exactly one delete");
+    assert!(s.contains("\x1b_Ga=d,d=i,i=4243,q=2\x1b\\"), "the retired id is deleted");
+    assert!(s.rfind("a=d").unwrap() > s.find("a=T").unwrap(), "delete follows placement");
+    assert!(s.ends_with("\x1b[u"), "cursor restored after the delete");
+    // The next frame swaps roles.
+    let n = kitty_compat_swap(&frame(80, 40), 20, 10, 4243, 4242);
+    assert!(n.contains("i=4243,p=4243,a=T") && n.contains("a=d,d=i,i=4242,q=2"));
+}
+
+#[test]
 fn kitty_compat_without_delete_skips_the_blanking_delete() {
     use plotui_protocol::kitty_compat;
     // delete_first=false: no a=d before the frame, so a replacing decoder
@@ -163,7 +185,7 @@ fn kitty_compat_without_delete_skips_the_blanking_delete() {
     assert!(!s.contains("a=d"), "no delete when the terminal replaces same-id images");
     assert!(s.starts_with("\x1b[s\x1b_G"), "goes straight to the transmit APC");
     assert_eq!(s.matches("a=T").count(), 1, "still exactly one placement");
-    assert!(s.contains("i=4242") && s.contains("p=1"));
+    assert!(s.contains("i=4242") && s.contains("p=4242"));
     // And with delete_first=true it still deletes (iTerm2 path).
     assert!(kitty_compat(&frame(80, 40), 20, 10, true).contains("a=d,d=i,i=4242"));
 }

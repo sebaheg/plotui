@@ -24,6 +24,11 @@ pub struct PlotOptions {
     /// 2D hover crosshair (a guide snapped to the nearest sample x, a marker
     /// per series, a value readout). 3D plots are unaffected.
     pub crosshair: bool,
+    /// Grab-and-move for the nodes of a 2D graph: a press on a box drags
+    /// that box, a press elsewhere pans. On by default because a press costs
+    /// one hit test, unlike hover; a host whose layout is the message (a
+    /// pipeline whose ranks mean something) turns it off.
+    pub draggable: bool,
     /// `None` detects the best path for this terminal, honoring
     /// `PLOTUI_RENDER`; set to force one.
     pub render_mode: Option<RenderMode>,
@@ -47,6 +52,7 @@ impl Default for PlotOptions {
             cell_px: None,
             pickable: false,
             crosshair: true,
+            draggable: true,
             render_mode: None,
             interactive_scale: 0.5,
             image_id: None,
@@ -75,6 +81,7 @@ pub struct PlotState {
     pub(crate) image_id: u32,
     pub(crate) pickable: bool,
     pub(crate) crosshair: bool,
+    pub(crate) draggable: bool,
     pub(crate) auto_rotate: bool,
     pub(crate) interactive_scale: f64,
     pub(crate) always_retransmit: bool,
@@ -93,6 +100,9 @@ pub struct PlotState {
     /// The strip part grabbed by the active drag, if the drag started on the
     /// range slider (then it never rotates/pans the camera).
     pub(crate) range_drag: Option<plotui_core::RangeHit>,
+    /// The 2D graph node grabbed by the active drag, with its last position
+    /// (then the drag moves the node, not the camera).
+    pub(crate) node_drag: Option<(usize, [f32; 2])>,
     pub(crate) hovered: Option<Element>,
     pub(crate) interacting_override: bool,
     pub(crate) needs_redraw: bool,
@@ -108,6 +118,7 @@ impl PlotState {
             image_id: opts.image_id.unwrap_or_else(next_image_id),
             pickable: opts.pickable,
             crosshair: opts.crosshair,
+            draggable: opts.draggable,
             auto_rotate: opts.auto_rotate,
             interactive_scale: opts.interactive_scale.clamp(0.05, 1.0),
             always_retransmit: opts.always_retransmit,
@@ -122,6 +133,7 @@ impl PlotState {
             moved: false,
             last_pos: (0, 0),
             range_drag: None,
+            node_drag: None,
             hovered: None,
             interacting_override: false,
             needs_redraw: true,

@@ -337,10 +337,11 @@ p.<span class="fn">add_line</span>(months, trend, color=(<span class="str">240, 
         </div>
         <div class="term-foot">
           <span class="act"><span class="key">hover</span>light what it waits on</span>
+          <span class="act"><span class="key">drag</span>move a box</span>
           <button class="btn code-toggle" type="button" aria-expanded="false">py</button>        </div>
         <pre class="ex-code" hidden><code><span class="kw">from</span> plotui <span class="kw">import</span> LayeredLayout, Plot, reachable
 
-layout = <span class="fn">LayeredLayout</span>(<span class="str">len</span>(tasks), edges)  <span class="cm"># ranks, orders, routes</span>
+layout = <span class="fn">LayeredLayout</span>(<span class="str">len</span>(tasks), edges, labels=tasks)  <span class="cm"># ranks, orders, routes</span>
 xs, ys = layout.<span class="fn">positions</span>()
 
 p = Plot()

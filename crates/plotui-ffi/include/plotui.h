@@ -887,6 +887,32 @@ bool plotui_pick_px(const struct PlotuiPlot *p,
                     size_t *out_index);
 
 /**
+ * Drag one node of a 2D graph by `(dx_px, dy_px)` framebuffer pixels in a
+ * `px_w × px_h` frame — the primitive behind "grab a box and move it".
+ * `flat` is the node's index in the flat space `plotui_pick_px` returns.
+ * Returns true and writes the node's new `(x, y)` to `out_xy` (two floats,
+ * or NULL to skip) when the node moved; false when `flat` is not a 2D
+ * graph node, the plot is 3D, or the handle is NULL (with the reason in
+ * `plotui_last_error`) — the `plotui_pick_px` shape, since a drag is a
+ * pick that moved.
+ *
+ * The rest of the graph stays where it is: the frame re-centres on the new
+ * extent and the camera pans back by exactly that shift, so only the box
+ * under the pointer moves.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `out_xy` must point at two floats or be
+ * NULL.
+ */
+bool plotui_drag_node(struct PlotuiPlot *p,
+                      size_t px_w,
+                      size_t px_h,
+                      size_t flat,
+                      float dx_px,
+                      float dy_px,
+                      float *out_xy);
+
+/**
  * # Safety
  * `p` must be a live plot handle.
  */
@@ -1225,8 +1251,17 @@ int32_t plotui_layout_add_node(struct PlotuiLayout *l,
  * Lay out `n_nodes` connected by `edges` (`2 * n_edges` u32s as (i, j)
  * pairs) flowing in `rankdir` (`"TB"` or `"LR"`, case-insensitive; NULL
  * means `"TB"`). Free with `plotui_layered_layout_free`. Returns NULL on a
- * malformed edge slice or an unknown `rankdir`, with the reason in
- * `plotui_last_error`.
+ * malformed edge slice, an unknown `rankdir` or a bad label, with the
+ * reason in `plotui_last_error`.
+ *
+ * `labels` is the array of `n_labels` NUL-terminated strings the nodes
+ * will be drawn with (the same ones handed to `plotui_add_graph2d`), or
+ * NULL for unlabelled boxes. Positions come back in layout units — one
+ * unit is one text column — and a box is sized from its label in those
+ * units, so a layout that knows the labels never puts two boxes on top of
+ * each other; a short list pads with unlabelled boxes. `node_sep` and
+ * `rank_sep` are the air between neighbouring boxes and between ranks, in
+ * the same units; a negative or NaN value takes the default (2 and 3).
  *
  * # Safety
  * Pointer arguments follow the crate conventions.
@@ -1234,7 +1269,11 @@ int32_t plotui_layout_add_node(struct PlotuiLayout *l,
 struct PlotuiLayeredLayout *plotui_layered_layout_new(size_t n_nodes,
                                                       const uint32_t *edges,
                                                       size_t n_edges,
-                                                      const char *rankdir);
+                                                      const char *rankdir,
+                                                      const char *const *labels,
+                                                      size_t n_labels,
+                                                      float node_sep,
+                                                      float rank_sep);
 
 /**
  * Free a layered layout. NULL is a no-op.

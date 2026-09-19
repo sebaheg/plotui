@@ -785,10 +785,48 @@ impl Plot {
         self.inner.set_graph_colors(handle, nc, ec).map_err(trace_to_py)
     }
 
+    /// Label the nodes of a 3D graph in place: one string per node (empty
+    /// for none), or `None` to clear. Labels are drawn *inside* the marks,
+    /// centred, at the frame's text scale, and only where the mark is big
+    /// enough to hold them — so a crowded graph shows them as the host
+    /// zooms in. `color` is one ink for all of them; omitted, each label
+    /// takes an ink that contrasts with its node's fill.
+    #[pyo3(signature = (handle, labels=None, color=None))]
+    fn set_graph_labels(
+        &mut self,
+        handle: usize,
+        labels: Option<Vec<String>>,
+        color: Option<ColorArg>,
+    ) -> PyResult<()> {
+        let ink = match color {
+            Some(c) => Some(resolve_color(&self.inner, Some(c))?),
+            None => None,
+        };
+        self.inner.set_graph_labels(handle, labels, ink).map_err(trace_to_py)
+    }
+
+    /// Outline the nodes of a 3D graph in place: one colour per node, or
+    /// `None` for no borders. The stroke is a fifth of each node's radius,
+    /// drawn outside the mark — a second categorical channel next to the
+    /// fill (a status ring around a score-coloured node).
+    #[pyo3(signature = (handle, colors=None))]
+    fn set_graph_borders(&mut self, handle: usize, colors: Option<Vec<ColorArg>>) -> PyResult<()> {
+        let borders = colors.map(rgb_list).transpose()?;
+        self.inner.set_graph_borders(handle, borders).map_err(trace_to_py)
+    }
+
+    /// The factor 3D mark radii are multiplied by in a frame `px_w` pixels
+    /// wide (1 up to 500 px, 3 from 1500 px): a host that wants a node
+    /// exactly `r` pixels across at the current size passes `r / mark_scale`.
+    #[staticmethod]
+    fn mark_scale(px_w: usize) -> f32 {
+        plotui_core::mark_scale(px_w)
+    }
+
     /// Style a 2D scatter point by point. Each list is independent and
     /// optional: `colors` for a categorical or colormapped cloud, `sizes` for
     /// a bubble chart, `shapes` ("disc", "ring", "square", "triangle",
-    /// "diamond", "diamond-open", "dot") for an encoding that survives a
+    /// "diamond", "diamond-open", "dot", "star") for an encoding that survives a
     /// palette change. Pass `None` to leave a channel uniform, or a list
     /// shorter than the series to style a prefix of it.
     #[pyo3(signature = (handle, colors=None, sizes=None, shapes=None))]
@@ -866,9 +904,160 @@ impl Plot {
     /// vertical guide with a marker per series sampled there, and a value
     /// readout box. Ignored by 3D plots. Returns True when the state
     /// changed, so the frontend knows whether a repaint is needed.
-    #[pyo3(signature = (px=None))]
-    fn set_hover2d(&mut self, px: Option<f32>) -> bool {
-        plotui_bind::set_hover2d(&mut self.inner, px)
+    ///
+    /// With `px_w` and `px_h` — the pixel size of the frame being rendered
+    /// — the answer is about the picture rather than the number: the
+    /// crosshair snaps to the nearest sample and is drawn from it, so a
+    /// move that snaps to the same sample as before returns False and
+    /// needs no repaint (see `hover2d_snap_px`).
+    #[pyo3(signature = (px=None, px_w=None, px_h=None))]
+    fn set_hover2d(&mut self, px: Option<f32>, px_w: Option<usize>, px_h: Option<usize>) -> bool {
+        match (px_w, px_h) {
+            (Some(w), Some(h)) => plotui_bind::set_hover2d_snapped(&mut self.inner, w, h, px),
+            _ => plotui_bind::set_hover2d(&mut self.inner, px),
+        }
+    }
+
+    /// The sample x (data units) the 2D crosshair snaps to for a cursor
+    /// `px` pixels from the left of a `px_w`×`px_h` frame, or None when no
+    /// guide would be drawn there (3D plots, off the plot rect, nothing to
+    /// snap to). Equal answers mean equal frames.
+    fn hover2d_snap_px(&self, px_w: usize, px_h: usize, px: f32) -> Option<f32> {
+        self.inner.hover2d_snap_px(px_w, px_h, px)
+    }
+
+    /// Whether named traces get the in-canvas legend box (default True).
+    /// Off, a host that draws its own legend can still name its traces so
+    /// the crosshair readout says which series is which.
+    #[getter]
+    fn get_legend_visible(&self) -> bool {
+        self.inner.legend_visible
+    }
+
+    #[setter]
+    fn set_legend_visible(&mut self, visible: bool) {
+        self.inner.legend_visible = visible;
+    }
+
+    /// Legend rows the host declares, in place of one row per named trace:
+    /// `(label, swatch, color, border, visible)` each, `swatch` one of
+    /// `square`, `line`, `disc`, `ring`, `star`, `border` a second colour
+    /// drawn as a ring around a disc or star (or None). An empty list goes
+    /// back to the trace rows. Rows a click lands on come back from
+    /// `legend_entry_hit`.
+    fn set_legend_entries(
+        &mut self,
+        entries: Vec<(String, String, ColorArg, Option<ColorArg>, bool)>,
+    ) -> PyResult<()> {
+        let mut out = Vec::with_capacity(entries.len());
+        for (label, swatch, color, border, visible) in entries {
+            let swatch = plotui_core::Swatch::parse(&swatch).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "swatch must be one of square, line, disc, ring, star, not {swatch:?}"
+                ))
+            })?;
+            out.push(plotui_core::LegendEntry {
+                label,
+                swatch,
+                color: color.rgb()?,
+                border: opt_rgb(border)?,
+                visible,
+            });
+        }
+        self.inner.legend_entries = out;
+        Ok(())
+    }
+
+    /// The host-declared legend rows, as `set_legend_entries` took them
+    /// (swatch spelled out, colours as tuples).
+    fn legend_entries(&self) -> Vec<(String, String, (u8, u8, u8), Option<(u8, u8, u8)>, bool)> {
+        self.inner
+            .legend_entries
+            .iter()
+            .map(|e| {
+                let swatch = match e.swatch {
+                    plotui_core::Swatch::Square => "square",
+                    plotui_core::Swatch::Line => "line",
+                    plotui_core::Swatch::Disc => "disc",
+                    plotui_core::Swatch::Ring => "ring",
+                    plotui_core::Swatch::Star => "star",
+                };
+                let t = |c: [u8; 3]| (c[0], c[1], c[2]);
+                (e.label.clone(), swatch.to_string(), t(e.color), e.border.map(t), e.visible)
+            })
+            .collect()
+    }
+
+    /// Which corner the legend box sits in: `"top-right"` (default) or `"top-left"`.
+    fn set_legend_corner(&mut self, corner: &str) -> PyResult<()> {
+        self.inner.legend_corner = match corner {
+            "top-right" => plotui_core::LegendCorner::TopRight,
+            "top-left" => plotui_core::LegendCorner::TopLeft,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "corner must be top-right or top-left, not {other:?}"
+                )))
+            }
+        };
+        Ok(())
+    }
+
+    /// The host-declared legend row under pixel `(px, py)` of a `px_w`×`px_h`
+    /// frame, as its index into `legend_entries`, or None off the legend
+    /// (or when the legend shows trace rows).
+    fn legend_entry_hit(&self, px_w: usize, px_h: usize, px: f32, py: f32) -> Option<usize> {
+        self.inner.legend_entry_hit(px_w, px_h, px, py)
+    }
+
+    /// The legend row under pixel `(px, py)` — whichever rows the legend
+    /// shows — as its index, or None off the legend.
+    fn legend_row_at(&self, px_w: usize, px_h: usize, px: f32, py: f32) -> Option<usize> {
+        self.inner.legend_row_at(px_w, px_h, px, py)
+    }
+
+    /// Light the legend row under `(px, py)` (None clears), so the reader
+    /// sees which row a click would toggle. True when the picture changed.
+    /// The Textual widget calls this on every mouse move.
+    #[pyo3(signature = (px_w, px_h, px=None, py=None))]
+    fn set_legend_hover(
+        &mut self,
+        px_w: usize,
+        px_h: usize,
+        px: Option<f32>,
+        py: Option<f32>,
+    ) -> bool {
+        self.inner.set_legend_hover(px_w, px_h, px, py)
+    }
+
+    /// The lit legend row, if any (see `set_legend_hover`).
+    fn legend_hover(&self) -> Option<usize> {
+        self.inner.legend_hover
+    }
+
+    /// Light legend row `index` directly (None clears) — for a host that
+    /// rebuilds its plot and wants the lit row to survive. True on change.
+    #[pyo3(signature = (index=None))]
+    fn set_legend_hover_index(&mut self, index: Option<usize>) -> bool {
+        let changed = self.inner.legend_hover != index;
+        self.inner.legend_hover = index;
+        changed
+    }
+
+    /// Boxes the crosshair readout keeps off, as frame fractions
+    /// `(x0, y0, x1, y1)` in 0..1: text the host draws over the plot in its
+    /// own layer, which the renderer cannot see. The Textual widget sets
+    /// this from its overlay spans; the legend's own box is always avoided.
+    /// Returns True when the set changed.
+    fn set_keep_out(&mut self, rects: Vec<(f32, f32, f32, f32)>) -> bool {
+        let rects: Vec<[f32; 4]> = rects.into_iter().map(|(a, b, c, d)| [a, b, c, d]).collect();
+        let changed = self.inner.keep_out != rects;
+        self.inner.keep_out = rects;
+        changed
+    }
+
+    /// The readout keep-out boxes (see `set_keep_out`).
+    fn keep_out(&self) -> Vec<(f32, f32, f32, f32)> {
+        self.inner.keep_out.iter().map(|k| (k[0], k[1], k[2], k[3])).collect()
     }
 
     /// Set the explicit 2D x view `(lo, hi)` in data coordinates, or `None`
@@ -1274,7 +1463,14 @@ impl Plot {
     /// addon-image), where the delete otherwise blanks the image between the
     /// async redraws and flickers during interaction. Leave it `False` for
     /// iTerm2, which stacks placements without the delete.
-    #[pyo3(signature = (cols, rows, cell_w, cell_h, compat_chunks=false, scale=1.0, replace=false))]
+    /// `image_id` + `retire_id` (compat only) double-buffer instead: the
+    /// frame is placed under `image_id` and only then is `retire_id`'s
+    /// placement deleted, so the region is never blank between frames.
+    /// Alternate the two ids frame by frame and delete both on exit
+    /// (`kitty_cleanup_with_id`). This is the flicker-free direct path;
+    /// `replace` is the older single-id variant for decoders that swap a
+    /// same-id image atomically.
+    #[pyo3(signature = (cols, rows, cell_w, cell_h, compat_chunks=false, scale=1.0, replace=false, image_id=None, retire_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn render_kitty(
         &self,
@@ -1286,14 +1482,24 @@ impl Plot {
         compat_chunks: bool,
         scale: f64,
         replace: bool,
+        image_id: Option<u32>,
+        retire_id: Option<u32>,
     ) -> String {
         py.allow_threads(|| {
             let (pw, ph, pan_scale) = scaled_dims(cols, rows, cell_w, cell_h, scale);
             let fb = self.inner.render_at(pw, ph, pan_scale);
-            if compat_chunks {
-                plotui_protocol::kitty_compat(&fb, cols, rows, !replace)
-            } else {
-                plotui_protocol::kitty(&fb, cols, rows)
+            match (compat_chunks, image_id, retire_id) {
+                (true, Some(id), Some(retire)) => {
+                    plotui_protocol::kitty_compat_swap(&fb, cols, rows, id, retire)
+                }
+                (true, id, _) => plotui_protocol::kitty_compat_with_id(
+                    &fb,
+                    cols,
+                    rows,
+                    !replace,
+                    id.unwrap_or(plotui_protocol::DEFAULT_IMAGE_ID),
+                ),
+                (false, _, _) => plotui_protocol::kitty(&fb, cols, rows),
             }
         })
     }
@@ -1336,7 +1542,10 @@ impl Plot {
     /// splice text (label overlays) into a row without breaking the cells after
     /// the gap. Returns `(transmit_escape, (id_r, id_g, id_b), cells)` where
     /// `cells[y][x]` is the placeholder string for that cell. GIL released.
-    #[pyo3(signature = (cols, rows, cell_w, cell_h, scale=1.0))]
+    /// `image_id` names the Kitty image the cells refer to (the default
+    /// id when None) — two widgets on one screen need two ids, or the
+    /// terminal shows one picture in both.
+    #[pyo3(signature = (cols, rows, cell_w, cell_h, scale=1.0, image_id=None))]
     fn render_kitty_placeholder_cells(
         &self,
         py: Python<'_>,
@@ -1345,11 +1554,17 @@ impl Plot {
         cell_w: u16,
         cell_h: u16,
         scale: f64,
+        image_id: Option<u32>,
     ) -> (String, (u8, u8, u8), Vec<Vec<String>>) {
         py.allow_threads(|| {
             let (pw, ph, pan_scale) = scaled_dims(cols, rows, cell_w, cell_h, scale);
             let fb = self.inner.render_at(pw, ph, pan_scale);
-            let p = plotui_protocol::kitty_placeholder_cells(&fb, cols, rows);
+            let p = plotui_protocol::kitty_placeholder_cells_with_id(
+                &fb,
+                cols,
+                rows,
+                image_id.unwrap_or(plotui_protocol::DEFAULT_IMAGE_ID),
+            );
             (p.transmit, p.id_rgb, p.cells)
         })
     }
@@ -1359,6 +1574,23 @@ impl Plot {
     /// geometry its active render mode uses.
     fn pick_px(&self, px_w: usize, px_h: usize, px: f32, py: f32, radius: f32) -> Option<usize> {
         self.inner.pick(px_w, px_h, px, py, radius)
+    }
+
+    /// Drag node `flat` of a 2D graph by `(dx_px, dy_px)` framebuffer pixels
+    /// in a `px_w`×`px_h` frame — the primitive behind "grab a box and move
+    /// it". Returns the node's new `(x, y)` in layout units, or `None` for a
+    /// 3D plot or an index that is not a 2D graph node. The rest of the
+    /// graph stays where it is on screen: the frame's re-centring on the new
+    /// extent is cancelled by an equal camera pan.
+    fn drag_node(
+        &mut self,
+        px_w: usize,
+        px_h: usize,
+        flat: usize,
+        dx_px: f32,
+        dy_px: f32,
+    ) -> Option<(f32, f32)> {
+        self.inner.drag_node(px_w, px_h, flat, dx_px, dy_px).map(|p| (p[0], p[1]))
     }
 
     /// True when any trace is 3D (the orbit-camera path). Lets a frontend
@@ -1385,6 +1617,17 @@ impl Plot {
     fn kitty_cleanup() -> String {
         plotui_protocol::kitty_cleanup()
     }
+
+    /// `kitty_cleanup` for a caller-chosen image id — the second buffer of a
+    /// double-buffered direct frame, say.
+    #[staticmethod]
+    fn kitty_cleanup_with_id(image_id: u32) -> String {
+        plotui_protocol::kitty_cleanup_with_id(image_id)
+    }
+
+    /// The image id plotui places under by default (4242).
+    #[classattr]
+    const DEFAULT_IMAGE_ID: u32 = plotui_protocol::DEFAULT_IMAGE_ID;
 }
 
 /// Zip three coordinate sequences into points, truncated to the shortest
@@ -1486,6 +1729,12 @@ impl ForceLayout {
 /// edges run as straight as they can. Solved in the constructor — there is
 /// nothing to step, because a pipeline has one right shape.
 ///
+/// Positions are in layout units: one unit is one text column of the label
+/// font, the scale a graph frame draws at. Pass the labels you will draw
+/// (`labels=`) so every box is sized the way the renderer sizes it and no
+/// two boxes ever overlap. Long edges that share an endpoint are bundled
+/// into one trunk rather than drawn side by side.
+///
 /// Feed `positions()` and `routes()` straight to `Plot.add_graph2d`.
 /// Deterministic: same input, same output, no randomness anywhere.
 #[pyclass]
@@ -1497,14 +1746,39 @@ struct LayeredLayout {
 impl LayeredLayout {
     /// Lay out `n_nodes` connected by `edges` as (from, to) index pairs,
     /// flowing in `rankdir` — "TB" (sources on top, the default) or "LR"
-    /// (sources on the left). Self-loops and out-of-range endpoints are kept
-    /// inert, so an edge list can be passed verbatim from the plot; cycles
-    /// do not hang, since a back edge is reversed for the layout only.
+    /// (sources on the left). `labels` are the node labels the boxes will
+    /// carry (a short list pads with unlabelled boxes; without it every box
+    /// is the unlabelled size). `node_sep` is the air between neighbours in
+    /// a rank and `rank_sep` the air between ranks, both in layout units
+    /// (characters). Self-loops and out-of-range endpoints are kept inert,
+    /// so an edge list can be passed verbatim from the plot; cycles do not
+    /// hang, since a back edge is reversed for the layout only.
     #[new]
-    #[pyo3(signature = (n_nodes, edges, rankdir="TB"))]
-    fn new(n_nodes: usize, edges: Vec<(u32, u32)>, rankdir: &str) -> PyResult<Self> {
+    #[pyo3(signature = (n_nodes, edges, rankdir="TB", labels=None, node_sep=2.0, rank_sep=3.0))]
+    fn new(
+        n_nodes: usize,
+        edges: Vec<(u32, u32)>,
+        rankdir: &str,
+        labels: Option<Vec<String>>,
+        node_sep: f32,
+        rank_sep: f32,
+    ) -> PyResult<Self> {
         let dir = plotui_bind::parse_rankdir(rankdir).map_err(to_py)?;
-        Ok(LayeredLayout { inner: plotui_core::LayeredLayout::new(n_nodes, &edges, dir) })
+        for (name, v) in [("node_sep", node_sep), ("rank_sep", rank_sep)] {
+            if !v.is_finite() || v < 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must be a finite, non-negative number; got {v}"
+                )));
+            }
+        }
+        let spacing = plotui_core::LayoutSpacing { node_sep, rank_sep };
+        let inner = match labels {
+            Some(labels) => {
+                plotui_core::LayeredLayout::with_labels(n_nodes, &edges, dir, &labels, spacing)
+            }
+            None => plotui_core::LayeredLayout::with_sizes(n_nodes, &edges, dir, &[], spacing),
+        };
+        Ok(LayeredLayout { inner })
     }
 
     /// Node centres as (xs, ys) lists, in the caller's index order.

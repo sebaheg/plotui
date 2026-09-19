@@ -5,7 +5,8 @@
 //! hold on any platform regardless of libm rounding in the camera trig.
 
 use plotui_core::{
-    draw_text, nice_ticks, Element, Framebuffer, NodeShape, Plot, TraceError, YAxis, PALETTE,
+    draw_text, nice_ticks, Element, Framebuffer, NodeShape, Plot, TraceError, YAxis, CHAR_W,
+    PALETTE,
 };
 
 /// FNV-1a over the RGBA buffer — stable fingerprint for same-process compares.
@@ -1496,11 +1497,14 @@ const CARD: [u8; 3] = [34, 38, 52];
 
 /// A two-node pipeline with contrasting colours on the nodes and the wire, at
 /// a size whose text scale is 1 — the bitmap font writes its ink unblended,
-/// which is what lets a probe compare against an exact colour.
+/// which is what lets a probe compare against an exact colour. The nodes
+/// sit eight layout units (text columns) apart, the way a layout would
+/// place two ranks: a graph frame draws at that scale rather than
+/// stretching the pair to the frame's height.
 fn demo_graph2d() -> Plot {
     let mut p = Plot::new();
     p.add_graph2d(
-        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec![[0.0, 8.0], [0.0, 0.0]],
         vec!["alpha".into(), "beta".into()],
         vec![[250, 10, 10], [10, 250, 10]],
         vec![(0, 1)],
@@ -1586,7 +1590,7 @@ fn graph2d_node_shapes_and_routes_change_the_drawing() {
 
     let mut shaped = Plot::new();
     shaped.add_graph2d(
-        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec![[0.0, 8.0], [0.0, 0.0]],
         vec!["alpha".into(), "beta".into()],
         vec![[250, 10, 10], [10, 250, 10]],
         vec![(0, 1)],
@@ -1602,14 +1606,14 @@ fn graph2d_node_shapes_and_routes_change_the_drawing() {
     let mut routed = demo_graph2d();
     let mut with_route = Plot::new();
     with_route.add_graph2d(
-        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec![[0.0, 8.0], [0.0, 0.0]],
         vec!["alpha".into(), "beta".into()],
         vec![[250, 10, 10], [10, 250, 10]],
         vec![(0, 1)],
         true,
         None,
         Some(vec![[10, 10, 250]]),
-        Some((vec![[0.6, 0.5]], vec![0])),
+        Some((vec![[5.0, 4.0]], vec![0])),
         None,
     );
     assert_ne!(
@@ -1623,6 +1627,64 @@ fn graph2d_node_shapes_and_routes_change_the_drawing() {
         base,
         "pinning show_axes off matches what the automatic rule already did"
     );
+}
+
+/// A graph frame draws at the label font's scale: one layout unit is
+/// `CHAR_W` pixels at the frame's text scale, centred, rather than the
+/// layout being stretched to fill the frame.
+#[test]
+fn graph_frames_draw_at_text_scale_and_shrink_only_to_fit() {
+    let p = demo_graph2d();
+    // 300 × 220 is text scale 1: the eight-unit gap is 48 pixels.
+    let n = p.project_nodes(300, 220);
+    assert!(((n[1][1] - n[0][1]) - 8.0 * CHAR_W as f32).abs() < 0.51, "{n:?}");
+    assert!((n[0][0] - 150.0).abs() < 8.0, "the graph is centred: {n:?}");
+    // Twice the frame is text scale 2, and the gap doubles with the text.
+    let n = p.project_nodes(600, 480);
+    assert!(((n[1][1] - n[0][1]) - 16.0 * CHAR_W as f32).abs() < 0.51, "{n:?}");
+    // Too small a frame for scale 1 shrinks the gap, but never so far that
+    // the boxes overlap: the frame overflows instead.
+    let n = p.project_nodes(300, 30);
+    let gap = n[1][1] - n[0][1];
+    assert!(gap < 8.0 * CHAR_W as f32, "must shrink to fit: {n:?}");
+    assert!(gap >= 13.0 - 0.51, "boxes must not overlap: {n:?}");
+    // Unit spacing from a layout that was not told its labels: the boxes
+    // would overlap at text scale, so the frame spreads them until they clear.
+    let mut q = Plot::new();
+    q.add_graph2d(
+        vec![[0.0, 1.0], [0.0, 0.0]],
+        vec!["alpha".into(), "beta".into()],
+        vec![[250, 10, 10], [10, 250, 10]],
+        vec![(0, 1)],
+        true,
+        None,
+        None,
+        None,
+        None,
+    );
+    let n = q.project_nodes(300, 220);
+    assert!(n[1][1] - n[0][1] >= 13.0 - 0.51, "boxes overlap: {n:?}");
+}
+
+#[test]
+fn drag_node_moves_one_box_and_keeps_the_rest_still() {
+    let (w, h) = (300usize, 220usize);
+    let mut p = demo_graph2d();
+    let before = p.project_nodes(w, h);
+    let moved = p.drag_node(w, h, 0, 20.0, 10.0).expect("node 0 is a 2D graph node");
+    let after = p.project_nodes(w, h);
+    assert!((after[0][0] - before[0][0] - 20.0).abs() < 0.51, "{before:?} -> {after:?}");
+    assert!((after[0][1] - before[0][1] - 10.0).abs() < 0.51, "{before:?} -> {after:?}");
+    // The other box has not budged, even though the graph's extent — and
+    // with it the frame's centre — changed.
+    assert!((after[1][0] - before[1][0]).abs() < 0.51, "{before:?} -> {after:?}");
+    assert!((after[1][1] - before[1][1]).abs() < 0.51, "{before:?} -> {after:?}");
+    // The returned position is where the node now is, in layout units.
+    assert!((moved[0] - 20.0 / CHAR_W as f32).abs() < 0.05 && moved[1] > 0.0, "{moved:?}");
+    assert_eq!(p.drag_node(w, h, 7, 1.0, 1.0), None, "not a node");
+    let mut three_d = Plot::new();
+    three_d.add_scatter3d(vec![[0.0, 0.0, 0.0]], [200, 200, 200], 1.0, None);
+    assert_eq!(three_d.drag_node(w, h, 0, 1.0, 1.0), None, "3D nodes do not drag");
 }
 
 #[test]
@@ -1702,7 +1764,7 @@ fn graph2d_is_structural_and_extend_graph_grows_it() {
     let one_shot = {
         let mut q = Plot::new();
         q.add_graph2d(
-            vec![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+            vec![[0.0, 8.0], [0.0, 0.0], [12.0, 0.0]],
             vec!["alpha".into(), "beta".into(), "gamma".into()],
             vec![[250, 10, 10], [10, 250, 10], [80, 80, 80]],
             vec![(0, 1), (1, 2)],
@@ -1714,7 +1776,7 @@ fn graph2d_is_structural_and_extend_graph_grows_it() {
         );
         q
     };
-    p.extend_graph(h, &[[1.0, 0.0, 0.0]], &[[80, 80, 80]], &[(1, 2)], Some(&["gamma".into()]))
+    p.extend_graph(h, &[[12.0, 0.0, 0.0]], &[[80, 80, 80]], &[(1, 2)], Some(&["gamma".into()]))
         .unwrap();
     // The appended edge inherits the trace's default colour rule, so the
     // one-shot build names it explicitly to match.
@@ -1827,5 +1889,124 @@ fn a_named_graph_keeps_its_nodes_clear_of_the_legend() {
     assert!(
         box_right < legend_left,
         "a node box reaches under the legend: box to {box_right}, legend from {legend_left}"
+    );
+}
+
+/// Host-declared legend rows: drawn in the chosen corner with their own
+/// swatches — here a disc with a border, so both colours show — and hit-
+/// tested by row index, while the trace hit test stands down.
+#[test]
+fn host_legend_entries_draw_with_borders_top_left_and_hit_by_index() {
+    use plotui_core::{LegendCorner, LegendEntry, Swatch};
+
+    let mut plot = Plot::new();
+    plot.add_graph3d(
+        vec![[0.0, 0.0, 0.0], [1.0, 0.0, 1.0]],
+        vec![[40, 40, 40], [40, 40, 40]],
+        vec![(0, 1)],
+        1.0,
+        None,
+        None,
+        None,
+        Some("candidates".into()),
+    );
+    plot.legend_entries = vec![
+        LegendEntry {
+            label: "1 expanded".into(),
+            swatch: Swatch::Disc,
+            color: [33, 145, 140],
+            border: Some([250, 250, 250]),
+            visible: true,
+        },
+        LegendEntry {
+            label: "2 scored".into(),
+            swatch: Swatch::Disc,
+            color: [33, 145, 140],
+            border: None,
+            visible: true,
+        },
+        LegendEntry {
+            label: "3 lineage".into(),
+            swatch: Swatch::Line,
+            color: [200, 200, 210],
+            border: None,
+            visible: false,
+        },
+    ];
+    plot.legend_corner = LegendCorner::TopLeft;
+    let (w, h) = (400usize, 300usize);
+    let fb = plot.render(w, h);
+    let rgba = fb.rgba();
+    let in_quadrant = |c: [u8; 3], left: bool| -> bool {
+        (0..h / 2).any(|y| {
+            let xs = if left { 0..w / 2 } else { w / 2..w };
+            xs.clone().any(|x| {
+                let i = (y * w + x) * 4;
+                rgba[i] == c[0] && rgba[i + 1] == c[1] && rgba[i + 2] == c[2]
+            })
+        })
+    };
+    assert!(in_quadrant([33, 145, 140], true), "the disc's fill is drawn in the top-left legend");
+    assert!(in_quadrant([250, 250, 250], true), "and its border ring, in its own colour");
+    assert!(!in_quadrant([33, 145, 140], false), "nothing of the legend on the right");
+    assert!(!has_color(&fb, [200, 200, 210]), "a hidden row's colour is drained");
+
+    // rows are hit by index, the trace hit test stands down
+    let (x, y) = ((10 + 30) as f32, 12.0);
+    assert!(plot.legend_hit(w, h, x, y).is_none());
+    assert_eq!(plot.legend_entry_hit(w, h, x, y), Some(0));
+    assert!(plot.legend_entry_hit(w, h, w as f32 - 5.0, h as f32 - 5.0).is_none());
+    plot.legend_corner = LegendCorner::TopRight;
+    assert!(plot.legend_entry_hit(w, h, x, y).is_none(), "moved to the right, the left is empty");
+    assert!(Swatch::parse("disc") == Some(Swatch::Disc) && Swatch::parse("blob").is_none());
+}
+
+/// The legend row under the pointer is lit: a band appears behind it and
+/// goes when the pointer leaves; setting the same row twice is no change.
+#[test]
+fn legend_hover_lights_the_row_under_the_pointer() {
+    let mut plot = Plot::new();
+    plot.add_line2d(
+        vec![0.0, 1.0],
+        vec![0.0, 1.0],
+        [200, 40, 40],
+        1.0,
+        Some("a".into()),
+        plotui_core::YAxis::Primary,
+    );
+    plot.add_line2d(
+        vec![0.0, 1.0],
+        vec![1.0, 0.0],
+        [40, 40, 200],
+        1.0,
+        Some("b".into()),
+        plotui_core::YAxis::Primary,
+    );
+    let (w, h) = (400usize, 300usize);
+    let quiet = plot.render(w, h);
+    // find the legend: hit-test a grid of pixels for row 0
+    let mut hit = None;
+    for y in 0..h / 2 {
+        for x in w / 2..w {
+            if plot.legend_row_at(w, h, x as f32, y as f32) == Some(0) {
+                hit = Some((x as f32, y as f32));
+                break;
+            }
+        }
+        if hit.is_some() {
+            break;
+        }
+    }
+    let (px, py) = hit.expect("a legend row to hover");
+    assert!(plot.set_legend_hover(w, h, Some(px), Some(py)));
+    assert_eq!(plot.legend_hover, Some(0));
+    assert!(!plot.set_legend_hover(w, h, Some(px), Some(py)), "same row: nothing to repaint");
+    let lit = plot.render(w, h);
+    assert_ne!(quiet.rgba(), lit.rgba(), "the lit row changes the picture");
+    assert!(plot.set_legend_hover(w, h, None, None));
+    assert_eq!(plot.render(w, h).rgba(), quiet.rgba(), "cleared, the picture is back");
+    assert!(
+        !plot.set_legend_hover(w, h, Some(1.0), Some(h as f32 - 1.0)),
+        "off the box: still None"
     );
 }

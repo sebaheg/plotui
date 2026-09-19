@@ -96,16 +96,29 @@ export class LayeredLayout {
      * default) or "LR" (sources on the left). Self-loops and out-of-range
      * endpoints are inert, and cycles do not hang: a back edge is reversed
      * for the layout only.
+     *
+     * Positions are in layout units: one unit is one text column of the
+     * label font, the scale a graph frame draws at. Pass the `labels` the
+     * boxes will be drawn with so each box's width is part of the layout
+     * and neighbours in a rank never overlap; `node_sep` is the air
+     * between boxes in a rank and `rank_sep` between ranks, in the same
+     * units (2 and 3 by default). Long edges that share an endpoint are
+     * bundled into one trunk rather than drawn side by side.
      * @param {number} n_nodes
      * @param {Uint32Array} edges
      * @param {string | null} [rankdir]
+     * @param {string[] | null} [labels]
+     * @param {number | null} [node_sep]
+     * @param {number | null} [rank_sep]
      */
-    constructor(n_nodes, edges, rankdir) {
+    constructor(n_nodes, edges, rankdir, labels, node_sep, rank_sep) {
         const ptr0 = passArray32ToWasm0(edges, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         var ptr1 = isLikeNone(rankdir) ? 0 : passStringToWasm0(rankdir, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len1 = WASM_VECTOR_LEN;
-        const ret = wasm.layeredlayout_new(n_nodes, ptr0, len0, ptr1, len1);
+        var ptr2 = isLikeNone(labels) ? 0 : passArrayJsValueToWasm0(labels, wasm.__wbindgen_malloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.layeredlayout_new(n_nodes, ptr0, len0, ptr1, len1, ptr2, len2, isLikeNone(node_sep) ? Number.MAX_SAFE_INTEGER : Math.fround(node_sep), isLikeNone(rank_sep) ? Number.MAX_SAFE_INTEGER : Math.fround(rank_sep));
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -423,10 +436,12 @@ export class Plot {
      * `route_starts` one index per edge into them (the CSR pair
      * `LayeredLayout.routes()` returns).
      *
-     * Node *centres* are in data coordinates but their boxes are sized in
-     * pixels from the label, so zooming spreads the graph apart while the
-     * text stays legible. A plot whose visible 2D traces are all graphs
-     * draws no axes; see `set_show_axes`.
+     * Node *centres* are in layout units — one unit is one text column of
+     * the label font — and their boxes are sized in pixels from the label,
+     * so a graph draws at its own scale and zooming spreads it apart while
+     * the text stays legible. A plot whose visible 2D traces are all graphs
+     * draws no axes (see `set_show_axes`), pans on a plain drag, and lets
+     * a box be moved with `drag_node`.
      * @param {Float32Array} xs
      * @param {Float32Array} ys
      * @param {Uint32Array} edges
@@ -819,6 +834,29 @@ export class Plot {
         return ret !== 0;
     }
     /**
+     * Drag one node of a 2D graph by `(dx_px, dy_px)` framebuffer pixels,
+     * the frame being `w × h` — the primitive behind "grab a box and move
+     * it". `flat` is the index `pick` returns. Returns the node's new
+     * `[x, y]`, or `undefined` for a 3D plot or an index that is not a 2D
+     * graph node. The rest of the graph stays where it is on screen, and
+     * a routed edge bends to follow the box.
+     * @param {number} w
+     * @param {number} h
+     * @param {number} flat
+     * @param {number} dx_px
+     * @param {number} dy_px
+     * @returns {Float32Array | undefined}
+     */
+    drag_node(w, h, flat, dx_px, dy_px) {
+        const ret = wasm.plot_drag_node(this.__wbg_ptr, w, h, flat, dx_px, dy_px);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        }
+        return v1;
+    }
+    /**
      * Drag the grabbed strip `part` (a `range_slider_hit` string) by
      * `dx_px` framebuffer pixels; returns whether a repaint is needed.
      * @param {number} w
@@ -990,8 +1028,9 @@ export class Plot {
         return ret !== 0;
     }
     /**
-     * The 3D node under `(px, py)` framebuffer pixels, within `radius`.
-     * Picks always use full-resolution geometry regardless of `render_at`.
+     * The node under `(px, py)` framebuffer pixels, within `radius` — a 3D
+     * node by distance, a 2D graph node by its box. Picks always use
+     * full-resolution geometry regardless of `render_at`.
      * @param {number} w
      * @param {number} h
      * @param {number} px

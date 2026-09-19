@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use plotui_core::{
-    reachable, Direction, LayeredLayout, NodeShape, Plot, RankDir, Rgb, TraceId, COLORWAY_PLOTUI,
+    reachable, Direction, LayeredLayout, LayoutSpacing, NodeShape, Plot, RankDir, Rgb, TraceId,
+    COLORWAY_PLOTUI,
 };
 use plotui_ratatui::{ElementKind, OverlaySpan, PlotEvent, PlotState};
 use ratatui::style::{Color, Style};
@@ -167,7 +168,15 @@ fn topological() -> Vec<usize> {
 
 /// The scene: the laid-out graph plus the run driving its colours.
 fn build() -> (Plot, TraceId, Run) {
-    let layout = LayeredLayout::new(TASKS.len(), &EDGES, RankDir::TB);
+    // Laid out with the labels it is drawn with, so each box's width is
+    // part of the layout and no two ever touch.
+    let layout = LayeredLayout::with_labels(
+        TASKS.len(),
+        &EDGES,
+        RankDir::TB,
+        &TASKS,
+        LayoutSpacing::default(),
+    );
     let (pts, starts) = layout.routes();
     let run = Run::new();
     let mut plot = Plot::new();
