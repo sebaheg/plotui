@@ -3,6 +3,16 @@
 Notable changes per release. Versions before 0.5.0 predate this file; their
 history is in the git log and the GitHub releases.
 
+## 0.5.1 — 2026-09-28
+
+### Added
+
+**Windows wheels.** `pip install plotui` on Windows (x86_64) gets a prebuilt
+wheel instead of a source build that needs a Rust toolchain. The wheel bundles
+the CLI as `plotui/_bin/plotui.exe`, and the `plotui` console script runs it as
+a child process, since Windows has no `exec`. CI builds and tests the wheel on
+windows-latest.
+
 ## 0.5.0 — 2026-09-03
 
 The first release with the 2D chart set, DAG rendering, and live feeds. Every

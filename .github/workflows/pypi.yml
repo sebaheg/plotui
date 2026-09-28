@@ -24,6 +24,7 @@ jobs:
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
           - { target: aarch64-apple-darwin, runner: macos-14 }
           - { target: x86_64-apple-darwin, runner: macos-15-intel }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
       # The Linux wheels compile inside maturin-action's manylinux container,
@@ -36,6 +37,13 @@ jobs:
           cargo build --release -p plotui --target ${{ matrix.target }}
           mkdir -p python/plotui/_bin
           cp target/${{ matrix.target }}/release/plotui python/plotui/_bin/plotui
+      - name: Bundle the CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release -p plotui --target ${{ matrix.target }}
+          mkdir -p python/plotui/_bin
+          cp target/${{ matrix.target }}/release/plotui.exe python/plotui/_bin/plotui.exe
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -46,8 +54,9 @@ jobs:
             mkdir -p python/plotui/_bin
             cp target/${{ matrix.target }}/release/plotui python/plotui/_bin/plotui
       - name: Check the CLI is inside the wheel
+        shell: bash
         run: |
-          unzip -l dist/*.whl | grep "plotui/_bin/plotui"
+          python3 -m zipfile -l dist/*.whl | grep "plotui/_bin/plotui"
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.target }}

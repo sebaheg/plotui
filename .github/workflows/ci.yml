@@ -63,8 +63,15 @@ jobs:
         working-directory: go
 
   python:
-    name: Python wheel + pytest
-    runs-on: ubuntu-latest
+    name: Python wheel + pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -77,6 +84,7 @@ jobs:
       - run: pip install dist/*.whl
       - run: pytest tests -v
       - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
         with:
           name: wheel-linux-x86_64
           path: dist/*.whl
