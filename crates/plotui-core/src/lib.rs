@@ -456,6 +456,12 @@ const COLOR_INK_BRIGHT: Rgb = [205, 210, 220];
 pub struct Chrome {
     /// Legend box fill.
     pub bg: Rgb,
+    /// Opaque canvas fill behind everything, or `None` (the default) for a
+    /// transparent canvas that floats over the terminal's own background.
+    /// A host that paints its own surface around the plot sets this to the
+    /// same colour, so the two cannot drift apart across terminals that
+    /// composite images over the window rather than over the cells.
+    pub canvas: Option<Rgb>,
     /// Frame, tick marks, legend border.
     pub frame: Rgb,
     /// Grid lines.
@@ -470,6 +476,7 @@ impl Default for Chrome {
     fn default() -> Self {
         Self {
             bg: COLOR_BG,
+            canvas: None,
             frame: COLOR_FRAME,
             grid: COLOR_GRID,
             ink: COLOR_INK,
@@ -808,8 +815,16 @@ impl Framebuffer {
         }
     }
 
+    /// Paint every pixel `c` at infinite depth: an opaque canvas that anything
+    /// drawn afterwards lands on (and antialiased edges blend into).
+    pub fn fill_canvas(&mut self, c: Rgb) {
+        self.color.fill(c);
+        self.drawn.fill(true);
+    }
+
     /// Flatten to RGBA8. Background pixels are transparent so the plot floats
-    /// over the terminal's own background.
+    /// over the terminal's own background — unless the chrome's `canvas`
+    /// filled them.
     pub fn rgba(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.w * self.h * 4);
         for i in 0..self.color.len() {
@@ -1579,6 +1594,19 @@ pub enum LegendCorner {
     TopLeft,
 }
 
+/// The order of the crosshair readout's rows: trace order (the default), or
+/// by the value at the crosshair — a leaderboard, for a chart whose series
+/// are competitors on one scale. Only rows on the primary y axis are
+/// ranked: a series on a right-hand axis measures something else, so it
+/// trails the ranking in trace order rather than being sorted into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ReadoutOrder {
+    #[default]
+    Traces,
+    Descending,
+    Ascending,
+}
+
 /// One legend row: what it stands for (`id`: the trace index for trace rows,
 /// the entry index for host-declared rows), its label, swatch and colours,
 /// and whether that thing is currently drawn.
@@ -1712,6 +1740,50 @@ fn stroke(fb: &mut Framebuffer, a: (f64, f64), b: (f64, f64), r: f32, c: Rgb) {
         let y = a.1 + (b.1 - a.1) * t;
         fb.disc(x as f32, y as f32, 0.0, r, c);
     }
+}
+
+/// Stroke `a`–`b` as dashes: `pattern` is `(on, off)` in device pixels and
+/// `phase` how far into it the stroke already is. Returns the phase at `b`,
+/// so the next leg continues the pattern. With `clip`, each dash is clipped
+/// to the box, keeping the phase measured along the whole leg.
+#[allow(clippy::too_many_arguments)]
+fn stroke_dashed(
+    fb: &mut Framebuffer,
+    a: (f64, f64),
+    b: (f64, f64),
+    r: f32,
+    c: Rgb,
+    (on, off): (f64, f64),
+    mut phase: f64,
+    clip: Option<(f64, f64, f64, f64)>,
+) -> f64 {
+    let period = on + off;
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len == 0.0 {
+        return phase;
+    }
+    let at = |d: f64| (a.0 + dx * d / len, a.1 + dy * d / len);
+    let mut d = 0.0;
+    while d < len {
+        phase %= period;
+        let (drawing, left) = if phase < on { (true, on - phase) } else { (false, period - phase) };
+        let step = left.min(len - d);
+        if drawing {
+            let (p, q) = (at(d), at(d + step));
+            match clip {
+                Some(bx) => {
+                    if let Some((ca, cb)) = clip_segment(p, q, bx) {
+                        stroke(fb, ca, cb, r, c);
+                    }
+                }
+                None => stroke(fb, p, q, r, c),
+            }
+        }
+        d += step;
+        phase += step;
+    }
+    phase % period
 }
 
 /// Liang–Barsky clip of segment `a`–`b` to the box `(x0, y0, x1, y1)`;
@@ -2181,6 +2253,9 @@ pub enum Trace {
         width: f32,
         /// How the stroke gets between samples; see [`Interp`].
         interp: Interp,
+        /// `(on, off)` lengths in logical pixels for a dashed stroke; `None`
+        /// draws it solid. Set through [`Plot::set_line_dash`].
+        dash: Option<(f32, f32)>,
         /// Per-point uncertainty; see [`ErrBars`].
         err_x: Option<ErrBars>,
         err_y: Option<ErrBars>,
@@ -2441,6 +2516,49 @@ fn format_value(v: f64) -> String {
     } else {
         s
     }
+}
+
+/// Tick labels with an axis's unit appended, or as they were without one.
+fn with_unit(labels: Vec<String>, unit: Option<&str>) -> Vec<String> {
+    match unit {
+        Some(u) if !u.is_empty() => labels.into_iter().map(|l| format!("{l}{u}")).collect(),
+        _ => labels,
+    }
+}
+
+/// Lay out readout rows as `label  value` with every value starting in one
+/// column, so the eye scans the values straight down the box instead of
+/// finding each one after a label of a different length. Labels pad to the
+/// widest; values are left-aligned as written (a `0.02` beside a `150`
+/// starts at the same x — the readout is a list of readings, not a sum,
+/// so nothing lines the digits up). The font is fixed-advance, so spaces
+/// are the columns.
+fn align_readout_rows(rows: &[(String, String)]) -> Vec<String> {
+    let label_w = rows.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0);
+    rows.iter().map(|(label, value)| format!("{label:<label_w$}  {value}")).collect()
+}
+
+/// Group readout rows by y axis for [`Plot::readout_split_axes`]: primary
+/// first, then `y2`, then `y3`, each group keeping the order it arrived in.
+/// Returns the regrouped rows and the indexes of the rows that open a new
+/// group after the first — where a rule is drawn. One axis means no rule.
+fn split_readout_by_axis<T>(rows: Vec<(T, YAxis)>) -> (Vec<T>, Vec<usize>) {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut dividers = Vec::new();
+    let mut groups: [Vec<T>; RIGHT_AXES + 1] = Default::default();
+    for (row, axis) in rows {
+        groups[axis.right_index().map_or(0, |k| k + 1)].push(row);
+    }
+    for group in groups {
+        if group.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            dividers.push(out.len());
+        }
+        out.extend(group);
+    }
+    (out, dividers)
 }
 
 /// Half the drawn width of a bar, in data units: 40% of the smallest gap
@@ -3182,11 +3300,30 @@ pub struct Plot {
     pub title: Option<String>,
     /// What the numbers on the x axis mean, drawn under its tick labels.
     pub x_title: Option<String>,
+    /// What the crosshair readout calls the x coordinate in its header:
+    /// this, else the x title, else "x". For a host that labels the axis
+    /// outside the image and still wants the readout to name it.
+    pub readout_x_label: Option<String>,
+    /// Row order of the crosshair readout; see [`ReadoutOrder`].
+    pub readout_order: ReadoutOrder,
+    /// Split the crosshair readout by y axis: the primary-axis rows first,
+    /// then `y2`'s, then `y3`'s, with a rule between the groups — so a
+    /// reader sees which readings share a scale and which are something
+    /// else entirely. Off (the default), rows follow [`Self::readout_order`]
+    /// alone. A plot with one axis draws no rule either way.
+    pub readout_split_axes: bool,
     /// The primary y axis's title, rotated a quarter turn in the left margin
     /// (see [`draw_text_rot90`]). The right-hand axes take their identity
     /// from the colour their labels are tinted in instead: a second rotated
     /// column would cost more frame than a terminal has to give.
     pub y_title: Option<String>,
+    /// A unit appended to the x tick labels (`"%"`, `" ms"`).
+    pub x_unit: Option<String>,
+    /// A unit appended to the primary y tick labels and to the readout
+    /// values of the series on that axis.
+    pub y_unit: Option<String>,
+    /// The same for the right-hand axes (`y2`, `y3`).
+    pub r_units: [Option<String>; RIGHT_AXES],
     /// Explicit x extent, replacing what autoscale found. Unlike
     /// [`Self::x_window`] this only decides the *extent*: the camera's 2D
     /// zoom/pan still compose on top, so pinning a range leaves interactive
@@ -3246,7 +3383,13 @@ impl Default for Plot {
             x_categories: None,
             title: None,
             x_title: None,
+            readout_x_label: None,
+            readout_order: ReadoutOrder::default(),
+            readout_split_axes: false,
             y_title: None,
+            x_unit: None,
+            y_unit: None,
+            r_units: [None, None],
             x_range: None,
             y_range: None,
             x_log: false,
@@ -4233,6 +4376,27 @@ impl Plot {
         }
     }
 
+    /// Dash a line (or step) series: `Some((on, off))` strokes `on` logical
+    /// pixels, skips `off`, and repeats, the pattern running on across
+    /// vertices so a polyline dashes evenly; `None` makes it solid again.
+    /// Reference lines — a target, a benchmark, a threshold — read as
+    /// references rather than data when dashed. A pattern with a
+    /// non-positive or non-finite length is drawn solid.
+    pub fn set_line_dash(
+        &mut self,
+        id: TraceId,
+        dash: Option<(f32, f32)>,
+    ) -> Result<(), TraceError> {
+        self.resync_meta();
+        match self.traces.get_mut(id).ok_or(TraceError::UnknownTrace)? {
+            Trace::Line2d { dash: d, .. } => {
+                *d = dash;
+                Ok(())
+            }
+            _ => Err(TraceError::WrongKind),
+        }
+    }
+
     pub fn add_line2d(
         &mut self,
         xs: Vec<f32>,
@@ -4248,6 +4412,7 @@ impl Plot {
             color,
             width,
             interp: Interp::Linear,
+            dash: None,
             err_x: None,
             err_y: None,
             name,
@@ -4276,6 +4441,7 @@ impl Plot {
             color,
             width,
             interp,
+            dash: None,
             err_x: None,
             err_y: None,
             name,
@@ -4967,8 +5133,27 @@ impl Plot {
         }
     }
 
-    fn render_3d(&self, px_w: usize, px_h: usize, pan_scale: f64) -> Framebuffer {
+    /// The unit the readout appends to a value on `axis` ("" without one).
+    fn axis_unit(&self, axis: YAxis) -> &str {
+        match axis {
+            YAxis::Primary => self.y_unit.as_deref(),
+            YAxis::Y2 => self.r_units[0].as_deref(),
+            YAxis::Y3 => self.r_units[1].as_deref(),
+        }
+        .unwrap_or("")
+    }
+
+    /// A frame to draw into: transparent, or filled with the chrome's canvas.
+    fn new_frame(&self, px_w: usize, px_h: usize) -> Framebuffer {
         let mut fb = Framebuffer::new(px_w, px_h);
+        if let Some(c) = self.chrome.canvas {
+            fb.fill_canvas(c);
+        }
+        fb
+    }
+
+    fn render_3d(&self, px_w: usize, px_h: usize, pan_scale: f64) -> Framebuffer {
+        let mut fb = self.new_frame(px_w, px_h);
         let (pr, lo, hi) = self.projector(px_w, px_h, pan_scale);
 
         // Depth range for fog — visible geometry only, so a hidden trace's
@@ -5921,7 +6106,10 @@ impl Plot {
         let base_bottom = if hidden { 2 * pad } else { ch + tick_len + 2 * pad };
         let title_on = self.title.is_some() && 3 * (2 * pad + line) <= h;
         let xtitle_on = self.x_title.is_some() && 3 * (base_bottom + line) <= h;
-        let ytitle_on = self.y_title.is_some() && 3 * (4 * cw + tick_len + 2 * pad + line) <= w;
+        // A y title also has to fit along the axis it names: rotated text
+        // longer than the frame is high is dropped, not clipped.
+        let ytitle_on = self.y_title.as_deref().is_some_and(|t| text_width(t, s) + 2 * pad <= h)
+            && 3 * (4 * cw + tick_len + 2 * pad + line) <= w;
         let top =
             2 * pad + if title_on { line } else { 0 } + caption.as_ref().map_or(0, |_| ch + pad);
         let bottom = base_bottom + if xtitle_on { line } else { 0 };
@@ -5931,7 +6119,9 @@ impl Plot {
         let strip_on = self.range_slider && h >= STRIP_MIN_H * s;
         let strip_h = STRIP_H_S * s;
         let strip_reserve = if strip_on { strip_h + pad } else { 0 };
-        let ytitle_reserve = if ytitle_on { line } else { 0 };
+        // The title's line plus a pad of air before the tick labels start;
+        // with the bare line the two read as one column of glyphs.
+        let ytitle_reserve = if ytitle_on { line + pad } else { 0 };
         let mut left =
             if hidden { 2 * pad + ytitle_reserve } else { (8 * cw + ytitle_reserve).min(w / 3) };
         let mut right = 2 * pad;
@@ -6003,6 +6193,9 @@ impl Plot {
                 (xticks, xlabels) = (Vec::new(), Vec::new());
                 (yticks, ylabels) = (Vec::new(), Vec::new());
             }
+            // Units ride on the labels before the gutters are sized from them.
+            xlabels = with_unit(xlabels, self.x_unit.as_deref());
+            ylabels = with_unit(ylabels, self.y_unit.as_deref());
             let label_w = ylabels.iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
             left = if hidden {
                 2 * pad + ytitle_reserve
@@ -6022,6 +6215,7 @@ impl Plot {
                     maps_r[k] = Map2d::new((mxlo, mxhi, rlo, rhi), rect, cam, (logx, false));
                     let (vlo, vhi) = (maps_r[k].inv_y(y1 as f64), maps_r[k].inv_y(y0 as f64));
                     let (t, labels) = numeric_ticks(vlo, vhi, ty);
+                    let labels = with_unit(labels, self.r_units[k].as_deref());
                     (rticks[k], rlabels[k]) =
                         if hidden { (Vec::new(), Vec::new()) } else { (t, labels) };
                     let wk = rlabels[k].iter().map(|t| text_width(t, s)).max().unwrap_or(cw);
@@ -6105,7 +6299,7 @@ impl Plot {
     }
 
     fn render_2d(&self, px_w: usize, px_h: usize) -> Framebuffer {
-        let mut fb = Framebuffer::new(px_w, px_h);
+        let mut fb = self.new_frame(px_w, px_h);
         let w = fb.w as i32;
         let l = self.layout_2d(px_w, px_h);
         let (s, x0, y0, x1, y1) = (l.s, l.x0, l.y0, l.x1, l.y1);
@@ -6321,7 +6515,7 @@ impl Plot {
                         }
                     }
                 }
-                Trace::Line2d { xs, ys, color, width, interp, err_x, err_y, .. } => {
+                Trace::Line2d { xs, ys, color, width, interp, dash, err_x, err_y, .. } => {
                     for i in 0..xs.len().min(ys.len()) {
                         let (x, y) = (xs[i] as f64, ys[i] as f64);
                         if x.is_finite() && y.is_finite() {
@@ -6343,6 +6537,15 @@ impl Plot {
                         .collect();
                     let r = (width * s as f32 * 0.5).max(0.5);
                     let clip_box = pix_box(r as f64 + 1.0);
+                    // A dash pattern in device pixels, and how far into it the
+                    // stroke is: carried across legs and vertices so the
+                    // dashes run on evenly, restarted after a gap in the data.
+                    let pattern = dash
+                        .filter(|(on, off)| {
+                            on.is_finite() && off.is_finite() && *on > 0.0 && *off > 0.0
+                        })
+                        .map(|(on, off)| (on as f64 * s as f64, off as f64 * s as f64));
+                    let mut phase = 0.0f64;
                     for pair in pts.windows(2) {
                         if let [Some(a), Some(b)] = pair {
                             // A step expands one segment into the two or three
@@ -6350,15 +6553,33 @@ impl Plot {
                             // the single original segment.
                             let mut from = *a;
                             for leg in interp.corners(*a, *b).into_iter().flatten().chain([*b]) {
-                                if win {
-                                    if let Some((ca, cb)) = clip_segment(from, leg, clip_box) {
-                                        stroke(&mut fb, ca, cb, r, *color);
+                                match pattern {
+                                    Some(pat) => {
+                                        // clipping would shift the phase, so a
+                                        // dashed leg is walked whole and only
+                                        // its visible dashes are clipped
+                                        phase = stroke_dashed(
+                                            &mut fb,
+                                            from,
+                                            leg,
+                                            r,
+                                            *color,
+                                            pat,
+                                            phase,
+                                            win.then_some(clip_box),
+                                        );
                                     }
-                                } else {
-                                    stroke(&mut fb, from, leg, r, *color);
+                                    None if win => {
+                                        if let Some((ca, cb)) = clip_segment(from, leg, clip_box) {
+                                            stroke(&mut fb, ca, cb, r, *color);
+                                        }
+                                    }
+                                    None => stroke(&mut fb, from, leg, r, *color),
                                 }
                                 from = leg;
                             }
+                        } else {
+                            phase = 0.0;
                         }
                     }
                 }
@@ -6981,7 +7202,10 @@ impl Plot {
         }
         fb.rect_fill(px, y0, px, y1, 0.0, self.chrome.ink);
 
-        let mut rows: Vec<(String, Rgb)> = Vec::new();
+        // (label, value), colour, the value, and the trace's y axis (only
+        // primary rows rank, see `ReadoutOrder`; `readout_split_axes` groups
+        // on it)
+        let mut rows: Vec<((String, String), Rgb, f32, YAxis)> = Vec::new();
         // The marker y's actually on the frame, which is what the readout box
         // steers away from. A band contributes a row but no marker, so this
         // is not one entry per row.
@@ -7006,7 +7230,10 @@ impl Plot {
                     };
                     let (lo, hi) = b.edges(i);
                     let n = b.counts[i];
-                    (n as f32, format!("[{}, {})  {n}", format_value(lo), format_value(hi)))
+                    (
+                        n as f32,
+                        (format!("[{}, {})", format_value(lo), format_value(hi)), n.to_string()),
+                    )
                 }
                 _ => {
                     let (xs, vals) = match t {
@@ -7024,12 +7251,18 @@ impl Plot {
                                 .map_or_else(|| format!("series {}", ti + 1), str::to_owned);
                             let (a, b) = (a.min(b), a.max(b));
                             rows.push((
-                                format!(
-                                    "{name}  {}–{}",
-                                    format_value(a as f64),
-                                    format_value(b as f64)
+                                (
+                                    name,
+                                    format!(
+                                        "{}–{}{}",
+                                        format_value(a as f64),
+                                        format_value(b as f64),
+                                        self.axis_unit(t.axis())
+                                    ),
                                 ),
                                 t.color(),
+                                b,
+                                t.axis(),
                             ));
                             continue;
                         }
@@ -7049,7 +7282,7 @@ impl Plot {
                     let Some(i) = xs.iter().position(|&x| x == snap) else { continue };
                     let Some(&v) = vals.get(i) else { continue };
                     let name = t.name().map_or_else(|| format!("series {}", ti + 1), str::to_owned);
-                    (v, format!("{name}  {}", format_value(v as f64)))
+                    (v, (name, format!("{}{}", format_value(v as f64), self.axis_unit(t.axis()))))
                 }
             };
             if !value.is_finite() {
@@ -7061,23 +7294,52 @@ impl Plot {
                 fb.disc(px as f32, py as f32, 0.0, 1.7 * s as f32, t.color());
                 markers.push(py);
             }
-            rows.push((readout, t.color()));
+            rows.push((readout, t.color(), value, t.axis()));
         }
         if rows.is_empty() {
             return;
         }
+        // Trace order, or a leaderboard by the value at the crosshair —
+        // among the primary-axis rows; right-axis rows trail in trace order.
+        if self.readout_order != ReadoutOrder::Traces {
+            let (mut ranked, trailing): (Vec<_>, Vec<_>) =
+                rows.into_iter().partition(|r| r.3 == YAxis::Primary);
+            match self.readout_order {
+                ReadoutOrder::Descending => ranked.sort_by(|a, b| b.2.total_cmp(&a.2)),
+                _ => ranked.sort_by(|a, b| a.2.total_cmp(&b.2)),
+            }
+            ranked.extend(trailing);
+            rows = ranked;
+        }
+
+        // Grouped by axis with a rule between the groups, when asked.
+        let (rows, dividers) = if self.readout_split_axes {
+            split_readout_by_axis(rows.into_iter().map(|(r, c, _, a)| ((r, c), a)).collect())
+        } else {
+            (rows.into_iter().map(|(r, c, _, _)| (r, c)).collect(), Vec::new())
+        };
+        // One value column, left-aligned (`align_readout_rows`).
+        let lines = align_readout_rows(&rows.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>());
+        let rows: Vec<(String, Rgb)> =
+            lines.into_iter().zip(rows.iter().map(|(_, c)| *c)).collect();
 
         // The same rounded panel as the legend, so the two read as one family.
         let cw = CHAR_W * s;
         let ps = PanelStyle::new(s);
-        let header = format!("x  {}", self.format_x(snap as f64));
+        let x_name = self.readout_x_label.as_deref().or(self.x_title.as_deref()).unwrap_or("x");
+        let header = format!("{x_name}  {}", self.format_x(snap as f64));
         let text_w = rows
             .iter()
             .map(|(l, _)| ps.measure(l))
             .chain([ps.measure(&header)])
             .max()
             .unwrap_or(cw);
+        // A divider is half a row of extra air with the rule through its
+        // middle: enough to read as a break, not enough to look like a
+        // missing row.
+        let divider_h = ps.row_h / 2;
         let (box_w, box_h) = ps.box_size(rows.len() as i32 + 1, text_w);
+        let box_h = box_h + divider_h * dividers.len() as i32;
         // Beside the guide, away from the data, and off the legend and the
         // host's own overlays. The legend rect comes from the same call
         // `draw_legend` made a moment ago, so the box dodges what is actually
@@ -7103,8 +7365,25 @@ impl Plot {
         let row_y = |row_i: i32| by0 + ps.pad_y + row_i * ps.row_h;
         // The x value heads the box in dimmer ink; the series rows follow.
         ps.label(fb, bx0 + ps.text_dx(), row_y(0), &header, 0.0, self.chrome.ink, self.chrome.bg);
+        // Rows below a divider shift down by its height; the rule itself is
+        // drawn in the frame colour, inset like the text, centred in the air
+        // between the two rows it separates.
+        let mut shift = 0;
         for (i, (label, color)) in rows.iter().enumerate() {
-            let ey = row_y(i as i32 + 1);
+            if dividers.contains(&i) {
+                let air_top = row_y(i as i32) + CHAR_H * s + shift;
+                let ry = air_top + (ps.leading + divider_h) / 2;
+                shift += divider_h;
+                fb.rect_fill(
+                    bx0 + ps.pad_x,
+                    ry,
+                    bx1 - ps.pad_x,
+                    ry + s - 1,
+                    0.0,
+                    self.chrome.frame,
+                );
+            }
+            let ey = row_y(i as i32 + 1) + shift;
             ps.chip(fb, bx0, ey, s, 0.0, *color);
             let ink = self.chrome.ink_bright;
             ps.label(fb, bx0 + ps.text_dx(), ey, label, 0.0, ink, self.chrome.bg);
@@ -7609,6 +7888,47 @@ mod tests {
             Err(TraceError::WrongKind)
         );
         assert_eq!(plot.set_point_styles(99, None, None, None), Err(TraceError::UnknownTrace));
+    }
+
+    /// A dashed line lights its row in runs with gaps between, where the
+    /// same line solid is one unbroken run; the dash lengths scale with the
+    /// pixel scale like the stroke width; and only lines take a dash.
+    #[test]
+    fn a_dashed_line_breaks_into_runs() {
+        let runs = |dash: Option<(f32, f32)>| {
+            let mut plot = Plot::new();
+            let id = plot.add_line2d(
+                vec![0.0, 10.0],
+                vec![1.0, 1.0],
+                [220, 40, 40],
+                2.0,
+                None,
+                YAxis::Primary,
+            );
+            plot.set_line_dash(id, dash).unwrap();
+            let fb = plot.render(400, 200);
+            // the row the line lights most, as its lit/unlit runs
+            let row = (0..fb.h)
+                .max_by_key(|&y| {
+                    (0..fb.w).filter(|&x| px(&fb, x, y) == Some([220, 40, 40])).count()
+                })
+                .unwrap();
+            let lit: Vec<bool> =
+                (0..fb.w).map(|x| px(&fb, x, row) == Some([220, 40, 40])).collect();
+            let first = lit.iter().position(|&l| l).unwrap();
+            let last = lit.iter().rposition(|&l| l).unwrap();
+            lit[first..=last].windows(2).filter(|w| w[0] && !w[1]).count() + 1
+        };
+        assert_eq!(runs(None), 1, "solid is one unbroken run");
+        let dashed = runs(Some((6.0, 6.0)));
+        assert!(dashed > 10, "a 6/6 dash across the plot breaks into many runs, got {dashed}");
+        assert_eq!(runs(Some((0.0, 6.0))), 1, "a zero-length dash falls back to solid");
+
+        let mut plot = Plot::new();
+        let scatter =
+            plot.add_scatter2d(vec![0.0], vec![0.0], [0, 0, 0], 3.0, None, YAxis::Primary);
+        assert_eq!(plot.set_line_dash(scatter, Some((4.0, 4.0))), Err(TraceError::WrongKind));
+        assert_eq!(plot.set_line_dash(99, None), Err(TraceError::UnknownTrace));
     }
 
     /// The whole point of a step: it must pass through the corner, and the
@@ -9227,6 +9547,98 @@ mod tests {
         named.hover2d_px = Some(150.0);
         anonymous.hover2d_px = Some(150.0);
         assert_ne!(named.render(300, 200).rgba(), anonymous.render(300, 200).rgba());
+    }
+
+    #[test]
+    fn readout_rows_share_one_left_aligned_value_column() {
+        let rows = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs.iter().map(|(l, v)| (l.to_string(), v.to_string())).collect()
+        };
+        assert_eq!(
+            align_readout_rows(&rows(&[
+                ("OpenEvolve", "0.0267"),
+                ("AdaEvolve", "0.029"),
+                ("best so far", "0.000322"),
+            ])),
+            vec![
+                "OpenEvolve   0.0267".to_string(),
+                "AdaEvolve    0.029".to_string(),
+                "best so far  0.000322".to_string(),
+            ]
+        );
+        // mixed magnitudes still start in the same column: the values are
+        // readings, not a column of figures to add up
+        assert_eq!(
+            align_readout_rows(&rows(&[("a", "12.3"), ("b", "0.05"), ("c", "150")])),
+            vec!["a  12.3".to_string(), "b  0.05".to_string(), "c  150".to_string()]
+        );
+        // a band and a histogram row keep their own shapes in the column
+        assert_eq!(
+            align_readout_rows(&rows(&[("band", "0.1–0.5"), ("[0, 2)", "27")])),
+            vec!["band    0.1–0.5".to_string(), "[0, 2)  27".to_string()]
+        );
+    }
+
+    /// Splitting by axis regroups primary → y2 → y3, keeps each group's
+    /// order, and marks where each later group begins; one axis means no
+    /// divider at all.
+    #[test]
+    fn readout_split_groups_rows_by_axis_in_arrival_order() {
+        let (rows, dividers) = split_readout_by_axis(vec![
+            ("tokens", YAxis::Y2),
+            ("score", YAxis::Primary),
+            ("cpu", YAxis::Y3),
+            ("attempt", YAxis::Primary),
+            ("wall", YAxis::Y3),
+        ]);
+        assert_eq!(rows, vec!["score", "attempt", "tokens", "cpu", "wall"]);
+        assert_eq!(dividers, vec![2, 3]);
+        // an empty middle axis is skipped, not marked
+        let (rows, dividers) =
+            split_readout_by_axis(vec![("cpu", YAxis::Y3), ("score", YAxis::Primary)]);
+        assert_eq!(rows, vec!["score", "cpu"]);
+        assert_eq!(dividers, vec![1]);
+        let (rows, dividers) =
+            split_readout_by_axis(vec![("a", YAxis::Primary), ("b", YAxis::Primary)]);
+        assert_eq!(rows, vec!["a", "b"]);
+        assert!(dividers.is_empty());
+    }
+
+    /// The split is a visible change with two axes on screen, and none on a
+    /// plot whose series all share the primary axis.
+    #[test]
+    fn readout_split_axes_draws_a_rule_only_between_axes() {
+        let build = |two_axes: bool| {
+            let mut plot = Plot::new();
+            let xs = vec![0.0, 1.0, 2.0];
+            plot.add_line2d(
+                xs.clone(),
+                vec![0.0, 1.0, 2.0],
+                [230, 60, 120],
+                1.0,
+                Some("score".into()),
+                YAxis::Primary,
+            );
+            let axis = if two_axes { YAxis::Y2 } else { YAxis::Primary };
+            plot.add_line2d(
+                xs,
+                vec![10.0, 20.0, 30.0],
+                [60, 200, 120],
+                1.0,
+                Some("tokens".into()),
+                axis,
+            );
+            plot.hover2d_px = Some(150.0);
+            plot
+        };
+        let plain = build(true);
+        let mut split = build(true);
+        split.readout_split_axes = true;
+        assert_ne!(plain.render(300, 200).rgba(), split.render(300, 200).rgba());
+        let plain = build(false);
+        let mut split = build(false);
+        split.readout_split_axes = true;
+        assert_eq!(plain.render(300, 200).rgba(), split.render(300, 200).rgba());
     }
 
     #[test]

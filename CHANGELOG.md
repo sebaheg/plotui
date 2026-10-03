@@ -3,9 +3,45 @@
 Notable changes per release. Versions before 0.5.0 predate this file; their
 history is in the git log and the GitHub releases.
 
-## 0.6.0 — 2026-09-19
+## 0.6.0 — 2026-10-03
 
 ### Added
+
+**Dashed lines.** `add_line(..., dash=(on, off))` and `add_step(...,
+dash=...)` stroke a series in dashes — `on` pixels drawn, `off` skipped,
+the pattern running on across vertices so a polyline dashes evenly — and
+`set_line_dash(trace, dash)` changes it later (`None` for solid). Reference
+lines such as a target or a benchmark read as references, not data.
+
+**Axis units.** `set_axis_unit(axis, unit)` appends a unit to an axis's
+tick labels (`"y2"`, `"M"` for data in millions) and, on a y axis, to the
+readout values of the series on it — so `2.2e7` reads as `22M` in both
+places.
+
+**The readout as a leaderboard.** `set_readout_order("descending" |
+"ascending")` sorts the crosshair readout's rows by the value at the
+crosshair, so hovering a chart whose series compete on one scale reads as a
+ranking; `"traces"` (the default) keeps trace order. Only primary-axis rows
+are ranked — a series on a right-hand axis measures something else and
+trails them in trace order.
+
+**The readout split by axis.** `set_readout_split_axes(True)` groups the
+crosshair readout's rows by y axis — the primary axis's rows, then `y2`'s,
+then `y3`'s — with a rule between the groups, so a reader sees which
+readings share a scale and which are something else entirely. A plot with
+one axis draws no rule either way.
+
+**The readout names its x coordinate.** The crosshair readout's header
+says the x title instead of "x" when one is set, and
+`set_readout_x_label(text)` names it without drawing an axis title — for a
+host that labels the axis outside the image.
+
+**An opaque canvas.** `set_chrome(canvas=(r, g, b))` (C: `plotui_set_canvas`)
+paints the whole image in one colour instead of leaving the background
+transparent. The default still floats the plot over the terminal's own
+background; a host that paints a surface of its own around the plot sets the
+canvas to the same colour, so the two match on terminals that composite
+images over the window rather than over the cells (iTerm2).
 
 **The legend row under the pointer is lit.** `Plot.legend_hover` /
 `set_legend_hover(px_w, px_h, px, py)` (and `legend_row_at`) light the
@@ -43,7 +79,33 @@ frames now use the image id as their placement id too (`p=<image id>`
 instead of `p=1`): iTerm2 keys placements by `p=` alone, so two images
 placed as `p=1` replaced each other.
 
+**Labels and borders on 3D graph nodes, and a star.** `set_graph_labels`
+draws a string inside each mark — centred, at the frame's text scale, in an
+ink that contrasts with the fill (or one colour for all) — steps the text
+down to the largest scale the mark can hold, and skips any label that fits
+at none, so a dense graph grows its numbers as the host zooms in. `set_graph_borders` strokes an outline ring around each node, a
+second category next to the fill. `"star"` joins the node shapes, and
+`mark_scale(px_w)` exposes the factor radii are drawn at so a host can size
+marks to a pixel budget (nodes that never overlap at the current zoom).
+Rust, Python.
+
+**`legend_visible`.** A plot can name its traces without drawing the
+in-canvas legend box, so a host that draws its own legend still gets series
+names in the crosshair readout instead of `series 3`.
+
+**Draggable nodes.** A drag that starts on a 2D graph node's box moves the
+node, its edges following, and the rest of the graph stays still. On by
+default in every frontend: Textual posts `NodeMoved(index, x, y)`, Ratatui
+returns `PlotEvent::NodeMoved`, Bubble Tea sends `NodeMovedMsg`, and the
+primitive behind them, `Plot::drag_node(px_w, px_h, index, dx_px, dy_px)`,
+is on every binding.
+
 ### Changed
+
+**The crosshair readout lines its values up.** The rows of the hover
+readout box put every value in one left-aligned column, so the eye scans
+the values straight down the box instead of finding each number after a
+label of a different length.
 
 **Graphs are laid out in text columns.** A `LayeredLayout` now places nodes
 in layout units — one unit is one text column — and takes the `labels` (or
@@ -79,28 +141,11 @@ basin costs nothing instead of a full re-rasterize, upload and decode.
 `Plot.hover2d_snap_px` exposes the same query. The readout keeps three
 significant digits below 1 (`0.0156`, not `0.02`).
 
-### Added
+### Fixed
 
-**Labels and borders on 3D graph nodes, and a star.** `set_graph_labels`
-draws a string inside each mark — centred, at the frame's text scale, in an
-ink that contrasts with the fill (or one colour for all) — steps the text
-down to the largest scale the mark can hold, and skips any label that fits
-at none, so a dense graph grows its numbers as the host zooms in. `set_graph_borders` strokes an outline ring around each node, a
-second category next to the fill. `"star"` joins the node shapes, and
-`mark_scale(px_w)` exposes the factor radii are drawn at so a host can size
-marks to a pixel budget (nodes that never overlap at the current zoom).
-Rust, Python.
-
-**`legend_visible`.** A plot can name its traces without drawing the
-in-canvas legend box, so a host that draws its own legend still gets series
-names in the crosshair readout instead of `series 3`.
-
-**Draggable nodes.** A drag that starts on a 2D graph node's box moves the
-node, its edges following, and the rest of the graph stays still. On by
-default in every frontend: Textual posts `NodeMoved(index, x, y)`, Ratatui
-returns `PlotEvent::NodeMoved`, Bubble Tea sends `NodeMovedMsg`, and the
-primitive behind them, `Plot::drag_node(px_w, px_h, index, dx_px, dy_px)`,
-is on every binding.
+**A y title longer than the frame no longer panics.** Rotated text that
+would not fit along the axis is dropped on that frame size instead of
+tripping a clamp; a taller frame draws it.
 
 ## 0.5.1 — 2026-09-28
 

@@ -392,6 +392,20 @@ Series match by exact sample x — series on a shared grid all get a row, while
 series on their own grids only show where they truly have a sample. Nothing
 is interpolated silently.
 
+The readout box is tunable: `set_readout_x_label("candidate")` names the x
+coordinate in its header without drawing an axis title, `set_readout_order
+("descending")` (or `"ascending"`) ranks the primary-axis rows by their value
+at the crosshair — a leaderboard for series that compete on one scale —
+and `set_readout_split_axes(True)` groups the rows by y axis with a rule
+between the groups, so a chart with a right-hand axis shows which readings
+share a scale. Values sit in one left-aligned column.
+
+```python
+plot.set_readout_x_label("candidate")
+plot.set_readout_order("descending")
+plot.set_readout_split_axes(True)
+```
+
 ## Range slider
 
 `plot.set_range_slider(True)` adds a Plotly-style range slider: a full-extent

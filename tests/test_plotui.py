@@ -337,6 +337,114 @@ def test_set_chrome_recolours_the_grid():
     assert not has_color(b, (45, 50, 66), 160, 100)
 
 
+def test_a_y_title_longer_than_the_frame_is_dropped_not_a_panic():
+    """A rotated y title that would not fit along the axis is left out on
+    that frame size; a taller frame draws it."""
+    def build():
+        p = Plot()
+        p.add_line([0.0, 1.0, 2.0], [0.0, 10.0, 20.0], name="a", color=(255, 255, 255))
+        return p
+
+    long = "normalized-min-triangle-area (higher is better)"
+    short = build().render_rgba(400, 120)
+    titled = build()
+    titled.set_y_title(long)
+    assert titled.render_rgba(400, 120) == short  # dropped: nothing changed
+    fits = build()
+    fits.set_y_title("score (higher is better)")
+    assert fits.render_rgba(400, 400) != build().render_rgba(400, 400)  # drawn
+
+
+def test_axis_units_ride_on_tick_labels_and_readout_values():
+    """`set_axis_unit` appends a unit to an axis's tick labels (and to the
+    readout values of the series on a y axis); clearing it restores the
+    plain labels, and an unknown axis is refused."""
+    def build():
+        p = Plot()
+        p.add_line([0.0, 1.0, 2.0], [0.0, 10.0, 20.0], name="a", color=(255, 255, 255))
+        p.add_line([0.0, 1.0, 2.0], [1.0, 2.0, 3.0], name="b", color=(255, 0, 0), axis="y2")
+        return p
+
+    plain = build().render_rgba(320, 200)
+    unit = build()
+    assert unit.set_axis_unit("y2", "M") is True
+    assert unit.set_axis_unit("y2", "M") is False
+    assert unit.axis_unit("y2") == "M"
+    assert unit.render_rgba(320, 200) != plain, "the y2 tick labels changed"
+    assert unit.set_axis_unit("y2", None) is True
+    assert unit.render_rgba(320, 200) == plain
+    with pytest.raises(ValueError):
+        unit.set_axis_unit("z", "M")
+    hovered = build()
+    hovered.set_axis_unit("y2", "M")
+    hovered.set_hover2d(160.0)
+    bare = build()
+    bare.set_hover2d(160.0)
+    assert hovered.render_rgba(320, 200) != bare.render_rgba(320, 200), "the readout value changed"
+
+
+def test_readout_order_is_a_named_setting():
+    """Trace order by default; a chart whose series compete on one scale
+    turns on a leaderboard order. Unknown names are refused."""
+    plot = Plot()
+    assert plot.readout_order() == "traces"
+    assert plot.set_readout_order("descending") is True
+    assert plot.set_readout_order("descending") is False
+    assert plot.readout_order() == "descending"
+    assert plot.set_readout_order("ascending") is True
+    with pytest.raises(ValueError):
+        plot.set_readout_order("best-first")
+    # ordering changes what the hover box draws
+    for order in ("traces", "descending"):
+        p = Plot()
+        p.add_line([0.0, 1.0, 2.0], [0.1, 0.1, 0.1], name="low", color=(255, 0, 0))
+        p.add_line([0.0, 1.0, 2.0], [0.9, 0.9, 0.9], name="high", color=(0, 0, 255))
+        p.set_readout_order(order)
+        p.set_hover2d(150.0)
+        globals()[f"_readout_{order}"] = p.render_rgba(300, 200)
+    assert globals()["_readout_traces"] != globals()["_readout_descending"]
+
+
+def test_readout_split_axes_is_a_named_setting_that_draws_a_rule():
+    """`set_readout_split_axes` groups the readout's rows by y axis with a
+    rule between the groups: a visible change on a two-axis plot, none on a
+    plot whose series all share the primary axis."""
+    def build(two_axes):
+        p = Plot()
+        p.add_line([0.0, 1.0, 2.0], [0.0, 1.0, 2.0], name="score", color=(255, 80, 80))
+        p.add_line([0.0, 1.0, 2.0], [10.0, 20.0, 30.0], name="tokens",
+                   color=(80, 255, 80), axis="y2" if two_axes else "y")
+        p.set_hover2d(150.0)
+        return p
+
+    plot = build(True)
+    assert plot.readout_split_axes() is False
+    assert plot.set_readout_split_axes(True) is True
+    assert plot.set_readout_split_axes(True) is False
+    assert plot.readout_split_axes() is True
+    assert plot.render_rgba(300, 200) != build(True).render_rgba(300, 200)
+    one_axis = build(False)
+    one_axis.set_readout_split_axes(True)
+    assert one_axis.render_rgba(300, 200) == build(False).render_rgba(300, 200)
+
+
+def test_set_chrome_canvas_paints_the_background_opaque():
+    """By default the background is transparent so the plot floats on the
+    terminal's own background; `canvas` fills it opaque in one colour, so a
+    host can match it to the surface it paints around the plot."""
+    floating = Plot()
+    floating.add_line([0.0, 1.0, 2.0], [0.0, 1.0, 0.5], color=(255, 255, 255))
+    corner = floating.render_rgba(160, 100)[:4]
+    assert corner[3] == 0
+    painted = Plot()
+    painted.add_line([0.0, 1.0, 2.0], [0.0, 1.0, 0.5], color=(255, 255, 255))
+    painted.set_chrome(canvas=(14, 17, 19))
+    rgba = painted.render_rgba(160, 100)
+    assert tuple(rgba[:4]) == (14, 17, 19, 255)
+    assert all(rgba[i] == 255 for i in range(3, len(rgba), 4))  # nothing transparent
+    assert has_color(painted, (255, 255, 255), 160, 100)  # the data still draws on top
+
+
 def test_axis_y2_y3_accepted_and_change_render():
     """Right-hand axes change the frame: a rule and a tick-label gutter appear
     on the right, and each additional axis widens it."""
@@ -1333,3 +1441,23 @@ def test_host_legend_entries_round_trip_and_hit_by_row():
         plot.set_legend_corner("bottom-left")
     plot.set_legend_entries([])
     assert plot.legend_entries() == [] and plot.legend_entry_hit(400, 300, 40.0, 12.0) is None
+
+
+def test_dash_draws_fewer_pixels_and_undashes():
+    """`dash=(on, off)` leaves gaps along the stroke; `set_line_dash(t, None)`
+    brings the solid line back; other traces refuse a dash."""
+    def lit(dash=None, step=False):
+        plot = Plot()
+        add = plot.add_step if step else plot.add_line
+        trace = add([0, 10], [1, 1], color=(220, 40, 40), dash=dash)
+        return plot, trace, sum(1 for px in pixels(plot.render_rgba(400, 200)) if px[:3] == bytes((220, 40, 40)))
+
+    _, _, solid = lit()
+    plot, trace, dashed = lit(dash=(6, 6))
+    assert 0 < dashed < solid * 0.8, (dashed, solid)
+    assert lit(dash=(6, 6), step=True)[2] < solid * 0.8
+    plot.set_line_dash(trace, None)
+    assert sum(1 for px in pixels(plot.render_rgba(400, 200)) if px[:3] == bytes((220, 40, 40))) == solid
+    scatter = plot.add_scatter([0], [0])
+    with pytest.raises(ValueError):
+        plot.set_line_dash(scatter, (4, 4))

@@ -2553,6 +2553,19 @@ pub unsafe extern "C" fn plotui_set_show_axes(p: *mut PlotuiPlot, show: i32) {
 
 /// Recolour the non-data chrome; each pointer is NULL (keep) or 3 RGB bytes.
 ///
+/// Paint the whole image opaque in `canvas` (3 bytes) instead of leaving
+/// the background transparent; a null pointer restores the transparent
+/// canvas.
+///
+/// # Safety
+/// `p` must be a live plot handle; `canvas` null or 3 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn plotui_set_canvas(p: *mut PlotuiPlot, canvas: *const u8) {
+    if let Ok(p) = plot_mut(p) {
+        p.plot.chrome.canvas = opt_rgb(canvas);
+    }
+}
+
 /// # Safety
 /// `p` must be a live plot handle.
 #[no_mangle]

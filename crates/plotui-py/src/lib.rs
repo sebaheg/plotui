@@ -220,6 +220,22 @@ fn parse_axis(axis: &str) -> PyResult<YAxis> {
     plotui_bind::parse_axis(axis).map_err(to_py)
 }
 
+impl Plot {
+    fn unit_slot(&mut self, axis: &str) -> PyResult<&mut Option<String>> {
+        Ok(match axis {
+            "x" => &mut self.inner.x_unit,
+            "y" => &mut self.inner.y_unit,
+            "y2" => &mut self.inner.r_units[0],
+            "y3" => &mut self.inner.r_units[1],
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "axis must be x, y, y2 or y3, not {other:?}"
+                )))
+            }
+        })
+    }
+}
+
 /// A plot element from Python: either a bare node index (the original API) or
 /// a `("node" | "edge", index)` tuple.
 #[derive(FromPyObject)]
@@ -492,7 +508,10 @@ impl Plot {
 
     /// Add a 2D line series (2px stroke by default). `axis="y2"`/`"y3"` puts
     /// it on an independent right-hand axis, as in `add_scatter`.
-    #[pyo3(signature = (xs, ys, color=None, width=2.0, name=None, axis="y"))]
+    /// `dash=(on, off)` strokes it dashed — `on` pixels drawn, `off` skipped
+    /// — the way a reference line (a target, a benchmark) usually reads.
+    #[pyo3(signature = (xs, ys, color=None, width=2.0, name=None, axis="y", dash=None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_line(
         &mut self,
         xs: XCoords,
@@ -501,10 +520,15 @@ impl Plot {
         width: f32,
         name: Option<String>,
         axis: &str,
+        dash: Option<(f32, f32)>,
     ) -> PyResult<usize> {
         let c = resolve_color(&self.inner, color)?;
         let xs = resolve_x(&mut self.inner, xs)?;
-        Ok(self.inner.add_line2d(xs, ys.0, c, width, name, parse_axis(axis)?))
+        let id = self.inner.add_line2d(xs, ys.0, c, width, name, parse_axis(axis)?);
+        if dash.is_some() {
+            self.inner.set_line_dash(id, dash).map_err(trace_to_py)?;
+        }
+        Ok(id)
     }
 
     /// Add a box plot: `groups` is a list of samples, one per box. Group *i*
@@ -645,8 +669,8 @@ impl Plot {
     /// would draw a transition that never happened. `where_` is "post" (the
     /// old value holds until the next sample, the default), "pre" (the new
     /// value applies from the previous one), or "mid" (the riser sits halfway
-    /// between).
-    #[pyo3(signature = (xs, ys, color=None, width=2.0, where_="post", name=None, axis="y"))]
+    /// between). `dash=(on, off)` strokes it dashed, as in `add_line`.
+    #[pyo3(signature = (xs, ys, color=None, width=2.0, where_="post", name=None, axis="y", dash=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_step(
         &mut self,
@@ -657,11 +681,24 @@ impl Plot {
         where_: &str,
         name: Option<String>,
         axis: &str,
+        dash: Option<(f32, f32)>,
     ) -> PyResult<usize> {
         let c = resolve_color(&self.inner, color)?;
         let interp = plotui_bind::parse_interp(where_).map_err(to_py)?;
         let xs = resolve_x(&mut self.inner, xs)?;
-        Ok(self.inner.add_step2d(xs, ys.0, c, width, interp, name, parse_axis(axis)?))
+        let id = self.inner.add_step2d(xs, ys.0, c, width, interp, name, parse_axis(axis)?);
+        if dash.is_some() {
+            self.inner.set_line_dash(id, dash).map_err(trace_to_py)?;
+        }
+        Ok(id)
+    }
+
+    /// Dash a line or step series after the fact: `(on, off)` in pixels, or
+    /// `None` to draw it solid again. Raises ValueError for another kind of
+    /// trace.
+    #[pyo3(signature = (trace, dash))]
+    fn set_line_dash(&mut self, trace: usize, dash: Option<(f32, f32)>) -> PyResult<()> {
+        self.inner.set_line_dash(trace, dash).map_err(trace_to_py)
     }
 
     /// Add a 2D bar series: bars at `xs` rising (or falling) from zero to
@@ -1119,6 +1156,94 @@ impl Plot {
         plotui_bind::set_title(&mut self.inner, "x", text).map_err(to_py)
     }
 
+    /// Name the x coordinate in the crosshair readout's header without
+    /// drawing an axis title: `None` falls back to the x title, then "x".
+    /// Returns True when the state changed.
+    #[pyo3(signature = (text))]
+    fn set_readout_x_label(&mut self, text: Option<String>) -> bool {
+        let text = text.filter(|t| !t.is_empty());
+        if self.inner.readout_x_label == text {
+            return false;
+        }
+        self.inner.readout_x_label = text;
+        true
+    }
+
+    /// The readout's x label, or `None`.
+    fn readout_x_label(&self) -> Option<String> {
+        self.inner.readout_x_label.clone()
+    }
+
+    /// Append `unit` to an axis's tick labels — and, for a y axis, to the
+    /// readout values of the series on it: `set_axis_unit("y2", "M")` with
+    /// the data already in millions. `axis` is `"x"`, `"y"`, `"y2"` or
+    /// `"y3"`; `None` (or `""`) clears. Returns True when the state changed.
+    #[pyo3(signature = (axis, unit))]
+    fn set_axis_unit(&mut self, axis: &str, unit: Option<String>) -> PyResult<bool> {
+        let unit = unit.filter(|u| !u.is_empty());
+        let slot = self.unit_slot(axis)?;
+        if *slot == unit {
+            return Ok(false);
+        }
+        *slot = unit;
+        Ok(true)
+    }
+
+    /// The unit on `axis`, or `None`.
+    fn axis_unit(&mut self, axis: &str) -> PyResult<Option<String>> {
+        Ok(self.unit_slot(axis)?.clone())
+    }
+
+    /// Order the crosshair readout's rows: `"traces"` (default, trace
+    /// order), `"descending"` or `"ascending"` by the value at the
+    /// crosshair — a leaderboard for series that compete on one scale. Only
+    /// primary-axis rows are ranked; a series on a right-hand axis (`y2`,
+    /// `y3`) measures something else and trails them in trace order.
+    /// Returns True when the state changed.
+    fn set_readout_order(&mut self, order: &str) -> PyResult<bool> {
+        let order = match order {
+            "traces" => plotui_core::ReadoutOrder::Traces,
+            "descending" => plotui_core::ReadoutOrder::Descending,
+            "ascending" => plotui_core::ReadoutOrder::Ascending,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "order must be traces, descending or ascending, not {other:?}"
+                )))
+            }
+        };
+        if self.inner.readout_order == order {
+            return Ok(false);
+        }
+        self.inner.readout_order = order;
+        Ok(true)
+    }
+
+    /// The readout's row order: `"traces"`, `"descending"` or `"ascending"`.
+    fn readout_order(&self) -> &'static str {
+        match self.inner.readout_order {
+            plotui_core::ReadoutOrder::Traces => "traces",
+            plotui_core::ReadoutOrder::Descending => "descending",
+            plotui_core::ReadoutOrder::Ascending => "ascending",
+        }
+    }
+
+    /// Split the crosshair readout by y axis: primary-axis rows first, then
+    /// `y2`'s, then `y3`'s, with a rule between the groups, so the reader
+    /// sees which values share a scale. Off by default; a plot with one
+    /// axis draws no rule either way. Returns True when the state changed.
+    fn set_readout_split_axes(&mut self, on: bool) -> bool {
+        if self.inner.readout_split_axes == on {
+            return false;
+        }
+        self.inner.readout_split_axes = on;
+        true
+    }
+
+    /// Whether the readout is split by y axis.
+    fn readout_split_axes(&self) -> bool {
+        self.inner.readout_split_axes
+    }
+
     /// The x axis title, or `None`.
     fn x_title(&self) -> Option<String> {
         self.inner.x_title.clone()
@@ -1414,8 +1539,11 @@ impl Plot {
     /// host's own background. Each is an `(r, g, b)` tuple; omitted ones keep
     /// their current value. `bg` fills the legend box, `frame` draws the
     /// axes, tick marks and legend border, `grid` the grid lines, `ink` the
-    /// tick labels, `ink_bright` the legend text.
-    #[pyo3(signature = (bg=None, frame=None, grid=None, ink=None, ink_bright=None))]
+    /// tick labels, `ink_bright` the legend text. `canvas` paints the whole
+    /// image opaque in that colour instead of leaving the background
+    /// transparent — for a host that surrounds the plot with a surface of
+    /// its own and wants the two to match on every terminal.
+    #[pyo3(signature = (bg=None, frame=None, grid=None, ink=None, ink_bright=None, canvas=None))]
     fn set_chrome(
         &mut self,
         bg: Option<(u8, u8, u8)>,
@@ -1423,10 +1551,14 @@ impl Plot {
         grid: Option<(u8, u8, u8)>,
         ink: Option<(u8, u8, u8)>,
         ink_bright: Option<(u8, u8, u8)>,
+        canvas: Option<(u8, u8, u8)>,
     ) {
         let c = &mut self.inner.chrome;
         if let Some(v) = bg {
             c.bg = [v.0, v.1, v.2];
+        }
+        if let Some(v) = canvas {
+            c.canvas = Some([v.0, v.1, v.2]);
         }
         if let Some(v) = frame {
             c.frame = [v.0, v.1, v.2];

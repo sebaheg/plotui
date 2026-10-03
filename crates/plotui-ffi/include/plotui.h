@@ -1024,6 +1024,16 @@ void plotui_set_show_axes(struct PlotuiPlot *p, int32_t show);
 /**
  * Recolour the non-data chrome; each pointer is NULL (keep) or 3 RGB bytes.
  *
+ * Paint the whole image opaque in `canvas` (3 bytes) instead of leaving
+ * the background transparent; a null pointer restores the transparent
+ * canvas.
+ *
+ * # Safety
+ * `p` must be a live plot handle; `canvas` null or 3 readable bytes.
+ */
+void plotui_set_canvas(struct PlotuiPlot *p, const uint8_t *canvas);
+
+/**
  * # Safety
  * `p` must be a live plot handle.
  */
