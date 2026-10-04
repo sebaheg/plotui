@@ -9,8 +9,6 @@
 Plotly-style 2D and 3D charts drawn as real pixels by a Rust engine, from the
 command line or inside Textual, Ratatui and Bubble Tea apps.
 
-<img alt="A 3D scatter plot of three clusters in a terminal window, drawn by plotui" src="https://raw.githubusercontent.com/sebaheg/plotui/main/.github/assets/plotui-demo.png" width="560">
-
 [Website](https://plotui.xyz) ·
 [Docs](https://docs.plotui.xyz/docs) ·
 [Quickstart](https://docs.plotui.xyz/docs/quickstart) ·
@@ -123,8 +121,4 @@ python examples/textual_demo.py
 
 ## License
 
-MIT. Chart text is set in [Martian Mono](https://github.com/evilmartians/mono)
-(Copyright 2020 The Martian Mono Project Authors), compiled into `plotui-core`
-and used under the SIL Open Font License 1.1, whose text ships in
-`crates/plotui-core/fonts/MartianMono-OFL.txt`. The OFL covers the font data,
-not your code.
+[MIT](https://github.com/sebaheg/plotui/blob/main/LICENSE)
